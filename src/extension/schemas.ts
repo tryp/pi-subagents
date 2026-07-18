@@ -101,7 +101,7 @@ const TaskItem = Type.Object({
 	outputMode: Type.Optional(OutputModeOverride),
 	reads: Type.Optional(ReadsOverride),
 	progress: Type.Optional(Type.Boolean({ description: "Enable progress.md tracking for this task" })),
-	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'google/gemini-3-pro')" })),
+	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'openai-codex/gpt-5.6-luna'). Bare names auto-resolve across providers. Omit to inherit parent session model." })),
 	skill: Type.Optional(SkillOverride),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
@@ -122,7 +122,7 @@ export const ParallelTaskSchema = Type.Object({
 	reads: Type.Optional(ReadsOverride),
 	progress: Type.Optional(Type.Boolean({ description: "Enable progress.md tracking in {chain_dir}" })),
 	skill: Type.Optional(SkillOverride),
-	model: Type.Optional(Type.String({ description: "Override model for this task" })),
+	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'openai-codex/gpt-5.6-luna'). Bare names auto-resolve." })),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
 });
@@ -150,7 +150,7 @@ export const DynamicParallelTemplateSchema = Type.Object({
 	reads: Type.Optional(ReadsOverride),
 	progress: Type.Optional(Type.Boolean({ description: "Enable progress.md tracking in {chain_dir}" })),
 	skill: Type.Optional(SkillOverride),
-	model: Type.Optional(Type.String({ description: "Override model for this task" })),
+	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'opencode-go/gpt-5-mini'). Bare names auto-resolve." })),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
 }, { additionalProperties: false });
@@ -176,7 +176,7 @@ export const ChainItem = Type.Object({
 	reads: Type.Optional(ReadsOverride),
 	progress: Type.Optional(Type.Boolean({ description: "Enable progress.md tracking in {chain_dir}" })),
 	skill: Type.Optional(SkillOverride),
-	model: Type.Optional(Type.String({ description: "Override model for this step" })),
+	model: Type.Optional(Type.String({ description: "Override model for this step (e.g. 'opencode-go/gpt-5-mini'). Bare names auto-resolve across providers." })),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
 	parallel: Type.Optional(Type.Unsafe({
@@ -291,7 +291,7 @@ const SubagentParamsSchema = Type.Object({
 	})),
 	outputMode: Type.Optional(OutputModeOverride),
 	skill: Type.Optional(SkillOverride),
-	model: Type.Optional(Type.String({ description: "Override model for single agent (e.g. 'anthropic/claude-sonnet-4')" })),
+	model: Type.Optional(Type.String({ description: "Override model (e.g. 'openai-codex/gpt-5.6-luna'). Bare names auto-resolve across providers. Omit to inherit parent session model. Use list/models actions to discover." })),
 	acceptance: Type.Optional(AcceptanceOverride),
 });
 

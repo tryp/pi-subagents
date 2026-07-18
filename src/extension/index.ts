@@ -450,26 +450,11 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	pi.registerTool(tool);
 
-	// Inject guidance about the model parameter into the subagent tool description.
-	// Agents can discover available models via subagent({action: "models"}) or
-	// subagent({action: "list"}). Use model: "provider/model-id" to route subagents
-	// to specific models (e.g. a cheaper model for routine tasks, a smarter model
-	// when stuck). Bare model names auto-resolve to the correct provider.
+	// Minimal model guidance — list/models actions do the heavy lifting.
 	pi.registerToolPromptGuidelines("subagent", [
-		"To route a subagent to a specific model, add the model parameter:",
-		'  { agent: "delegate", task: "...", model: "openai-codex/gpt-5.6-luna" }',
-		"",
-		"Available models and per-agent model resolution:",
-		'  subagent({action: "models"})        -- show effective model per builtin agent',
-		'  subagent({action: "models", agent: "delegate"}) -- show a single agent\'s model',
-		'  subagent({action: "list"})          -- list all agents and available models',
-		"",
-		"Use a cheaper model for routine tasks or a smarter model when stuck:",
-		'  subagent({agent: "researcher", task: "...", model: "opencode-go/gpt-5-mini"})',
-		'  subagent({agent: "oracle", task: "...", model: "openai-codex/gpt-5.6-luna"})',
-		"",
-		"Bare model names (e.g. 'gpt-5.6-luna') auto-resolve to the correct provider.",
-		"When model is omitted, agents inherit the current session's model.",
+		"Model routing: add model: \"provider/id\" to override (e.g. model: \"openai-codex/gpt-5.6-luna\").",
+		"Bare names auto-resolve (\"gpt-5.6-luna\" → openai-codex). Omit model to inherit parent session.",
+		"Discover models via subagent({action: \"list\"}) or subagent({action: \"models\"}).",
 	]);
 
 	registerWaitTool(pi, state, waitToolConfig.enabled);
