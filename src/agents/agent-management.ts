@@ -645,17 +645,38 @@ export function handleList(params: ManagementParams, ctx: ManagementContext): Ag
 	const agents = scopedAgents.filter((a) => !a.disabled);
 	const chains = d.chains.filter((c) => scope === "both" || c.source === "package" || c.source === scope).sort((a, b) => a.name.localeCompare(b.name));
 	const diagnostics = d.chainDiagnostics.filter((entry) => scope === "both" || entry.source === scope);
+	const currentModel = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
 	const proactiveSuggestions = buildProactiveSkillSubagentRecommendationLines({
 		agents,
 		chains,
 		config: ctx.config?.proactiveSkillSubagents,
 		discoverAvailableSkills: () => discoverAvailableSkills(ctx.cwd),
 	});
+
+	const agentLines = agents.length > 0
+		? agents.flatMap((a) => {
+			const modelLabel = a.model
+				? `, model: ${a.model}`
+				: a.source === "builtin"
+					? `, model: ${formatModelSource(a, currentModel)}`
+					: "";
+			return `- ${a.name} (${a.source}${a.defaultContext ? `, context: ${a.defaultContext}` : ""}${modelLabel}): ${a.description}`;
+		})
+		: ["- (none)"];
+
+	const availableModels = ctx.modelRegistry.getAvailable();
+	const modelLines = availableModels.length > 0
+		? ["", "Available models (use with model parameter):", ...availableModels.map((m) => `- ${m.provider}/${m.id}`)]
+		: [];
+	const currentModelLine = currentModel
+		? `Current session: ${currentModel.provider}/${currentModel.id}`
+		: undefined;
+
 	const lines = [
 		"Executable agents:",
-		...(agents.length
-			? agents.map((a) => `- ${a.name} (${a.source}${a.defaultContext ? `, context: ${a.defaultContext}` : ""}): ${a.description}`)
-			: ["- (none)"]),
+		...agentLines,
+		...(currentModelLine ? ["", currentModelLine] : []),
+		...modelLines,
 		"",
 		"Chains:",
 		...(chains.length ? chains.map((c) => `- ${c.name} (${c.source}): ${c.description}`) : ["- (none)"]),
