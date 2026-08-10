@@ -16,6 +16,24 @@ pi install npm:pi-subagents
 
 That is the only required step. You can add optional pieces later.
 
+### Maintaining a local development fork
+
+Keep development and runtime files separate. If your development checkout is
+`~/src/pi-subagents`, Pi should load the deployed mirror at
+`~/.pi/agent/local/pi-subagents`; do not point Pi directly at `~/src/pi-subagents`.
+
+From the development checkout:
+
+```bash
+make deploy            # requires committed changes; mirrors, installs deps, and verifies
+make verify            # detect runtime drift
+make deployed-commit   # show the deployed source commit
+```
+
+The deployed directory is runtime-only and has no Git history. Never edit it
+directly. Make changes in `~/src/pi-subagents`, commit them, deploy, then
+restart or reload Pi.
+
 ## Try this first
 
 You do not need to create agents, write config, or learn slash commands. After installing, ask Pi for delegation in plain language:
