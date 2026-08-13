@@ -1,49 +1,28 @@
 /**
  * Shared timeout resolution for subagent runs.
  *
- * `timeoutMs` and `maxRuntimeMs` are aliases wherever a timeout can be
- * configured: the top-level invocation, individual parallel task items
- * (top-level `tasks[...]` and chain `parallel[...]` items), and individual
- * chain steps. These helpers validate the alias pair consistently and collapse
- * it to a single effective `timeoutMs`, then resolve a per-child deadline from
- * the run-level timeout (if any) and the per-item timeout (if any).
+ * `timeoutMs` is the canonical timeout field for the top-level invocation,
+ * individual parallel task items, and individual chain steps. This helper
+ * validates it consistently, then resolves a per-child deadline from the
+ * run-level timeout (if any) and the per-item timeout (if any).
  */
 
-export interface TimeoutAliasInput {
+export interface TimeoutInput {
 	timeoutMs?: unknown;
-	maxRuntimeMs?: unknown;
 }
 
-export interface ResolvedTimeoutAlias {
+export interface ResolvedTimeout {
 	timeoutMs?: number;
 	error?: string;
 }
 
-/**
- * Validate and collapse the `timeoutMs`/`maxRuntimeMs` alias pair for one
- * scope (e.g. `tasks[0]`, `chain[2]`, or the top-level invocation).
- *
- * - Neither present: no timeout.
- * - Either present: must be a positive integer.
- * - Both present: must be equal (they are aliases).
- *
- * `label` names the scope in error messages ("" for the top-level invocation).
- */
-export function resolveTimeoutAlias(input: TimeoutAliasInput, label = ""): ResolvedTimeoutAlias {
-	const rawTimeout = input.timeoutMs;
-	const rawMaxRuntime = input.maxRuntimeMs;
-	if (rawTimeout === undefined && rawMaxRuntime === undefined) return {};
-	const prefix = label ? `${label}.` : "";
-	for (const [name, value] of [["timeoutMs", rawTimeout], ["maxRuntimeMs", rawMaxRuntime]] as const) {
-		if (value === undefined) continue;
-		if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-			return { error: `${prefix}${name} must be a positive integer.` };
-		}
+/** Validate a timeout value for one scope (for example, `tasks[0]`). */
+export function resolveTimeout(input: TimeoutInput, label = ""): ResolvedTimeout {
+	if (input.timeoutMs === undefined) return {};
+	if (typeof input.timeoutMs !== "number" || !Number.isInteger(input.timeoutMs) || input.timeoutMs <= 0) {
+		return { error: `${label ? `${label}.` : ""}timeoutMs must be a positive integer.` };
 	}
-	if (rawTimeout !== undefined && rawMaxRuntime !== undefined && rawTimeout !== rawMaxRuntime) {
-		return { error: `${label ? `${label}: ` : ""}timeoutMs and maxRuntimeMs are aliases; provide only one value or use the same value for both.` };
-	}
-	return { timeoutMs: (rawTimeout ?? rawMaxRuntime) as number };
+	return { timeoutMs: input.timeoutMs };
 }
 
 /**

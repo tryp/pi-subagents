@@ -40,7 +40,7 @@ describe("registered subagent tool description", () => {
 		assert.doesNotMatch(description, /disabled builtins/i);
 		assert.match(description, /output\?,reads\?,progress\?/i);
 		assert.match(description, /timeoutMs/i);
-		assert.match(description, /maxRuntimeMs/i);
+		assert.match(description, /timeoutMs/i);
 		assert.match(description, /foreground and async\/background runs/i);
 		assert.doesNotMatch(description, /only for foreground runs/i);
 		assert.doesNotMatch(description, /omit for async\/background runs/i);

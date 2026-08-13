@@ -1733,19 +1733,19 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(mockPi.callCount(), 0);
 	});
 
-	it("rejects mismatched foreground timeout aliases before spawning", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+	it("rejects invalid foreground timeout before spawning", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		const executor = makeExecutor();
 
 		const result = await executor.execute(
-			"timeout-alias-validation",
-			{ agent: "echo", task: "Task", timeoutMs: 100, maxRuntimeMs: 200 },
+			"timeout-validation",
+			{ agent: "echo", task: "Task", timeoutMs: 0 },
 			new AbortController().signal,
 			undefined,
 			makeMinimalCtx(tempDir),
 		);
 
 		assert.equal(result.isError, true);
-		assert.match(result.content[0]?.text ?? "", /aliases/);
+		assert.match(result.content[0]?.text ?? "", /timeoutMs must be a positive integer/);
 		assert.equal(mockPi.callCount(), 0);
 	});
 

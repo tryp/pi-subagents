@@ -776,7 +776,7 @@ Important fields:
 | `defaultReads` | Files to read before running in chain/parallel behavior. |
 | `defaultProgress` | Maintain `progress.md`. |
 | `async` | Default a single-agent launch to background (`true`) or foreground (`false`) when the call omits `async`. Explicit call values and `forceTopLevelAsync` win. |
-| `timeoutMs` | Positive integer default runtime deadline in milliseconds for single-agent launches. An explicit `timeoutMs` or `maxRuntimeMs` wins. |
+| `timeoutMs` | Positive integer default runtime deadline in milliseconds for single-agent launches. An explicit `timeoutMs` wins. |
 | `turnBudget` | JSON object default such as `{"maxTurns":20,"graceTurns":2}` for single-agent launches. An explicit call value wins, followed by this agent default, then global `turnBudget` config. |
 | `acceptance` | Acceptance default for single-agent launches. Use a scalar level such as `checked` or an inline/block YAML map such as `{ level: "none", reason: "lightweight lookup" }`. Explicit call values win; chain and parallel acceptance remains task/step configuration. |
 | `acceptanceRole` | Optional `read-only` or `writer` role for automatic acceptance inference. Explicit task mutation or no-edit intent wins; otherwise the declared role replaces agent-name guessing. This does not grant or revoke tools. |
@@ -1233,7 +1233,7 @@ Agent definitions are not loaded into context by default. Management actions let
 | `clarify` | boolean | false | Show TUI preview/edit flow. Explicit `clarify: true` keeps the run foreground for the clarify UI. |
 | `agentScope` | `user \| project \| both` | `both` | Agent discovery scope. Project wins on collisions. |
 | `async` | boolean | false | Background execution. For chains, `clarify: true` explicitly keeps the run foreground for the clarify UI. |
-| `timeoutMs` / `maxRuntimeMs` | number | none | Optional run-level max runtime in milliseconds for foreground and async/background runs. |
+| `timeoutMs` | number | none | Optional run-level max runtime in milliseconds for foreground and async/background runs. |
 | `turnBudget` | object | none | Optional assistant-turn budget `{ maxTurns, graceTurns }`. At `maxTurns` the child is warned to wrap up. After the grace window (default 1), termination occurs at the next assistant boundary; a response that starts tool work records `termination-deferred` until a later boundary. Partial output is returned on abort. |
 | `toolBudget` | object | none | Optional child tool-call budget `{ soft?, hard, block? }`. At `soft` the child is nudged to finalize. After `hard`, configured tools are blocked; `block` defaults to `read`, `grep`, `find`, and `ls`, while `"*"` blocks every tool call. Final assistant text is never blocked. |
 | `cwd` | string | runtime cwd | Override working directory. |
@@ -1246,7 +1246,7 @@ Agent definitions are not loaded into context by default. Management actions let
 
 As a conservative orchestration policy, do not set `turnBudget` or a hard `toolBudget` on implementation workers, fix workers, reviewers with edit authority, or other mutation-capable children. A default tool budget blocks read/search tools rather than mutation tools, but neither assistant turns nor tool-call counts measure whether a delivery slice is buildable or safe to hand off. Hard count caps remain appropriate for explicitly read-only scouts, reviewers, and validators.
 
-Bound writer work with a narrow task and an outer `timeoutMs` or `maxRuntimeMs` that leaves enough margin for the slice. An elapsed timeout is not a mutation-safe boundary and may still signal a child during tool work. Before the deadline, use `steer` or an attention notice to request a checkpoint after the current tool returns, including changed files, build/test state, remaining work, and commit or PR state.
+Bound writer work with a narrow task and an outer `timeoutMs` that leaves enough margin for the slice. An elapsed timeout is not a mutation-safe boundary and may still signal a child during tool work. Before the deadline, use `steer` or an attention notice to request a checkpoint after the current tool returns, including changed files, build/test state, remaining work, and commit or PR state.
 
 `context: "fork"` fails fast when the parent session is not persisted, the current leaf is missing, or the branched child session cannot be created. When the inherited transcript contains signed Anthropic `thinking` / `redacted_thinking` blocks, `pi-subagents` strips those provider-private blocks from the forked child session. It forces thinking `off` only when the child’s effective primary or fallback model resolves through the model registry to the Anthropic provider or `anthropic-messages` API; unresolved models are treated conservatively. The result reports every affected child, including on failed runs. Use `context: "fresh"` when an Anthropic child needs thinking. Forking never silently downgrades to `fresh`. In multi-agent runs that omit `context`, each agent/task/step follows its own `defaultContext`, so a fresh-default scout can run fresh beside a fork-default worker. Pass explicit `context: "fork"` or `context: "fresh"` when you intentionally want one context for every child.
 

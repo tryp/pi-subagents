@@ -47,7 +47,7 @@ import { formatControlIntercomMessage, formatControlNoticeMessage, resolveContro
 import { resolveTurnBudgetConfig } from "../shared/turn-budget.ts";
 import { formatSpawnBudget, getSpawnBudgetSnapshot, grantSpawnBudget, preflightSpawnBudget, preflightSpawnBudgetGrant, reserveSpawnBudget } from "../shared/spawn-budget.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
-import { resolveChildDeadline, resolveTimeoutAlias } from "../shared/timeout.ts";
+import { resolveChildDeadline, resolveTimeout } from "../shared/timeout.ts";
 import { finalizeSingleOutput, injectSingleOutputInstruction, normalizeSingleOutputOverride, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, readStatus, resolveChildCwd, sumResultsCost, sumResultsUsage } from "../../shared/utils.ts";
 import { DEFAULT_GLOBAL_CONCURRENCY_LIMIT, Semaphore } from "../shared/parallel-utils.ts";
@@ -133,7 +133,6 @@ interface TaskParam {
 	acceptance?: AcceptanceInput;
 	toolBudget?: ToolBudgetConfig;
 	timeoutMs?: number;
-	maxRuntimeMs?: number;
 }
 
 export interface SubagentParamsLike {
@@ -156,7 +155,6 @@ export interface SubagentParamsLike {
 	async?: boolean;
 	foregroundOnly?: boolean;
 	timeoutMs?: number;
-	maxRuntimeMs?: number;
 	turnBudget?: TurnBudgetConfig;
 	toolBudget?: ToolBudgetConfig;
 	clarify?: boolean;
@@ -1613,7 +1611,7 @@ function applySingleAgentLaunchDefaults(params: SubagentParamsLike, agents: Agen
 	return {
 		...params,
 		...(params.async === undefined && agent.defaultAsync !== undefined ? { async: agent.defaultAsync } : {}),
-		...(params.timeoutMs === undefined && params.maxRuntimeMs === undefined && agent.defaultTimeoutMs !== undefined
+		...(params.timeoutMs === undefined && agent.defaultTimeoutMs !== undefined
 			? { timeoutMs: agent.defaultTimeoutMs }
 			: {}),
 		...(params.turnBudget === undefined && agent.defaultTurnBudget !== undefined
@@ -1626,7 +1624,7 @@ function applySingleAgentLaunchDefaults(params: SubagentParamsLike, agents: Agen
 }
 
 function resolveForegroundTimeout(params: SubagentParamsLike): { timeoutMs?: number; error?: string } {
-	return resolveTimeoutAlias(params);
+	return resolveTimeout(params);
 }
 
 function resolveToolBudget(raw: unknown, label = "toolBudget"): { toolBudget?: ResolvedToolBudget; error?: string } {
@@ -1706,10 +1704,9 @@ function normalizeItemTimeouts(params: SubagentParamsLike): { params?: SubagentP
 		const tasks: TaskParam[] = [];
 		for (let i = 0; i < result.tasks.length; i++) {
 			const task = result.tasks[i]!;
-			const resolved = resolveTimeoutAlias(task, `tasks[${i}]`);
+			const resolved = resolveTimeout(task, `tasks[${i}]`);
 			if (resolved.error) return { error: buildRequestedModeError(result, resolved.error) };
-			const { maxRuntimeMs: _dropAlias, ...concreteTask } = task;
-			tasks.push({ ...concreteTask, ...(resolved.timeoutMs !== undefined ? { timeoutMs: resolved.timeoutMs } : {}) });
+			tasks.push({ ...task, ...(resolved.timeoutMs !== undefined ? { timeoutMs: resolved.timeoutMs } : {}) });
 		}
 		result.tasks = tasks;
 	}
@@ -1721,22 +1718,19 @@ function normalizeItemTimeouts(params: SubagentParamsLike): { params?: SubagentP
 				const parallel: ParallelTaskItem[] = [];
 				for (let j = 0; j < step.parallel.length; j++) {
 					const task = step.parallel[j]!;
-					const resolved = resolveTimeoutAlias(task, `chain[${i}].parallel[${j}]`);
+					const resolved = resolveTimeout(task, `chain[${i}].parallel[${j}]`);
 					if (resolved.error) return { error: buildRequestedModeError(result, resolved.error) };
-					const { maxRuntimeMs: _dropAlias, ...concreteTask } = task;
-					parallel.push({ ...concreteTask, ...(resolved.timeoutMs !== undefined ? { timeoutMs: resolved.timeoutMs } : {}) });
+					parallel.push({ ...task, ...(resolved.timeoutMs !== undefined ? { timeoutMs: resolved.timeoutMs } : {}) });
 				}
 				chain.push({ ...step, parallel });
 			} else if (isDynamicParallelStep(step)) {
-				const resolved = resolveTimeoutAlias(step.parallel, `chain[${i}].parallel`);
+				const resolved = resolveTimeout(step.parallel, `chain[${i}].parallel`);
 				if (resolved.error) return { error: buildRequestedModeError(result, resolved.error) };
-				const { maxRuntimeMs: _dropAlias, ...concreteTemplate } = step.parallel;
-				chain.push({ ...step, parallel: { ...concreteTemplate, ...(resolved.timeoutMs !== undefined ? { timeoutMs: resolved.timeoutMs } : {}) } });
+				chain.push({ ...step, parallel: { ...step.parallel, ...(resolved.timeoutMs !== undefined ? { timeoutMs: resolved.timeoutMs } : {}) } });
 			} else {
-				const resolved = resolveTimeoutAlias(step, `chain[${i}]`);
+				const resolved = resolveTimeout(step, `chain[${i}]`);
 				if (resolved.error) return { error: buildRequestedModeError(result, resolved.error) };
-				const { maxRuntimeMs: _dropAlias, ...concreteStep } = step;
-				chain.push({ ...concreteStep, ...(resolved.timeoutMs !== undefined ? { timeoutMs: resolved.timeoutMs } : {}) });
+				chain.push({ ...step, ...(resolved.timeoutMs !== undefined ? { timeoutMs: resolved.timeoutMs } : {}) });
 			}
 		}
 		result.chain = chain;

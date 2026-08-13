@@ -261,7 +261,7 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 					{ agent: "echo", task: "Fast review" },
 				],
 				concurrency: 2,
-				maxRuntimeMs: 300,
+				timeoutMs: 300,
 			},
 			new AbortController().signal,
 			undefined,

@@ -105,8 +105,7 @@ const TaskItem = Type.Object({
 	skill: Type.Optional(SkillOverride),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
-	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-task timeout in ms applied to this child run only. Alias of maxRuntimeMs. Falls back to the run-level timeout when omitted." })),
-	maxRuntimeMs: Type.Optional(Type.Integer({ minimum: 1, description: "Alias of timeoutMs for a per-task timeout on this child run." })),
+	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-task timeout in ms applied to this child run only. Falls back to the run-level timeout when omitted." })),
 });
 
 // Parallel task item (within a parallel step)
@@ -127,8 +126,7 @@ export const ParallelTaskSchema = Type.Object({
 	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'openai-codex/gpt-5.6-luna'). Bare names auto-resolve." })),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
-	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-task timeout in ms applied to this child run only. Alias of maxRuntimeMs. Falls back to the run-level timeout when omitted." })),
-	maxRuntimeMs: Type.Optional(Type.Integer({ minimum: 1, description: "Alias of timeoutMs for a per-task timeout on this child run." })),
+	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-task timeout in ms applied to this child run only. Falls back to the run-level timeout when omitted." })),
 });
 
 export const DynamicExpandSchema = Type.Object({
@@ -157,8 +155,7 @@ export const DynamicParallelTemplateSchema = Type.Object({
 	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'opencode-go/gpt-5-mini'). Bare names auto-resolve." })),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
-	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-task timeout in ms applied to each materialized child run. Alias of maxRuntimeMs. Falls back to the run-level timeout when omitted." })),
-	maxRuntimeMs: Type.Optional(Type.Integer({ minimum: 1, description: "Alias of timeoutMs for a per-task timeout on each materialized child run." })),
+	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-task timeout in ms applied to each materialized child run. Falls back to the run-level timeout when omitted." })),
 }, { additionalProperties: false });
 
 export const DynamicCollectSchema = Type.Object({
@@ -185,8 +182,7 @@ export const ChainItem = Type.Object({
 	model: Type.Optional(Type.String({ description: "Override model for this step (e.g. 'opencode-go/gpt-5-mini'). Bare names auto-resolve across providers." })),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
-	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-step timeout in ms applied to this child run only. Alias of maxRuntimeMs. Falls back to the run-level timeout when omitted." })),
-	maxRuntimeMs: Type.Optional(Type.Integer({ minimum: 1, description: "Alias of timeoutMs for a per-step timeout on this child run." })),
+	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-step timeout in ms applied to this child run only. Falls back to the run-level timeout when omitted." })),
 	parallel: Type.Optional(Type.Unsafe({
 		anyOf: [
 			Type.Array(ParallelTaskSchema, { minItems: 1, description: "Tasks to run in parallel" }),
@@ -275,8 +271,7 @@ const SubagentParamsSchema = Type.Object({
 	})),
 	chainDir: Type.Optional(Type.String({ description: "Persistent chain artifact directory; defaults to user-scoped temp storage." })),
 	async: Type.Optional(Type.Boolean({ description: "Run in background (default: false, or per config)" })),
-	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional run-level timeout in ms for foreground and async/background runs. Alias of maxRuntimeMs." })),
-	maxRuntimeMs: Type.Optional(Type.Integer({ minimum: 1, description: "Alias of timeoutMs for optional run-level timeout in foreground and async/background runs." })),
+	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional run-level timeout in ms for foreground and async/background runs." })),
 	turnBudget: Type.Optional(TurnBudgetOverride),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	agentScope: Type.Optional(Type.String({ description: "Agent discovery scope: 'user', 'project', or 'both' (default: 'both'; project wins on name collisions)" })),

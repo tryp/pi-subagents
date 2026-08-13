@@ -28,10 +28,6 @@ interface SubagentParamsSchema {
 			minimum?: number;
 			description?: string;
 		};
-		maxRuntimeMs?: {
-			minimum?: number;
-			description?: string;
-		};
 		turnBudget?: {
 			properties?: {
 				maxTurns?: { minimum?: number };
@@ -186,19 +182,14 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.doesNotMatch(description, /orchestration\./);
 	});
 
-	it("includes foreground timeout aliases and turn budget", () => {
+	it("includes foreground timeout and turn budget", () => {
 		const timeoutSchema = SubagentParams?.properties?.timeoutMs;
-		const maxRuntimeSchema = SubagentParams?.properties?.maxRuntimeMs;
 		const turnBudgetSchema = SubagentParams?.properties?.turnBudget;
 		const toolBudgetSchema = SubagentParams?.properties?.toolBudget;
 		assert.ok(timeoutSchema, "timeoutMs schema should exist");
-		assert.ok(maxRuntimeSchema, "maxRuntimeMs schema should exist");
 		assert.equal(timeoutSchema.minimum, 1);
-		assert.equal(maxRuntimeSchema.minimum, 1);
 		assert.match(String(timeoutSchema.description ?? ""), /foreground and async\/background/i);
 		assert.doesNotMatch(String(timeoutSchema.description ?? ""), /foreground-only/i);
-		assert.match(String(maxRuntimeSchema.description ?? ""), /timeoutMs/i);
-		assert.match(String(maxRuntimeSchema.description ?? ""), /foreground and async\/background/i);
 		assert.equal(turnBudgetSchema?.properties?.maxTurns?.minimum, 1);
 		assert.equal(turnBudgetSchema?.properties?.graceTurns?.minimum, 0);
 		assert.equal(toolBudgetSchema?.properties?.soft?.minimum, 1);
@@ -504,8 +495,8 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 			{ action: "single", agent: "worker", task: "Fix" },
 			{ action: "PARALLEL", tasks: [{ agent: "worker", task: "Fix" }] },
 			{ action: "not-a-real-action" },
-			{ tasks: [{ agent: "worker", task: "Fix" }], maxRuntimeMs: 1000 },
-			{ chain: [{ agent: "worker", task: "Fix" }], timeoutMs: 1000, maxRuntimeMs: 1000 },
+			{ chain: [{ agent: "worker", task: "Fix" }], timeoutMs: 1000 },
+			{ agent: "worker", task: "Fix", maxRuntimeMs: 1000 },
 			{ agent: "worker", task: "Fix", acceptance: "checked" },
 			{ agent: "worker", task: "Fix", acceptance: "reviewed" },
 			{ agent: "worker", task: "Fix", acceptance: { level: "none", reason: "parent will verify manually" } },
@@ -531,7 +522,6 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 			{ skill: [123] },
 			{ output: 123 },
 			{ timeoutMs: 0 },
-			{ maxRuntimeMs: -1 },
 			{ tasks: [{ agent: "reviewer", task: "check this", reads: "input.md" }] },
 			{ chain: [{ parallel: [{ agent: "reviewer", output: 123 }] }] },
 			{ chain: [{ parallel: [{ agent: "reviewer", reads: "input.md" }] }] },

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { buildAsyncRunnerSteps, formatAsyncStartedMessage, resolveAsyncRunnerLogPaths } from "../../src/runs/background/async-execution.ts";
-import { resolveChildDeadline, resolveTimeoutAlias } from "../../src/runs/shared/timeout.ts";
+import { resolveChildDeadline, resolveTimeout } from "../../src/runs/shared/timeout.ts";
 import type { AgentConfig } from "../../src/agents/agents.ts";
 
 const agent = (name: string, toolBudget?: AgentConfig["toolBudget"]): AgentConfig => ({
@@ -85,12 +85,9 @@ describe("async runner execution", () => {
 		assert.deepEqual(result.steps[0]?.toolBudget, { hard: 4, block: ["read"] });
 	});
 
-	it("validates timeout aliases consistently", () => {
-		assert.deepEqual(resolveTimeoutAlias({ timeoutMs: 25 }), { timeoutMs: 25 });
-		assert.deepEqual(resolveTimeoutAlias({ maxRuntimeMs: 25 }), { timeoutMs: 25 });
-		assert.deepEqual(resolveTimeoutAlias({ timeoutMs: 25, maxRuntimeMs: 25 }), { timeoutMs: 25 });
-		assert.match(resolveTimeoutAlias({ timeoutMs: 25, maxRuntimeMs: 50 }, "tasks[0]").error ?? "", /tasks\[0\].*aliases/);
-		assert.match(resolveTimeoutAlias({ timeoutMs: 0 }, "tasks[0]").error ?? "", /positive integer/);
+	it("validates timeout consistently", () => {
+		assert.deepEqual(resolveTimeout({ timeoutMs: 25 }), { timeoutMs: 25 });
+		assert.match(resolveTimeout({ timeoutMs: 0 }, "tasks[0]").error ?? "", /positive integer/);
 	});
 
 	it("preserves distinct per-task deadlines in one parallel runner", () => {
@@ -103,7 +100,7 @@ describe("async runner execution", () => {
 			chain: [{
 				parallel: [
 					{ agent: "worker", task: "short", timeoutMs: 25 },
-					{ agent: "worker", task: "long", maxRuntimeMs: 75 },
+					{ agent: "worker", task: "long", timeoutMs: 75 },
 				],
 			}],
 			agents: [agent("worker")],

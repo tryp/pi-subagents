@@ -23,7 +23,7 @@ EXECUTION (use exactly ONE mode):
 • PARALLEL: { tasks: [{agent,task,count?,output?,reads?,progress?}, ...], concurrency?: number, worktree?: true } - concurrent execution (worktree: isolate each task in a git worktree)
 • Optional context: { context: "fresh" | "fork" } (explicit value overrides every child; when omitted, each requested agent uses its own defaultContext, otherwise "fresh"; inspect agent defaults via { action: "list" })
 • Fork thinking: model strings accept a thinking suffix (provider/model:off|minimal|low|medium|high|xhigh|max). Forking over a parent transcript that carries signed Anthropic thinking blocks forces thinking off only when a child's effective primary or fallback model resolves to the Anthropic provider or anthropic-messages API; unresolved models are treated conservatively. The result notes affected children, including on failures. Use fresh context when an Anthropic child needs thinking.
-• Optional timeout: { timeoutMs } or { maxRuntimeMs } sets a run-level max runtime for foreground and async/background runs
+• Optional timeout: { timeoutMs } sets a run-level max runtime for foreground and async/background runs
 • Sync wake: a single foreground run without an explicit timeout that exceeds the sync-wake budget (default 4 min, config syncWakeMs) returns a wake notice to you while the child keeps running in the background — check it with status/subagent_wait instead of launching a replacement
 • If { action: "list" } shows proactive skill subagent suggestions, consider a small fresh-context fanout for broad tasks where one of those skills would materially help
 
@@ -80,7 +80,7 @@ export const COMPACT_SUBAGENT_TOOL_DESCRIPTION = `Delegate to subagents or manag
 EXECUTE:
 • Before execution, call { action: "list" }; run only executable/non-disabled configured agents/chains.
 • SINGLE {agent, task?}; PARALLEL {tasks:[{agent,task,count?,output?,reads?,progress?}], concurrency?, worktree?}; CHAIN {chain:[{agent,task?},{parallel:[...]}]}.
-• context can be "fresh" or "fork"; omitted uses each agent defaultContext, otherwise fresh. timeoutMs/maxRuntimeMs apply to foreground and async/background runs.
+• context can be "fresh" or "fork"; omitted uses each agent defaultContext, otherwise fresh. timeoutMs applies to foreground and async/background runs.
 • Chain templates may use {task}, {previous}, {chain_dir}, and named outputs. Parallel worktree isolation requires a clean git repo.
 • Chain example: { chain: [{agent:"agent-a", task:"Analyze {task}"}, {parallel: [{agent:"agent-b", task:"Check {previous}", count: 3}]}] }
 • If list shows proactive skill subagent suggestions, use a small fresh-context fanout only when the task is broad enough.
