@@ -48,6 +48,7 @@ import {
 } from "../../shared/types.ts";
 import { nestedResultsPath, resolveInheritedNestedRouteFromEnv, resolveNestedParentAddressFromEnv, writeNestedEvent } from "../shared/nested-events.ts";
 import { initialTurnBudgetState } from "../shared/turn-budget.ts";
+import { resolveTimeoutAlias } from "../shared/timeout.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
 import type { ImportedAsyncRoot } from "./chain-root-attachment.ts";
 import type { SessionLeaseRequest } from "../shared/session-lease.ts";
@@ -565,6 +566,8 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 	};
 	const buildSeqStep = (s: SequentialStep, sessionFile?: string, behaviorCwd?: string, progressPrecreated = false, resolvedBehavior?: ResolvedStepBehavior, flatIndex?: number, parallelOutputNamespace?: { stepIndex: number; taskIndex?: number }) => {
 		const a = agents.find((x) => x.name === s.agent)!;
+		const resolvedTimeout = resolveTimeoutAlias(s);
+		if (resolvedTimeout.error) throw new AsyncStartValidationError(resolvedTimeout.error);
 		const toolBudgetInput = s.toolBudget ?? params.toolBudget ?? a.toolBudget ?? params.configToolBudget;
 		const resolvedToolBudget = validateToolBudgetConfig(toolBudgetInput, s.toolBudget ? "toolBudget" : a.toolBudget ? "agent.toolBudget" : "config.toolBudget");
 		if (resolvedToolBudget.error) throw new AsyncStartValidationError(resolvedToolBudget.error);
@@ -654,6 +657,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			sessionFile,
 			maxSubagentDepth: resolveChildMaxSubagentDepth(maxSubagentDepth, a.maxSubagentDepth),
 			waitToolEnabled: params.waitToolEnabled,
+			...(resolvedTimeout.timeoutMs !== undefined ? { timeoutMs: resolvedTimeout.timeoutMs } : {}),
 			effectiveAcceptance: resolveEffectiveAcceptance({
 				explicit: s.acceptance,
 				agentName: s.agent,

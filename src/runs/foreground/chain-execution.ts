@@ -73,6 +73,7 @@ import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelSt
 import { acceptanceFailureMessage, aggregateAcceptanceReport, evaluateAcceptance, resolveEffectiveAcceptance } from "../shared/acceptance.ts";
 import type { ChainOutputMap } from "../../shared/types.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
+import { resolveChildDeadline } from "../shared/timeout.ts";
 
 interface ChainExecutionDetailsInput {
 	results: SingleResult[];
@@ -343,8 +344,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				structuredOutput: structuredRuntime,
 				acceptance: task.acceptance,
 				acceptanceContext: { mode: "chain", dynamic: input.dynamic && task.acceptance === undefined },
-				timeoutMs: input.timeoutMs,
-				deadlineAt: input.deadlineAt,
+				...resolveChildDeadline(input.timeoutMs, input.deadlineAt, task.timeoutMs),
 				turnBudget: input.turnBudget,
 				onDetachedExit: input.onDetachedExit
 					? (result) => input.onDetachedExit?.(input.globalTaskIndex + taskIndex, result)
@@ -1212,8 +1212,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				structuredOutput: structuredRuntime,
 				acceptance: seqStep.acceptance,
 				acceptanceContext: { mode: "chain" },
-				timeoutMs: params.timeoutMs,
-				deadlineAt,
+				...resolveChildDeadline(params.timeoutMs, deadlineAt, seqStep.timeoutMs),
 				turnBudget: params.turnBudget,
 				onDetachedExit: onDetachedExit
 					? (result) => onDetachedExit(childIndex, result)

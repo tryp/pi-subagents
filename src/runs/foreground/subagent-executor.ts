@@ -29,6 +29,7 @@ import {
 	suppressProgressForReadOnlyTask,
 	taskDisallowsFileUpdates,
 	type ChainStep,
+	type ParallelTaskItem,
 	type ResolvedStepBehavior,
 	type SequentialStep,
 	type StepOverrides,
@@ -46,6 +47,7 @@ import { formatControlIntercomMessage, formatControlNoticeMessage, resolveContro
 import { resolveTurnBudgetConfig } from "../shared/turn-budget.ts";
 import { formatSpawnBudget, getSpawnBudgetSnapshot, grantSpawnBudget, preflightSpawnBudget, preflightSpawnBudgetGrant, reserveSpawnBudget } from "../shared/spawn-budget.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
+import { resolveChildDeadline, resolveTimeoutAlias } from "../shared/timeout.ts";
 import { finalizeSingleOutput, injectSingleOutputInstruction, normalizeSingleOutputOverride, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, readStatus, resolveChildCwd, sumResultsCost, sumResultsUsage } from "../../shared/utils.ts";
 import { DEFAULT_GLOBAL_CONCURRENCY_LIMIT, Semaphore } from "../shared/parallel-utils.ts";
@@ -129,6 +131,8 @@ interface TaskParam {
 	skill?: string | string[] | boolean;
 	acceptance?: AcceptanceInput;
 	toolBudget?: ToolBudgetConfig;
+	timeoutMs?: number;
+	maxRuntimeMs?: number;
 }
 
 export interface SubagentParamsLike {
@@ -1602,19 +1606,7 @@ function applySingleAgentLaunchDefaults(params: SubagentParamsLike, agents: Agen
 }
 
 function resolveForegroundTimeout(params: SubagentParamsLike): { timeoutMs?: number; error?: string } {
-	const rawTimeout = params.timeoutMs;
-	const rawMaxRuntime = params.maxRuntimeMs;
-	if (rawTimeout === undefined && rawMaxRuntime === undefined) return {};
-	for (const [name, value] of [["timeoutMs", rawTimeout], ["maxRuntimeMs", rawMaxRuntime]] as const) {
-		if (value === undefined) continue;
-		if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-			return { error: `${name} must be a positive integer.` };
-		}
-	}
-	if (rawTimeout !== undefined && rawMaxRuntime !== undefined && rawTimeout !== rawMaxRuntime) {
-		return { error: "timeoutMs and maxRuntimeMs are aliases; provide only one value or use the same value for both." };
-	}
-	return { timeoutMs: rawTimeout ?? rawMaxRuntime };
+	return resolveTimeoutAlias(params);
 }
 
 function resolveToolBudget(raw: unknown, label = "toolBudget"): { toolBudget?: ResolvedToolBudget; error?: string } {
@@ -1686,6 +1678,50 @@ function normalizeRepeatedParallelCounts(params: SubagentParamsLike): { params?:
 		return { params: { ...params, chain: expandedChain.chain } };
 	}
 	return { params };
+}
+
+function normalizeItemTimeouts(params: SubagentParamsLike): { params?: SubagentParamsLike; error?: AgentToolResult<Details> } {
+	const result = { ...params };
+	if (result.tasks) {
+		const tasks: TaskParam[] = [];
+		for (let i = 0; i < result.tasks.length; i++) {
+			const task = result.tasks[i]!;
+			const resolved = resolveTimeoutAlias(task, `tasks[${i}]`);
+			if (resolved.error) return { error: buildRequestedModeError(result, resolved.error) };
+			const { maxRuntimeMs: _dropAlias, ...concreteTask } = task;
+			tasks.push({ ...concreteTask, ...(resolved.timeoutMs !== undefined ? { timeoutMs: resolved.timeoutMs } : {}) });
+		}
+		result.tasks = tasks;
+	}
+	if (result.chain) {
+		const chain: ChainStep[] = [];
+		for (let i = 0; i < result.chain.length; i++) {
+			const step = result.chain[i]!;
+			if (isParallelStep(step)) {
+				const parallel: ParallelTaskItem[] = [];
+				for (let j = 0; j < step.parallel.length; j++) {
+					const task = step.parallel[j]!;
+					const resolved = resolveTimeoutAlias(task, `chain[${i}].parallel[${j}]`);
+					if (resolved.error) return { error: buildRequestedModeError(result, resolved.error) };
+					const { maxRuntimeMs: _dropAlias, ...concreteTask } = task;
+					parallel.push({ ...concreteTask, ...(resolved.timeoutMs !== undefined ? { timeoutMs: resolved.timeoutMs } : {}) });
+				}
+				chain.push({ ...step, parallel });
+			} else if (isDynamicParallelStep(step)) {
+				const resolved = resolveTimeoutAlias(step.parallel, `chain[${i}].parallel`);
+				if (resolved.error) return { error: buildRequestedModeError(result, resolved.error) };
+				const { maxRuntimeMs: _dropAlias, ...concreteTemplate } = step.parallel;
+				chain.push({ ...step, parallel: { ...concreteTemplate, ...(resolved.timeoutMs !== undefined ? { timeoutMs: resolved.timeoutMs } : {}) } });
+			} else {
+				const resolved = resolveTimeoutAlias(step, `chain[${i}]`);
+				if (resolved.error) return { error: buildRequestedModeError(result, resolved.error) };
+				const { maxRuntimeMs: _dropAlias, ...concreteStep } = step;
+				chain.push({ ...concreteStep, ...(resolved.timeoutMs !== undefined ? { timeoutMs: resolved.timeoutMs } : {}) });
+			}
+		}
+		result.chain = chain;
+	}
+	return { params: result };
 }
 
 function withForkContext(
@@ -2480,8 +2516,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			skills: effectiveSkills === false ? [] : effectiveSkills,
 			acceptance: task.acceptance,
 			acceptanceContext: { mode: "parallel" },
-			timeoutMs: input.timeoutMs,
-			deadlineAt: input.deadlineAt,
+			...resolveChildDeadline(input.timeoutMs, input.deadlineAt, task.timeoutMs),
 			turnBudget: input.turnBudget,
 			toolBudget: input.toolBudgets[index],
 			onUpdate: input.onUpdate
@@ -2688,6 +2723,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 					...(progress !== undefined ? { progress } : {}),
 					...(t.toolBudget !== undefined ? { toolBudget: t.toolBudget } : {}),
 					...(t.acceptance !== undefined ? { acceptance: t.acceptance } : {}),
+					...(t.timeoutMs !== undefined ? { timeoutMs: t.timeoutMs } : {}),
 				};
 			});
 			return executeAsyncChain(id, {
@@ -3586,7 +3622,9 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 
 		const normalized = normalizeRepeatedParallelCounts(paramsWithResolvedCwd);
 		if (normalized.error) return normalized.error;
-		const normalizedParams = normalized.params!;
+		const normalizedTimeouts = normalizeItemTimeouts(normalized.params!);
+		if (normalizedTimeouts.error) return normalizedTimeouts.error;
+		const normalizedParams = normalizedTimeouts.params!;
 
 		let effectiveParams = applyForceTopLevelAsyncOverride(
 			normalizedParams,

@@ -57,6 +57,8 @@ export interface SequentialStep {
 	model?: string;
 	toolBudget?: ToolBudgetConfig;
 	acceptance?: AcceptanceInput;
+	timeoutMs?: number;
+	maxRuntimeMs?: number;
 }
 
 /** Parallel task item within a parallel step */
@@ -77,6 +79,8 @@ export interface ParallelTaskItem {
 	model?: string;
 	toolBudget?: ToolBudgetConfig;
 	acceptance?: AcceptanceInput;
+	timeoutMs?: number;
+	maxRuntimeMs?: number;
 }
 
 export interface DynamicExpandSpec {

@@ -34,6 +34,8 @@ export interface RunnerSubagentStep {
 	sessionFile?: string;
 	maxSubagentDepth?: number;
 	waitToolEnabled?: boolean;
+	/** Optional timeout for this child only. The parent run timeout remains independent. */
+	timeoutMs?: number;
 	structuredOutput?: {
 		schema: import("../../shared/types.ts").JsonSchemaObject;
 		schemaPath: string;

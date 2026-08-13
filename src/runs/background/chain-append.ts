@@ -135,6 +135,7 @@ function statusStepForTask(task: RunnerSubagentStep): StatusStep {
 		label: task.label,
 		outputName: task.outputName,
 		structured: task.structured,
+		...(task.timeoutMs !== undefined ? { timeoutMs: task.timeoutMs } : {}),
 		status: "pending",
 		...(task.sessionFile ? { sessionFile: task.sessionFile } : {}),
 		skills: task.skills,

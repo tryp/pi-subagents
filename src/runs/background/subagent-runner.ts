@@ -976,6 +976,7 @@ async function runSingleStep(
 	structuredOutputSchemaPath?: string;
 	acceptance?: import("../../shared/types.ts").AcceptanceLedger;
 }> {
+	const effectiveTimeoutMessage = step.timeoutMs !== undefined ? `Subagent timed out after ${step.timeoutMs}ms.` : ctx.timeoutMessage;
 	if (step.importAsyncRoot) {
 		let importTimedOut = false;
 		let importStopped = false;
@@ -1010,7 +1011,7 @@ async function runSingleStep(
 		try {
 			const imported = await waitForImportedAsyncRoot(step.importAsyncRoot, {
 				shouldAbort: () => importTimedOut || importStopped || ctx.timeoutSignal?.aborted === true || ctx.stopSignal?.aborted === true || ctx.skipAcceptance?.() === true,
-				timeoutMessage: importStopped || ctx.stopSignal?.aborted === true ? ctx.stopMessage : ctx.timeoutMessage,
+				timeoutMessage: importStopped || ctx.stopSignal?.aborted === true ? ctx.stopMessage : effectiveTimeoutMessage,
 			});
 			try {
 				fs.writeFileSync(ctx.outputFile, imported.output, "utf-8");
@@ -1019,7 +1020,7 @@ async function runSingleStep(
 			}
 			const stopped = importStopped || imported.stopped === true || ctx.stopSignal?.aborted === true;
 			const timedOut = !stopped && (importTimedOut || imported.timedOut === true || ctx.timeoutSignal?.aborted === true || ctx.skipAcceptance?.() === true);
-			const message = stopped ? ctx.stopMessage ?? "Subagent stopped by user." : ctx.timeoutMessage ?? "Subagent timed out.";
+			const message = stopped ? ctx.stopMessage ?? "Subagent stopped by user." : effectiveTimeoutMessage ?? "Subagent timed out.";
 			return {
 				agent: imported.agent,
 				output: timedOut || stopped ? message : imported.output,
@@ -1089,6 +1090,16 @@ async function runSingleStep(
 	const modelAttempts: ModelAttempt[] = [];
 	const attemptNotes: string[] = [];
 	const eventsPath = path.join(path.dirname(ctx.outputFile), "events.jsonl");
+	let childTimeoutInterrupt: (() => void) | undefined;
+	let childTimeoutTimer: NodeJS.Timeout | undefined;
+	const registerChildTimeout = (interrupt: (() => void) | undefined): void => {
+		childTimeoutInterrupt = interrupt;
+		ctx.registerTimeout?.(interrupt);
+		if (interrupt && step.timeoutMs !== undefined) {
+			childTimeoutTimer = setTimeout(() => childTimeoutInterrupt?.(), step.timeoutMs);
+			childTimeoutTimer.unref?.();
+		}
+	};
 	let finalResult: RunPiStreamingResult | undefined;
 	let finalOutputSnapshot: SingleOutputSnapshot | undefined;
 	let completionGuardTriggeredFinal = false;
@@ -1165,8 +1176,8 @@ async function runSingleStep(
 			ctx.registerInterrupt,
 			ctx.onChildEvent,
 			transcriptWriter,
-			ctx.registerTimeout,
-			ctx.timeoutMessage,
+			registerChildTimeout,
+			effectiveTimeoutMessage,
 			ctx.registerStop,
 			ctx.stopMessage,
 			ctx.registerTurnBudgetAbort,
@@ -1269,6 +1280,10 @@ async function runSingleStep(
 		attemptNotes.push(formatModelAttemptNote(attempt, candidates[index + 1]));
 	}
 
+	if (childTimeoutTimer) {
+		clearTimeout(childTimeoutTimer);
+		childTimeoutTimer = undefined;
+	}
 	const rawOutput = finalResult?.finalOutput ?? "";
 	const outputForPersistence = stripAcceptanceReport(rawOutput);
 	const resolvedOutput = step.outputPath && finalResult?.exitCode === 0
@@ -1314,7 +1329,7 @@ async function runSingleStep(
 				: undefined,
 			cwd: step.cwd ?? ctx.cwd,
 			signal: combinedAbortSignal([ctx.timeoutSignal, ctx.stopSignal]),
-			abortMessage: ctx.stopSignal?.aborted ? ctx.stopMessage ?? "Subagent stopped by user." : ctx.timeoutMessage ?? "Subagent timed out.",
+			abortMessage: ctx.stopSignal?.aborted ? ctx.stopMessage ?? "Subagent stopped by user." : effectiveTimeoutMessage ?? "Subagent timed out.",
 		})
 		: undefined;
 	const stoppedAfterAcceptance = finalResult?.stopped === true || ctx.stopSignal?.aborted === true;
@@ -1335,7 +1350,7 @@ async function runSingleStep(
 	const effectiveFinalError = stoppedAfterAcceptance
 		? ctx.stopMessage ?? "Subagent stopped by user."
 		: timedOutAfterAcceptance
-			? ctx.timeoutMessage ?? "Subagent timed out."
+			? effectiveTimeoutMessage ?? "Subagent timed out."
 			: turnBudgetExceeded
 				? finalResult?.error ?? (turnBudget ? turnBudgetExceededMessage(turnBudget, turnBudget.turnCount) : "Subagent exceeded turn budget.")
 				: acceptanceCanFailRun
@@ -1616,6 +1631,7 @@ async function runSubagent(
 					label: task.label,
 					outputName: task.outputName,
 					structured: task.structured,
+					...(task.timeoutMs !== undefined ? { timeoutMs: task.timeoutMs } : {}),
 					status: "pending",
 					...(task.toolBudget ? { toolBudget: initialToolBudgetState(task.toolBudget) } : {}),
 					...(task.sessionFile ? { sessionFile: task.sessionFile } : {}),
@@ -1652,6 +1668,7 @@ async function runSubagent(
 				label: step.label,
 				outputName: step.outputName,
 				structured: step.structured,
+				...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}),
 				status: "pending",
 				...(step.toolBudget ? { toolBudget: initialToolBudgetState(step.toolBudget) } : {}),
 				...(step.sessionFile ? { sessionFile: step.sessionFile } : {}),

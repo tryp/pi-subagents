@@ -105,6 +105,8 @@ const TaskItem = Type.Object({
 	skill: Type.Optional(SkillOverride),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
+	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-task timeout in ms applied to this child run only. Alias of maxRuntimeMs. Falls back to the run-level timeout when omitted." })),
+	maxRuntimeMs: Type.Optional(Type.Integer({ minimum: 1, description: "Alias of timeoutMs for a per-task timeout on this child run." })),
 });
 
 // Parallel task item (within a parallel step)
@@ -125,6 +127,8 @@ export const ParallelTaskSchema = Type.Object({
 	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'openai-codex/gpt-5.6-luna'). Bare names auto-resolve." })),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
+	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-task timeout in ms applied to this child run only. Alias of maxRuntimeMs. Falls back to the run-level timeout when omitted." })),
+	maxRuntimeMs: Type.Optional(Type.Integer({ minimum: 1, description: "Alias of timeoutMs for a per-task timeout on this child run." })),
 });
 
 export const DynamicExpandSchema = Type.Object({
@@ -153,6 +157,8 @@ export const DynamicParallelTemplateSchema = Type.Object({
 	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'opencode-go/gpt-5-mini'). Bare names auto-resolve." })),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
+	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-task timeout in ms applied to each materialized child run. Alias of maxRuntimeMs. Falls back to the run-level timeout when omitted." })),
+	maxRuntimeMs: Type.Optional(Type.Integer({ minimum: 1, description: "Alias of timeoutMs for a per-task timeout on each materialized child run." })),
 }, { additionalProperties: false });
 
 export const DynamicCollectSchema = Type.Object({
@@ -179,6 +185,8 @@ export const ChainItem = Type.Object({
 	model: Type.Optional(Type.String({ description: "Override model for this step (e.g. 'opencode-go/gpt-5-mini'). Bare names auto-resolve across providers." })),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
+	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-step timeout in ms applied to this child run only. Alias of maxRuntimeMs. Falls back to the run-level timeout when omitted." })),
+	maxRuntimeMs: Type.Optional(Type.Integer({ minimum: 1, description: "Alias of timeoutMs for a per-step timeout on this child run." })),
 	parallel: Type.Optional(Type.Unsafe({
 		anyOf: [
 			Type.Array(ParallelTaskSchema, { minItems: 1, description: "Tasks to run in parallel" }),

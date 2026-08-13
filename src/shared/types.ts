@@ -890,6 +890,8 @@ export interface AsyncStatus {
 		endedAt?: number;
 		durationMs?: number;
 		exitCode?: number | null;
+		timeoutMs?: number;
+		deadlineAt?: number;
 		timedOut?: boolean;
 		stopped?: boolean;
 		turnBudget?: TurnBudgetState;
