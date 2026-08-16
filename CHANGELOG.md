@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Detached async runners no longer fail to boot when `typebox` is absent from the runner's production node_modules: `structured-output.ts` now resolves `typebox/compile` against the pi host package root injected by the runner spawn, instead of relying on a static bare import that only the in-process extension loader aliases could satisfy.
+
 ## [0.35.1] - 2026-07-17
 
 ### Fixed
