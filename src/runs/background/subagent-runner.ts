@@ -23,6 +23,7 @@ import {
 	type ResolvedControlConfig,
 	type ResolvedTurnBudget,
 	type ResolvedToolBudget,
+	type SavedOutputReference,
 	type SubagentRunMode,
 	type ToolBudgetState,
 	type TurnBudgetState,
@@ -171,6 +172,7 @@ interface StepResult {
 	modelAttempts?: ModelAttempt[];
 	totalCost?: CostSummary;
 	artifactPaths?: ArtifactPaths;
+	outputReference?: SavedOutputReference;
 	truncated?: boolean;
 	transcriptPath?: string;
 	transcriptError?: string;
@@ -958,6 +960,7 @@ async function runSingleStep(
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	artifactPaths?: ArtifactPaths;
+	outputReference?: SavedOutputReference;
 	transcriptPath?: string;
 	transcriptError?: string;
 	interrupted?: boolean;
@@ -1397,6 +1400,7 @@ async function runSingleStep(
 		modelAttempts,
 		totalCost: costSummaryFromAttempts(modelAttempts),
 		artifactPaths,
+		outputReference,
 		transcriptPath: transcriptWriter ? artifactPaths?.transcriptPath : undefined,
 		transcriptError: transcriptWriter?.getError(),
 		interrupted: timedOutAfterAcceptance || stoppedAfterAcceptance || turnBudgetExceeded ? false : finalResult?.interrupted,
@@ -2941,6 +2945,7 @@ async function runSubagent(
 					modelAttempts: pr.modelAttempts,
 					totalCost: pr.totalCost,
 					artifactPaths: pr.artifactPaths,
+					outputReference: pr.outputReference,
 					transcriptPath: pr.transcriptPath,
 					transcriptError: pr.transcriptError,
 					structuredOutput: pr.structuredOutput,
@@ -3405,6 +3410,7 @@ async function runSubagent(
 				modelAttempts: singleResult.modelAttempts,
 				totalCost: singleResult.totalCost,
 				artifactPaths: singleResult.artifactPaths,
+				outputReference: singleResult.outputReference,
 				transcriptPath: singleResult.transcriptPath,
 				transcriptError: singleResult.transcriptError,
 				structuredOutput: singleResult.structuredOutput,
@@ -3700,6 +3706,7 @@ async function runSubagent(
 				modelAttempts: r.modelAttempts,
 				totalCost: r.totalCost,
 				artifactPaths: r.artifactPaths,
+				outputReference: r.outputReference,
 				truncated: r.truncated,
 				transcriptPath: r.transcriptPath,
 				transcriptError: r.transcriptError,
