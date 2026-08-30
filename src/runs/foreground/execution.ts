@@ -328,6 +328,7 @@ async function runSingleAttempt(
 		let timeoutTimer: NodeJS.Timeout | undefined;
 		let timeoutTerminationTimer: NodeJS.Timeout | undefined;
 		let timeoutHardKillTimer: NodeJS.Timeout | undefined;
+		let syncWakeTimer: NodeJS.Timeout | undefined;
 		let turnBudgetSoftReached = false;
 		let turnBudgetTerminationTimer: NodeJS.Timeout | undefined;
 		let turnBudgetHardKillTimer: NodeJS.Timeout | undefined;
@@ -371,6 +372,30 @@ async function runSingleAttempt(
 			};
 			finish(-2);
 		};
+
+		// Sync wake: a single foreground run whose child never completes would
+		// otherwise block the outer agent's loop forever (observed: a 14h stall
+		// from a deadlocked test binary). After the wake budget, detach the
+		// still-running child and hand control back to the outer agent; the
+		// child keeps running and stays recoverable via status/wait.
+		if (options.syncWakeMs !== undefined && options.syncWakeMs > 0) {
+			syncWakeTimer = setTimeout(() => {
+				if (settled || processClosed || detached) return;
+				detached = true;
+				processClosed = true;
+				result.detached = true;
+				result.detachedReason = "sync runtime wake";
+				progress.status = "detached";
+				progress.durationMs = Date.now() - startTime;
+				result.progressSummary = {
+					toolCount: progress.toolCount,
+					tokens: progress.tokens,
+					durationMs: progress.durationMs,
+				};
+				finish(-2);
+			}, options.syncWakeMs);
+			syncWakeTimer.unref?.();
+		}
 
 		// If the child emits a terminal assistant stop but never exits,
 		// give it a short grace period to flush naturally, then clean it up.
@@ -477,6 +502,10 @@ async function runSingleAttempt(
 			clearStdioGuard();
 			clearTimeoutTimers();
 			clearTurnBudgetTimers();
+			if (syncWakeTimer) {
+				clearTimeout(syncWakeTimer);
+				syncWakeTimer = undefined;
+			}
 			if (protocolHardKillTimer) {
 				clearTimeout(protocolHardKillTimer);
 				protocolHardKillTimer = undefined;
@@ -1009,10 +1038,14 @@ async function runSingleAttempt(
 	}
 	if (result.detached) {
 		result.exitCode = -2;
-		result.finalOutput = "Detached for intercom coordination before task completion.";
+		result.finalOutput = result.detachedReason === "sync runtime wake"
+			? "Sync wake: foreground runtime budget exceeded; the subagent continues in the background."
+			: "Detached for intercom coordination before task completion.";
 		result.outputMode = options.outputMode ?? "inline";
 		if (options.outputPath) {
-			result.outputSaveError = "Output file was not finalized because the subagent detached for intercom coordination.";
+			result.outputSaveError = result.detachedReason === "sync runtime wake"
+				? "Output file was not finalized because the subagent was detached by the sync runtime wake."
+				: "Output file was not finalized because the subagent detached for intercom coordination.";
 		}
 		return result;
 	}

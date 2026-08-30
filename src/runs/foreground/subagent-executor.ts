@@ -79,6 +79,7 @@ import {
 	formatWorktreeTaskCwdConflict,
 	type WorktreeSetup,
 } from "../shared/worktree.ts";
+import { resolveSyncWakeMs } from "../shared/sync-wake.ts";
 import {
 	type AgentProgress,
 	type AsyncStatus,
@@ -428,22 +429,31 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 	const summary = !success && input.result.error
 		? `${input.result.error}${output ? `\n\nOutput:\n${output}` : ""}`
 		: output || input.result.error || "Detached child exited without final output.";
-	input.events.emit(SUBAGENT_FOREGROUND_COMPLETE_EVENT, {
-		id: `${input.runId}:${input.index}`,
-		runId: input.runId,
-		source: "foreground",
-		mode: input.mode,
-		agent: input.result.agent,
-		success,
-		summary,
-		exitCode: input.result.exitCode,
-		state: success ? "complete" : "failed",
-		timestamp: updatedAt,
-		cwd: input.cwd,
-		sessionFile: input.result.sessionFile,
-		sessionId: input.sessionId,
-		taskIndex: input.index,
-	});
+	// Best-effort notify: when the parent session has already been torn down
+	// (single-shot runs, or a wake-detached child exiting after the outer
+	// agent's turn ended), the captured extension ctx is stale and emit
+	// throws. The run state above is already updated; swallowing here keeps
+	// the child close handler alive so finish()/process cleanup still run.
+	try {
+		input.events.emit(SUBAGENT_FOREGROUND_COMPLETE_EVENT, {
+			id: `${input.runId}:${input.index}`,
+			runId: input.runId,
+			source: "foreground",
+			mode: input.mode,
+			agent: input.result.agent,
+			success,
+			summary,
+			exitCode: input.result.exitCode,
+			state: success ? "complete" : "failed",
+			timestamp: updatedAt,
+			cwd: input.cwd,
+			sessionFile: input.result.sessionFile,
+			sessionId: input.sessionId,
+			taskIndex: input.index,
+		});
+	} catch (error) {
+		console.error(`[subagents] foreground-complete event delivery failed (parent ctx likely stale):`, error instanceof Error ? error.message : error);
+	}
 }
 
 function resolveForegroundResumeTarget(params: SubagentParamsLike, state: SubagentState): { runId: string; mode: "single" | "parallel" | "chain"; state: "complete"; agent: string; index: number; cwd: string; sessionFile: string } | undefined {
@@ -3120,6 +3130,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		: undefined;
 
 	const deadlineAt = data.deadlineAt ?? (data.timeoutMs !== undefined ? Date.now() + data.timeoutMs : undefined);
+	const resolvedSyncWakeMs = resolveSyncWakeMs(deps.config, data.timeoutMs);
 	const r = await runSync(ctx.cwd, agents, params.agent!, task, {
 		parentSessionId: ctx.sessionManager.getSessionId() ?? undefined,
 		cwd: effectiveCwd,
@@ -3127,6 +3138,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		interruptSignal: interruptController.signal,
 		allowIntercomDetach: agentConfig.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
 		intercomEvents: deps.pi.events,
+		syncWakeMs: resolvedSyncWakeMs,
 		runId,
 		sessionDir: sessionDirForIndex(0),
 		sessionFile: sessionFileForTask(params.agent!, 0, modelOverride),
@@ -3222,6 +3234,14 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 				...(r.exitCode !== 0 ? { isError: true } : {}),
 			};
 		}
+	}
+
+	if (r.detached && r.detachedReason === "sync runtime wake") {
+		const elapsedS = r.progressSummary?.durationMs !== undefined ? Math.round(r.progressSummary.durationMs / 1000) + "s" : "the foreground budget";
+		return {
+			content: [{ type: "text", text: `⏱ Sync wake after ${elapsedS}: ${params.agent} is STILL RUNNING in the background (run ${runId}). Check progress/health with subagent({ action: "status", id: "${runId}" }) or block until it finishes with subagent_wait({ id: "${runId}" }). Do not launch a replacement while it is active.` }],
+			details,
+		};
 	}
 
 	if (r.detached) {

@@ -1099,6 +1099,10 @@ export interface RunSyncOptions {
 	toolBudget?: ResolvedToolBudget;
 	allowIntercomDetach?: boolean;
 	intercomEvents?: IntercomEventBus;
+	/** Sync wake: after this much runtime, detach the still-running child and
+	 *  return control to the outer agent with a wake notice. Undefined or 0
+	 *  disables the wake. */
+	syncWakeMs?: number;
 	onUpdate?: (r: import("@earendil-works/pi-agent-core").AgentToolResult<Details>) => void;
 	onControlEvent?: (event: ControlEvent) => void;
 	onDetachedExit?: (result: SingleResult) => void;
@@ -1205,6 +1209,12 @@ export interface ExtensionConfig {
 	intercomBridge?: IntercomBridgeConfig;
 	proactiveSkillSubagents?: ProactiveSkillSubagentsConfig | false;
 	scheduledRuns?: ScheduledRunsConfig;
+	/** Sync single subagent runs detach and return a wake result to the outer
+	 *  agent after this much runtime; the child keeps running in the background
+	 *  and can be checked via subagent status/steer/subagent_wait. Defaults to
+	 *  DEFAULT_SYNC_WAKE_MS (4 min). Set 0 to disable. Explicit timeoutMs on a
+	 *  call takes precedence and disables the wake. */
+	syncWakeMs?: number;
 }
 
 // ============================================================================
@@ -1215,6 +1225,12 @@ export const DEFAULT_MAX_OUTPUT: Required<MaxOutputConfig> = {
 	bytes: 200 * 1024,
 	lines: 5000,
 };
+
+/** Default sync-runtime wake budget for single foreground subagent runs
+ *  (4 minutes). The outer agent is woken with a notice while the child keeps
+ *  running in the background — prevents silent 14h stalls on sync calls whose
+ *  child never completes. */
+export const DEFAULT_SYNC_WAKE_MS = 240_000;
 
 export const DEFAULT_ARTIFACT_CONFIG: ArtifactConfig = {
 	enabled: true,
