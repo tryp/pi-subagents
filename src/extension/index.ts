@@ -41,6 +41,8 @@ import { inspectSubagentStatus } from "../runs/background/run-status.ts";
 import { resolveWaitToolConfig } from "../runs/background/subagent-wait.ts";
 import { registerWaitTool } from "../runs/background/wait-tool.ts";
 import { drainOutstandingWork } from "../runs/background/auto-drain.ts";
+import { registerBackgroundWorkProvider } from "../api/background-work.ts";
+import { createSubagentBackgroundWorkProvider } from "../runs/background/background-work-provider.ts";
 import registerSubagentNotify, { parseSubagentNotifyContent, type SubagentNotifyDetails } from "../runs/background/notify.ts";
 import { formatSteeringNotice, handleSubagentSteeringNotice, SUBAGENT_STEERING_MESSAGE_TYPE, type SubagentSteeringMessageDetails } from "./steering-notices.ts";
 import { SUBAGENT_CHILD_ENV, SUBAGENT_PARENT_SESSION_ENV } from "../runs/shared/pi-args.ts";
@@ -244,6 +246,11 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	const supervisorChannel = createNativeSupervisorChannel(pi, state);
 	const mainWatchdog = registerMainWatchdog(pi);
+	const backgroundWorkProvider = createSubagentBackgroundWorkProvider({
+		asyncDir: ASYNC_DIR,
+		getSessionId: () => state.currentSessionId,
+	});
+	let disposeBackgroundWorkProvider = registerBackgroundWorkProvider(backgroundWorkProvider);
 	let disposeSubagentNotify = () => {};
 	const { startResultWatcher, primeExistingResults, stopResultWatcher } = createResultWatcher(
 		pi,
@@ -255,6 +262,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	primeExistingResults();
 
 	const runtimeCleanup = () => {
+		disposeBackgroundWorkProvider();
+		disposeBackgroundWorkProvider = () => {};
 		disposeSubagentNotify();
 		mainWatchdog.dispose();
 		stopResultWatcher();
@@ -563,6 +572,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", () => {
+		disposeBackgroundWorkProvider();
+		disposeBackgroundWorkProvider = () => {};
 		disposeSubagentNotify();
 		delete process.env[SUBAGENT_PARENT_SESSION_ENV];
 		for (const unsubscribe of eventUnsubscribes) {

@@ -21,6 +21,8 @@ export interface BackgroundWorkReconcileContext {
 export interface BackgroundWorkProvider {
 	name: string;
 	listActiveWork(): readonly BackgroundWorkItem[];
+	/** Optional attention work is separate so existing wait semantics stay unchanged. */
+	listAttentionWork?(): readonly BackgroundWorkItem[];
 	wakeChannels?: readonly string[];
 	reconcile?(context: BackgroundWorkReconcileContext): void;
 }
@@ -75,11 +77,14 @@ function validateProvider(value: unknown): BackgroundWorkProvider {
 		throw new Error("Background-work provider must be an object.");
 	}
 	const provider = value as Record<string, unknown>;
-	const unknownFields = Object.keys(provider).filter((key) => !["name", "listActiveWork", "wakeChannels", "reconcile"].includes(key));
+	const unknownFields = Object.keys(provider).filter((key) => !["name", "listActiveWork", "listAttentionWork", "wakeChannels", "reconcile"].includes(key));
 	if (unknownFields.length > 0) throw new Error(`Background-work provider has unknown fields: ${unknownFields.join(", ")}.`);
 	const name = validateString(provider.name, "Background-work provider name", MAX_PROVIDER_NAME_LENGTH);
 	if (typeof provider.listActiveWork !== "function") {
 		throw new Error(`Background-work provider '${name}' must expose listActiveWork().`);
+	}
+	if (provider.listAttentionWork !== undefined && typeof provider.listAttentionWork !== "function") {
+		throw new Error(`Background-work provider '${name}' listAttentionWork must be a function when provided.`);
 	}
 	if (provider.reconcile !== undefined && typeof provider.reconcile !== "function") {
 		throw new Error(`Background-work provider '${name}' reconcile must be a function when provided.`);
@@ -150,8 +155,11 @@ export function listBackgroundWorkWakeChannels(): readonly string[] {
 	return [...channels];
 }
 
-/** Reconcile and snapshot active provider work owned by one exact Pi session. */
-export function snapshotBackgroundWork(sessionId: string, nowMs = Date.now()): BackgroundWorkSnapshot {
+function snapshotProviderWork(
+	sessionId: string,
+	nowMs: number,
+	list: "active" | "attention",
+): BackgroundWorkSnapshot {
 	validateString(sessionId, "Background-work snapshot sessionId", MAX_SESSION_ID_LENGTH);
 	const providers = listBackgroundWorkProviders();
 	const items: RegisteredBackgroundWorkItem[] = [];
@@ -165,22 +173,24 @@ export function snapshotBackgroundWork(sessionId: string, nowMs = Date.now()): B
 				{ cause: error },
 			);
 		}
-		let active: readonly BackgroundWorkItem[];
+		const listWork = list === "active" ? provider.listActiveWork : provider.listAttentionWork;
+		if (!listWork) continue;
+		let work: readonly BackgroundWorkItem[];
 		try {
-			active = provider.listActiveWork();
+			work = listWork.call(provider);
 		} catch (error) {
 			throw new Error(
-				`Background-work provider '${provider.name}' listActiveWork failed: ${error instanceof Error ? error.message : String(error)}`,
+				`Background-work provider '${provider.name}' ${list === "active" ? "listActiveWork" : "listAttentionWork"} failed: ${error instanceof Error ? error.message : String(error)}`,
 				{ cause: error },
 			);
 		}
-		if (!Array.isArray(active)) {
-			throw new Error(`Background-work provider '${provider.name}' listActiveWork() must return an array.`);
+		if (!Array.isArray(work)) {
+			throw new Error(`Background-work provider '${provider.name}' ${list === "active" ? "listActiveWork" : "listAttentionWork"}() must return an array.`);
 		}
-		if (active.length > MAX_ITEMS_PER_PROVIDER) {
-			throw new Error(`Background-work provider '${provider.name}' returned ${active.length} items; maximum is ${MAX_ITEMS_PER_PROVIDER}.`);
+		if (work.length > MAX_ITEMS_PER_PROVIDER) {
+			throw new Error(`Background-work provider '${provider.name}' returned ${work.length} items; maximum is ${MAX_ITEMS_PER_PROVIDER}.`);
 		}
-		active.forEach((value, index) => {
+		work.forEach((value, index) => {
 			const item = validateItem(provider.name, value, index);
 			const identity = `${provider.name}\0${item.sessionId}\0${item.id}`;
 			if (identities.has(identity)) {
@@ -190,8 +200,15 @@ export function snapshotBackgroundWork(sessionId: string, nowMs = Date.now()): B
 			if (item.sessionId === sessionId) items.push({ provider: provider.name, ...item });
 		});
 	}
-	return {
-		providers: providers.map((provider) => provider.name),
-		items,
-	};
+	return { providers: providers.map((provider) => provider.name), items };
+}
+
+/** Reconcile and snapshot active provider work owned by one exact Pi session. */
+export function snapshotBackgroundWork(sessionId: string, nowMs = Date.now()): BackgroundWorkSnapshot {
+	return snapshotProviderWork(sessionId, nowMs, "active");
+}
+
+/** Reconcile and snapshot optional provider work that needs user/model attention. */
+export function snapshotBackgroundWorkAttention(sessionId: string, nowMs = Date.now()): BackgroundWorkSnapshot {
+	return snapshotProviderWork(sessionId, nowMs, "attention");
 }

@@ -9,9 +9,11 @@ import {
 	listBackgroundWorkWakeChannels,
 	registerBackgroundWorkProvider,
 	snapshotBackgroundWork,
+	snapshotBackgroundWorkAttention,
 	type BackgroundWorkSnapshot,
 } from "../../src/api/background-work.ts";
 import { waitForSubagents, type SubagentWaitDeps } from "../../src/runs/background/subagent-wait.ts";
+import { createSubagentBackgroundWorkProvider } from "../../src/runs/background/background-work-provider.ts";
 import type { SubagentState } from "../../src/shared/types.ts";
 
 function clearRegistry(): void {
@@ -105,6 +107,7 @@ describe("background-work provider protocol", () => {
 	});
 
 	it("validates provider metadata and work items strictly", () => {
+		assert.throws(() => registerBackgroundWorkProvider({ name: "patty", listActiveWork: () => [], listAttentionWork: "invalid" as never }), /listAttentionWork must be a function/);
 		assert.throws(() => registerBackgroundWorkProvider({ name: " patty", listActiveWork: () => [] }), /leading or trailing/);
 		assert.throws(() => registerBackgroundWorkProvider({ name: "patty", listActiveWork: () => [], wakeChannels: ["done", "done"] }), /duplicates/);
 
@@ -123,6 +126,25 @@ describe("background-work provider protocol", () => {
 			],
 		});
 		assert.throws(() => snapshotBackgroundWork("session-a"), /duplicate item 'job'/);
+	});
+
+	it("filters optional attention work by exact session without affecting active snapshots", () => {
+		let attentionCalls = 0;
+		registerBackgroundWorkProvider({
+			name: "patty",
+			listActiveWork: () => [{ id: "running", sessionId: "session-a" }],
+			listAttentionWork: () => {
+				attentionCalls += 1;
+				return [
+					{ id: "failed", sessionId: "session-a" },
+					{ id: "other", sessionId: "session-b" },
+				];
+			},
+		});
+		assert.deepEqual(snapshotBackgroundWork("session-a").items, [{ provider: "patty", id: "running", sessionId: "session-a" }]);
+		assert.equal(attentionCalls, 0);
+		assert.deepEqual(snapshotBackgroundWorkAttention("session-a").items, [{ provider: "patty", id: "failed", sessionId: "session-a" }]);
+		assert.equal(attentionCalls, 1);
 	});
 
 	it("preserves list and reconcile errors with provider context", () => {
@@ -151,6 +173,40 @@ describe("background-work provider protocol", () => {
 		});
 		assert.deepEqual(listBackgroundWorkWakeChannels(), ["patty:finished"]);
 		assert.equal(called, false);
+	});
+});
+
+describe("pi-subagents background-work provider", () => {
+	it("exposes actionable async states but not healthy running work", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-provider-own-"));
+		try {
+			const id = (suffix: string) => `${path.basename(root)}-${suffix}`;
+			for (const [suffix, state] of [["failed", "failed"], ["paused", "paused"], ["stopped", "stopped"], ["timed-out", "running"], ["tool-blocked", "running"], ["turn-blocked", "running"], ["healthy", "running"]] as const) {
+				writeStatus(root, id(suffix), state);
+			}
+			writeStatus(root, id("other-session"), "failed", "session-b");
+			for (const [suffix, fields] of [
+				["timed-out", { timedOut: true }],
+				["tool-blocked", { toolBudgetBlocked: true }],
+				["turn-blocked", { turnBudgetExceeded: true }],
+			] as const) {
+				const statusPath = path.join(root, id(suffix), "status.json");
+				const status = JSON.parse(fs.readFileSync(statusPath, "utf8"));
+				delete status.pid;
+				fs.writeFileSync(statusPath, JSON.stringify({ ...status, ...fields }));
+			}
+			for (const suffix of ["healthy", "failed", "paused", "stopped", "other-session"]) {
+				const statusPath = path.join(root, id(suffix), "status.json");
+				const status = JSON.parse(fs.readFileSync(statusPath, "utf8"));
+				delete status.pid;
+				fs.writeFileSync(statusPath, JSON.stringify(status));
+			}
+			const provider = createSubagentBackgroundWorkProvider({ asyncDir: root, getSessionId: () => "session-a" });
+			assert.deepEqual(provider.listActiveWork?.().map((item) => item.id).sort(), [id("healthy"), id("timed-out"), id("tool-blocked"), id("turn-blocked")].sort());
+			assert.deepEqual(provider.listAttentionWork?.().map((item) => item.id).sort(), [id("failed"), id("paused"), id("stopped"), id("timed-out"), id("tool-blocked"), id("turn-blocked")].sort());
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 

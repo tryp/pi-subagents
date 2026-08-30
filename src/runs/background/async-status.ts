@@ -41,6 +41,8 @@ interface AsyncRunStepSummary {
 	turnBudget?: TurnBudgetState;
 	turnBudgetExceeded?: boolean;
 	wrapUpRequested?: boolean;
+	toolBudget?: import("../../shared/types.ts").ToolBudgetState;
+	toolBudgetBlocked?: boolean;
 	children?: NestedRunSummary[];
 }
 
@@ -70,6 +72,8 @@ export interface AsyncRunSummary {
 	turnBudget?: TurnBudgetState;
 	turnBudgetExceeded?: boolean;
 	wrapUpRequested?: boolean;
+	toolBudget?: import("../../shared/types.ts").ToolBudgetState;
+	toolBudgetBlocked?: boolean;
 	currentStep?: number;
 	chainStepCount?: number;
 	pendingAppends?: number;
@@ -192,6 +196,8 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.turnBudget ? { turnBudget: step.turnBudget } : {}),
 			...(step.turnBudgetExceeded !== undefined ? { turnBudgetExceeded: step.turnBudgetExceeded } : {}),
 			...(step.wrapUpRequested !== undefined ? { wrapUpRequested: step.wrapUpRequested } : {}),
+			...(step.toolBudget ? { toolBudget: step.toolBudget } : {}),
+			...(step.toolBudgetBlocked !== undefined ? { toolBudgetBlocked: step.toolBudgetBlocked } : {}),
 			...(step.children?.length ? { children: step.children } : {}),
 		};
 	});
@@ -222,6 +228,8 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		...(status.turnBudget ? { turnBudget: status.turnBudget } : {}),
 		...(status.turnBudgetExceeded !== undefined ? { turnBudgetExceeded: status.turnBudgetExceeded } : {}),
 		...(status.wrapUpRequested !== undefined ? { wrapUpRequested: status.wrapUpRequested } : {}),
+		...(status.toolBudget ? { toolBudget: status.toolBudget } : {}),
+		...(status.toolBudgetBlocked !== undefined ? { toolBudgetBlocked: status.toolBudgetBlocked } : {}),
 		currentStep: status.currentStep,
 		...(status.chainStepCount !== undefined ? { chainStepCount: status.chainStepCount } : {}),
 		...(status.pendingAppends !== undefined ? { pendingAppends: status.pendingAppends } : {}),
