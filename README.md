@@ -25,8 +25,9 @@ Keep development and runtime files separate. If your development checkout is
 From the development checkout:
 
 ```bash
-make deploy            # requires committed changes; mirrors, installs deps, and verifies
-make verify            # detect runtime drift
+make deploy            # requires committed changes; mirrors, installs deps, verifies, and smoke-tests
+make verify            # detect runtime drift, including the deployment stamp
+make smoke-test        # load only the deployed extension in a fresh pi process
 make deployed-commit   # show the deployed source commit
 ```
 
