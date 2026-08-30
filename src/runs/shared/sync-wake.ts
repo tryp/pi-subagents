@@ -19,7 +19,8 @@ export function resolveSyncWakeMs(
 	explicitTimeoutMs?: number,
 ): number | undefined {
 	if (explicitTimeoutMs !== undefined) return undefined;
+	if (typeof config.syncWakeMs !== "number" || !Number.isFinite(config.syncWakeMs)) return DEFAULT_SYNC_WAKE_MS;
 	if (config.syncWakeMs === 0) return undefined;
-	if (config.syncWakeMs !== undefined && config.syncWakeMs > 0) return config.syncWakeMs;
+	if (config.syncWakeMs > 0) return config.syncWakeMs;
 	return DEFAULT_SYNC_WAKE_MS;
 }

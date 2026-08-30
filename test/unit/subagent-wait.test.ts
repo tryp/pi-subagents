@@ -322,6 +322,36 @@ describe("subagent_wait tool", () => {
 		}
 	});
 
+	it("uses sync-wake guidance when a detached foreground run times out", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-sync-wake-"));
+		try {
+			const state = makeState("sess-1");
+			state.foregroundRuns = new Map([["foreground-sync-wake", {
+				runId: "foreground-sync-wake",
+				mode: "single",
+				cwd: root,
+				sessionId: "sess-1",
+				updatedAt: 1,
+				children: [{ agent: "reviewer", index: 0, status: "detached", detachedReason: "sync runtime wake", updatedAt: 1 }],
+			}]]);
+			let clock = 0;
+			const result = await waitForSubagents({ id: "foreground-sync-wake", timeoutMs: 1 }, undefined, baseDeps(root, state, {
+				now: () => clock,
+				sleep: async (ms) => {
+					clock += ms;
+				},
+			}));
+
+			assert.equal(result.isError, true);
+			const text = textOf(result);
+			assert.match(text, /sync wake/);
+			assert.doesNotMatch(text, /Reply to any pending supervisor request/);
+			assert.match(text, /Do not resume or launch a replacement/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("does not claim completion when a detached foreground run disappears or the active session changes", async () => {
 		for (const scenario of ["missing", "session-change"] as const) {
 			const root = fs.mkdtempSync(path.join(os.tmpdir(), `pi-wait-foreground-${scenario}-`));

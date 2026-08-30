@@ -22,7 +22,9 @@ void describe("resolveSyncWakeMs", () => {
 		assert.equal(resolveSyncWakeMs({ syncWakeMs: 60_000 }, 600_000), undefined);
 	});
 
-	it("falls back to the default on a negative config value", () => {
+	it("falls back to the default on invalid config values", () => {
 		assert.equal(resolveSyncWakeMs({ syncWakeMs: -1 }), DEFAULT_SYNC_WAKE_MS);
+		assert.equal(resolveSyncWakeMs({ syncWakeMs: Number.NaN }), DEFAULT_SYNC_WAKE_MS);
+		assert.equal(resolveSyncWakeMs({ syncWakeMs: "60000" as unknown as number }), DEFAULT_SYNC_WAKE_MS);
 	});
 });

@@ -25,7 +25,7 @@ import {
 	events,
 	tryImport,
 } from "../support/helpers.ts";
-import { INTERCOM_DETACH_REQUEST_EVENT, INTERCOM_DETACH_RESPONSE_EVENT, type SubagentState } from "../../src/shared/types.ts";
+import { INTERCOM_DETACH_REQUEST_EVENT, INTERCOM_DETACH_RESPONSE_EVENT, SUBAGENT_FOREGROUND_COMPLETE_EVENT, type SubagentState } from "../../src/shared/types.ts";
 import { CHILD_WATCHDOG_STATUS_EVENT } from "../../src/watchdog/child-status.ts";
 import { WAIT_TOOL_ENABLED_ENV } from "../../src/runs/background/wait-config.ts";
 import { MainWatchdogRuntime } from "../../src/watchdog/runtime.ts";
@@ -2462,6 +2462,93 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 			assert.equal(accepted, true);
 		});
 	}
+
+	it("detaches at the sync wake budget and recovers the child result", async () => {
+		mockPi.onCall({ output: "completed after wake", delay: 300 });
+		const outputPath = path.join(tempDir, "sync-wake-output.md");
+		let recoveredResult: RunSyncResult | undefined;
+		const startedAt = Date.now();
+
+		const result = await runSync(tempDir, makeAgentConfigs(["echo"]), "echo", "Long-running task", {
+			runId: "sync-wake-integration",
+			syncWakeMs: 100,
+			outputPath,
+			outputMode: "file-only",
+			onDetachedExit: (postExit) => {
+				recoveredResult = postExit as RunSyncResult;
+			},
+		});
+
+		assert.ok(Date.now() - startedAt < 250, "sync wake should return before the mock child completes");
+		assert.equal(result.exitCode, -2);
+		assert.equal(result.detached, true);
+		assert.equal(result.detachedReason, "sync runtime wake");
+		assert.equal(result.progress.status, "detached");
+		assert.match(result.finalOutput ?? "", /Sync wake: foreground runtime budget exceeded/);
+		assert.match(result.outputSaveError ?? "", /not finalized/);
+		assert.equal(fs.existsSync(outputPath), false);
+
+		for (let attempt = 0; attempt < 100 && !recoveredResult; attempt++) {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.ok(recoveredResult, "detached child should report a recovered result after it exits");
+		assert.equal(recoveredResult?.exitCode, 0);
+		assert.equal(recoveredResult?.progress.status, "completed");
+		assert.equal(recoveredResult?.savedOutputPath, outputPath);
+		assert.equal(fs.readFileSync(outputPath, "utf-8"), "completed after wake");
+	});
+
+	it("survives stale foreground-complete event delivery after a sync wake", async () => {
+		mockPi.onCall({ output: "completed with stale ctx", delay: 300 });
+		let completionEvents = 0;
+		const staleEvents = {
+			on: () => () => {},
+			emit(channel: string) {
+				if (channel === SUBAGENT_FOREGROUND_COMPLETE_EVENT) {
+					completionEvents += 1;
+					throw new Error("stale extension ctx");
+				}
+			},
+		};
+		const state = {
+			baseCwd: tempDir,
+			currentSessionId: "session-123",
+			asyncJobs: new Map(),
+			foregroundControls: new Map(),
+			lastForegroundControlId: null,
+		} as SubagentState;
+		const executor = createSubagentExecutor!({
+			pi: { events: staleEvents, getSessionName: () => undefined },
+			state,
+			config: { syncWakeMs: 100 },
+			asyncByDefault: false,
+			tempArtifactsDir: tempDir,
+			getSubagentSessionRoot: () => tempDir,
+			expandTilde: (value: string) => value,
+			discoverAgents: () => ({ agents: [makeAgent("echo")] }),
+		});
+
+		const result = await executor.execute(
+			"stale-ctx-sync-wake",
+			{ agent: "echo", task: "Complete after the wake" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.match(result.content[0]?.text ?? "", /Sync wake.*STILL RUNNING/);
+		assert.doesNotMatch(result.content[0]?.text ?? "", /action: "steer"/);
+		for (let attempt = 0; attempt < 100; attempt++) {
+			const completed = [...(state.foregroundRuns?.values() ?? [])]
+				.some((run) => run.children.some((child) => child.status === "completed"));
+			if (completed) break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		const completedRun = [...(state.foregroundRuns?.values() ?? [])]
+			.find((run) => run.children.some((child) => child.status === "completed"));
+		assert.ok(completedRun, "remembered foreground state should be updated after child exit");
+		assert.equal(completionEvents, 1);
+	});
 
 	it("enforces the stdout protocol limit after foreground detachment", async () => {
 		const eventBus = createEventBus();

@@ -312,8 +312,12 @@ async function waitForDetachedForegroundRun(
 			return result(`Wait aborted after ${formatDuration(now() - startedAt)}. Remembered foreground run "${run.runId}" remains detached.`, true);
 		}
 		if (now() - startedAt >= timeoutMs) {
+			const syncWakeDetached = current.children.some((child) => initialDetachedIndices.has(child.index) && child.status === "detached" && child.detachedReason === "sync runtime wake");
+			const guidance = syncWakeDetached
+				? `The child is still running after the sync wake; call subagent_wait({ id: "${run.runId}" }) again or inspect status.`
+				: `Reply to any pending supervisor request, then call subagent_wait({ id: "${run.runId}" }) again or inspect status.`;
 			return result(
-				`Wait timed out after ${formatDuration(timeoutMs)} with remembered foreground run "${run.runId}" still detached. Reply to any pending supervisor request, then call subagent_wait({ id: "${run.runId}" }) again or inspect status; do not resume or launch a replacement while it remains detached.`,
+				`Wait timed out after ${formatDuration(timeoutMs)} with remembered foreground run "${run.runId}" still detached. ${guidance} Do not resume or launch a replacement while it remains detached.`,
 				true,
 			);
 		}

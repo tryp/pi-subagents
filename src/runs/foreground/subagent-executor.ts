@@ -465,7 +465,14 @@ function resolveForegroundResumeTarget(params: SubagentParamsLike, state: Subage
 	if (matches.length === 0) return undefined;
 	if (matches.length > 1) throw new Error(`Ambiguous foreground run id prefix '${requested}' matched: ${matches.map((run) => run.runId).join(", ")}. Provide a longer id.`);
 	const run = matches[0]!;
-	if (run.children.some((child) => child.status === "detached")) throw new Error(`Foreground run '${run.runId}' is detached for intercom coordination and cannot be revived safely while any child may still be live. Reply to the supervisor request first, then wait with subagent_wait({ id: "${run.runId}" }); use status to recover the result and do not launch a replacement while it remains detached.`);
+	if (run.children.some((child) => child.status === "detached")) {
+		const syncWakeDetached = run.children.some((child) => child.status === "detached" && child.detachedReason === "sync runtime wake");
+		const guidance = syncWakeDetached
+			? `The child is still running after the sync wake; wait with subagent_wait({ id: "${run.runId}" }) or use status to recover the result.`
+			: `Reply to the supervisor request first, then wait with subagent_wait({ id: "${run.runId}" }); use status to recover the result.`;
+		const reason = syncWakeDetached ? "sync runtime wake" : "intercom coordination";
+		throw new Error(`Foreground run '${run.runId}' is detached for ${reason} and cannot be revived safely while any child may still be live. ${guidance} Do not launch a replacement while it remains detached.`);
+	}
 	if (run.children.length > 1 && params.index === undefined) throw new Error(`Foreground run '${run.runId}' has ${run.children.length} children. Provide index to choose one.`);
 	const index = params.index ?? 0;
 	if (!Number.isInteger(index)) throw new Error(`Foreground run '${run.runId}' index must be an integer.`);
