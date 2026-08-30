@@ -460,7 +460,12 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	pi.registerTool(tool);
 
 	// Minimal model guidance — list/models actions do the heavy lifting.
-	pi.registerToolPromptGuidelines("subagent", [
+	const registerToolPromptGuidelines = (
+		pi as typeof pi & {
+			registerToolPromptGuidelines?: (toolName: string, guidelines: string[]) => void;
+		}
+	).registerToolPromptGuidelines;
+	registerToolPromptGuidelines?.call(pi, "subagent", [
 		"Model routing: add model: \"provider/id\" to override (e.g. model: \"openai-codex/gpt-5.6-luna\").",
 		"Bare names auto-resolve (\"gpt-5.6-luna\" → openai-codex). Omit model to inherit parent session.",
 		"Discover models via subagent({action: \"list\"}) or subagent({action: \"models\"}).",
