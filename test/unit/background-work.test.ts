@@ -181,9 +181,13 @@ describe("pi-subagents background-work provider", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-provider-own-"));
 		try {
 			const id = (suffix: string) => `${path.basename(root)}-${suffix}`;
-			for (const [suffix, state] of [["failed", "failed"], ["paused", "paused"], ["stopped", "stopped"], ["timed-out", "running"], ["tool-blocked", "running"], ["turn-blocked", "running"], ["healthy", "running"]] as const) {
+			for (const [suffix, state] of [["failed", "failed"], ["paused", "paused"], ["stopped", "stopped"], ["timed-out", "running"], ["tool-blocked", "running"], ["turn-blocked", "running"], ["step-attention", "running"], ["healthy", "running"]] as const) {
 				writeStatus(root, id(suffix), state);
 			}
+			const stepAttentionStatusPath = path.join(root, id("step-attention"), "status.json");
+			const stepAttentionStatus = JSON.parse(fs.readFileSync(stepAttentionStatusPath, "utf8"));
+			stepAttentionStatus.steps[0].activityState = "needs_attention";
+			fs.writeFileSync(stepAttentionStatusPath, JSON.stringify(stepAttentionStatus));
 			writeStatus(root, id("other-session"), "failed", "session-b");
 			for (const [suffix, fields] of [
 				["timed-out", { timedOut: true }],
@@ -195,15 +199,15 @@ describe("pi-subagents background-work provider", () => {
 				delete status.pid;
 				fs.writeFileSync(statusPath, JSON.stringify({ ...status, ...fields }));
 			}
-			for (const suffix of ["healthy", "failed", "paused", "stopped", "other-session"]) {
+			for (const suffix of ["healthy", "step-attention", "failed", "paused", "stopped", "other-session"]) {
 				const statusPath = path.join(root, id(suffix), "status.json");
 				const status = JSON.parse(fs.readFileSync(statusPath, "utf8"));
 				delete status.pid;
 				fs.writeFileSync(statusPath, JSON.stringify(status));
 			}
 			const provider = createSubagentBackgroundWorkProvider({ asyncDir: root, getSessionId: () => "session-a" });
-			assert.deepEqual(provider.listActiveWork?.().map((item) => item.id).sort(), [id("healthy"), id("timed-out"), id("tool-blocked"), id("turn-blocked")].sort());
-			assert.deepEqual(provider.listAttentionWork?.().map((item) => item.id).sort(), [id("failed"), id("paused"), id("stopped"), id("timed-out"), id("tool-blocked"), id("turn-blocked")].sort());
+			assert.deepEqual(provider.listActiveWork?.().map((item) => item.id).sort(), [id("healthy"), id("step-attention"), id("timed-out"), id("tool-blocked"), id("turn-blocked")].sort());
+			assert.deepEqual(provider.listAttentionWork?.().map((item) => item.id).sort(), [id("failed"), id("paused"), id("stopped"), id("step-attention"), id("timed-out"), id("tool-blocked"), id("turn-blocked")].sort());
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

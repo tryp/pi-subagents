@@ -17,7 +17,8 @@ function hasAttention(run: AsyncRunSummary): boolean {
 	if (run.activityState === "needs_attention" || run.timedOut === true || run.toolBudgetBlocked === true || run.turnBudgetExceeded === true) return true;
 	if (run.turnBudget?.outcome === "exceeded" || run.toolBudget?.outcome === "hard-blocked") return true;
 	return run.steps.some((step) =>
-		step.timedOut === true
+		(run.state === "running" && step.activityState === "needs_attention")
+			|| step.timedOut === true
 			|| step.stopped === true
 			|| step.turnBudgetExceeded === true
 			|| step.toolBudgetBlocked === true
