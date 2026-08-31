@@ -248,7 +248,7 @@ function formatForegroundFleetLines(controls: ForegroundControl[]): string[] {
 		});
 		const current = control.currentAgent ? ` | ${control.currentAgent}${control.currentIndex !== undefined ? ` #${control.currentIndex}` : ""}` : "";
 		lines.push(`- ${control.runId} | running | ${foregroundModeName(control)}${current}${activity ? ` | ${activity}` : ""}`);
-		lines.push(`  status: subagent({ action: "status", id: "${control.runId}" })`);
+		lines.push(`  status: subagent({ action: "status", runId: "${control.runId}" })`);
 		lines.push("  transcript: live in the expanded foreground result; persisted session transcript appears after completion when sessions are enabled.");
 		lines.push(...formatNestedRunStatusLines(control.nestedChildren, { indent: "  ", commandHints: true, maxLines: 12 }));
 	}
@@ -263,8 +263,8 @@ function formatDetachedForegroundFleetLines(runs: ForegroundRun[]): string[] {
 		const detachedChildren = run.children.filter((child) => child.status === "detached");
 		const childSummary = detachedChildren.map((child) => `${child.agent} #${child.index}`).join(", ");
 		lines.push(`- ${run.runId} | detached | ${run.mode}${childSummary ? ` | ${childSummary}` : ""}`);
-		lines.push(`  status: subagent({ action: "status", id: "${run.runId}" })`);
-		lines.push(`  recovery: reply to the supervisor request first, then wait with subagent_wait({ id: "${run.runId}" }); do not resume or launch a replacement while any child remains detached.`);
+		lines.push(`  status: subagent({ action: "status", runId: "${run.runId}" })`);
+		lines.push(`  recovery: reply to the supervisor request first, then wait with subagent_wait({ runId: "${run.runId}", barrier: "consume-result" }); do not resume or launch a replacement while any child remains detached.`);
 	}
 	return lines;
 }

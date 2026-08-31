@@ -120,17 +120,17 @@ function formatRememberedForegroundStatus(run: ForegroundResumeRun): string {
 		if (child.outputSaveError) lines.push(`  Output warning: ${child.outputSaveError}`);
 		if (child.transcriptError) lines.push(`  Transcript warning: ${child.transcriptError}`);
 	}
-	lines.push("", `Status: subagent({ action: "status", id: "${run.runId}" })`);
-	if (run.children.length === 1) lines.push(`Transcript: subagent({ action: "status", id: "${run.runId}", view: "transcript" })`);
-	else lines.push(`Transcript: subagent({ action: "status", id: "${run.runId}", index: 0, view: "transcript" })`);
+	lines.push("", `Status: subagent({ action: "status", runId: "${run.runId}" })`);
+	if (run.children.length === 1) lines.push(`Transcript: subagent({ action: "status", runId: "${run.runId}", view: "transcript" })`);
+	else lines.push(`Transcript: subagent({ action: "status", runId: "${run.runId}", childIndex: 0, view: "transcript" })`);
 	const detached = run.children.some((child) => child.status === "detached");
 	const resumable = run.children.find((child) => hasExistingSessionFile(child.sessionFile));
 	if (detached) {
-		lines.push(`Recovery: reply to the supervisor request first, then wait with subagent_wait({ id: "${run.runId}" }); do not resume or launch a replacement while any child remains detached.`);
+		lines.push(`Recovery: reply to the supervisor request first, then wait with subagent_wait({ runId: "${run.runId}", barrier: "consume-result" }); do not resume or launch a replacement while any child remains detached.`);
 	} else if (resumable) {
 		lines.push(run.children.length === 1
-			? `Revive: subagent({ action: "resume", id: "${run.runId}", message: "..." })`
-			: `Revive child: subagent({ action: "resume", id: "${run.runId}", index: ${resumable.index}, message: "..." })`);
+			? `Revive: subagent({ action: "resume", runId: "${run.runId}", message: "..." })`
+			: `Revive child: subagent({ action: "resume", runId: "${run.runId}", childIndex: ${resumable.index}, message: "..." })`);
 	} else {
 		lines.push("Resume: unavailable; no child session file was persisted.");
 	}
