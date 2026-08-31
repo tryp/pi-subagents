@@ -351,6 +351,7 @@ export interface SubagentResultIntercomChild {
 export interface SubagentResultIntercomPayload {
 	to: string;
 	message: string;
+	/** Delivery correlation id; distinct from the canonical runId. */
 	requestId?: string;
 	runId: string;
 	mode: SubagentRunMode;
@@ -412,6 +413,29 @@ interface ProgressSummary {
 	toolCount: number;
 	tokens: number;
 	durationMs: number;
+}
+
+export interface SupervisorCheckpoint {
+	/** Canonical root run id used by public status, steer, and wait controls. */
+	runId: string;
+	/** Runtime elapsed duration when the foreground detachment was triggered. */
+	elapsedMs: number;
+	/** Active child state captured at the checkpoint. */
+	activeChildSummary: {
+		total: number;
+		children: Array<{
+			agent: string;
+			index: number;
+			status: "running" | "detached";
+			currentTool?: string;
+		}>;
+	};
+	reason: "supervisor_checkpoint";
+	suggestedActions: {
+		status: { tool: "subagent"; action: "status"; runId: string };
+		steer: { tool: "subagent"; action: "steer"; runId: string; childIndex: number; message: string };
+		wait: { tool: "subagent_wait"; runId: string; barrier: "consume-result" };
+	};
 }
 
 // ============================================================================
@@ -609,6 +633,7 @@ export interface SingleResult {
 	skillsWarning?: string;
 	progress?: AgentProgress;
 	progressSummary?: ProgressSummary;
+	supervisorCheckpoint?: SupervisorCheckpoint;
 	toolCalls?: ToolCallSummary[];
 	artifactPaths?: ArtifactPaths;
 	truncation?: TruncationResult;
@@ -662,6 +687,7 @@ export interface Details {
 	toolBudget?: ResolvedToolBudget;
 	progress?: AgentProgress[];
 	progressSummary?: ProgressSummary;
+	supervisorCheckpoint?: SupervisorCheckpoint;
 	artifacts?: {
 		dir: string;
 		files: ArtifactPaths[];
@@ -986,6 +1012,7 @@ export interface ForegroundResumeChild {
 	transcriptPath?: string;
 	transcriptError?: string;
 	detachedReason?: string;
+	supervisorCheckpoint?: SupervisorCheckpoint;
 	acceptance?: AcceptanceLedger;
 	updatedAt?: number;
 }

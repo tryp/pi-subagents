@@ -29,7 +29,10 @@ type SupervisorReason = "need_decision" | "interview_request" | "progress_update
 
 interface SupervisorRequest {
 	type: "subagent.supervisor.request";
-	id: string;
+	/** Canonical durable request id. */
+	requestId: string;
+	/** Legacy alias retained when reading/writing older channel records. */
+	id?: string;
 	createdAt: number;
 	expiresAt?: number;
 	reason: SupervisorReason;
@@ -236,6 +239,7 @@ async function sendSupervisorRequest(params: ContactSupervisorParams, signal?: A
 	const message = formatChildMessage({ ...metadata, reason: params.reason, message: params.message, interview: params.interview });
 	const request: SupervisorRequest = {
 		type: "subagent.supervisor.request",
+		requestId,
 		id: requestId,
 		createdAt,
 		...(expiresAt !== undefined ? { expiresAt } : {}),
@@ -325,11 +329,14 @@ function parseRequestFile(file: string, channelDir: string): PendingSupervisorRe
 	try {
 		const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as Partial<SupervisorRequest>;
 		if (parsed.type !== "subagent.supervisor.request") return undefined;
-		if (typeof parsed.id !== "string" || !parsed.id) return undefined;
+		const requestId = typeof parsed.requestId === "string" && parsed.requestId
+			? parsed.requestId
+			: typeof parsed.id === "string" && parsed.id ? parsed.id : undefined;
+		if (!requestId) return undefined;
 		if (parsed.reason !== "need_decision" && parsed.reason !== "interview_request" && parsed.reason !== "progress_update") return undefined;
 		if (typeof parsed.message !== "string" || !parsed.message) return undefined;
 		if (typeof parsed.runId !== "string" || typeof parsed.agent !== "string" || typeof parsed.childIndex !== "number") return undefined;
-		return { ...parsed as SupervisorRequest, channelDir, requestFile: file };
+		return { ...parsed as SupervisorRequest, requestId, id: parsed.id ?? requestId, channelDir, requestFile: file };
 	} catch {
 		return undefined;
 	}
@@ -480,7 +487,7 @@ function requestRunInactive(request: SupervisorRequest, state: SubagentState): b
 function requestLifecycle(request: PendingSupervisorRequest, state: SubagentState, ctx: ExtensionContext | undefined, now: number): SupervisorRequestLifecycle {
 	if (ctx && !requestMatchesContext(request, state, ctx)) return "wrong-session";
 	if (!fs.existsSync(request.requestFile)) return "missing";
-	if (request.expectsReply && fs.existsSync(replyPath(request.channelDir, request.id))) return "resolved";
+	if (request.expectsReply && fs.existsSync(replyPath(request.channelDir, request.requestId))) return "resolved";
 	if (request.expectsReply && now > requestExpiresAt(request, now)) return "expired";
 	if (request.expectsReply && requestRunInactive(request, state)) return "inactive";
 	return "pending";
@@ -495,20 +502,20 @@ function refreshPendingRequests(pending: Map<string, PendingSupervisorRequest>, 
 	for (const request of pending.values()) {
 		const lifecycle = requestLifecycle(request, state, ctx, now);
 		if (lifecycle === "pending") continue;
-		pending.delete(request.id);
+		pending.delete(request.requestId);
 		cleanupRequestLifecycle(request, lifecycle);
 	}
 }
 
 function formatPendingLine(request: PendingSupervisorRequest): string {
-	const replyHint = request.expectsReply ? ` Reply: ${NATIVE_SUPERVISOR_TOOL_NAME}({ action: "reply", replyTo: "${request.id}", message: "..." })` : "";
-	return `- ${request.id}: ${request.agent} [${request.runId}#${request.childIndex}] ${request.reason}.${replyHint}`;
+	const replyHint = request.expectsReply ? ` Reply: ${NATIVE_SUPERVISOR_TOOL_NAME}({ action: "reply", replyTo: "${request.requestId}", message: "..." })` : "";
+	return `- ${request.requestId}: ${request.agent} [${request.runId}#${request.childIndex}] ${request.reason}.${replyHint}`;
 }
 
 function requestVisibleText(request: PendingSupervisorRequest): string {
 	const lines = [request.message];
 	if (request.expectsReply) {
-		lines.push("", `Reply with: ${NATIVE_SUPERVISOR_TOOL_NAME}({ action: "reply", replyTo: "${request.id}", message: "..." })`);
+		lines.push("", `Reply with: ${NATIVE_SUPERVISOR_TOOL_NAME}({ action: "reply", replyTo: "${request.requestId}", message: "..." })`);
 	}
 	return lines.join("\n");
 }
@@ -517,11 +524,11 @@ function writeReply(request: PendingSupervisorRequest, message: string): void {
 	if (!message.trim()) throw new Error("message is required for supervisor replies.");
 	const reply: SupervisorReply = {
 		type: "subagent.supervisor.reply",
-		requestId: request.id,
+		requestId: request.requestId,
 		createdAt: Date.now(),
 		message: message.trim(),
 	};
-	writeAtomicJson(replyPath(request.channelDir, request.id), reply);
+	writeAtomicJson(replyPath(request.channelDir, request.requestId), reply);
 	removeRequestFile(request.requestFile);
 }
 
@@ -532,7 +539,8 @@ type PendingRequestResolution =
 function resolvePendingRequest(pending: Map<string, PendingSupervisorRequest>, params: IntercomParams): PendingRequestResolution {
 	const requests = [...pending.values()].filter((request) => request.expectsReply);
 	if (params.replyTo) {
-		const request = pending.get(params.replyTo);
+		const request = pending.get(params.replyTo)
+			?? [...pending.values()].find((candidate) => candidate.id === params.replyTo);
 		if (request?.expectsReply) return { request };
 		return {
 			status: requests.length > 0 ? "ambiguous" : "no_pending",
@@ -544,7 +552,8 @@ function resolvePendingRequest(pending: Map<string, PendingSupervisorRequest>, p
 	if (params.to) {
 		const normalizedTo = params.to.toLowerCase();
 		const matches = requests.filter((request) =>
-			request.id.toLowerCase().startsWith(normalizedTo)
+			request.requestId.toLowerCase().startsWith(normalizedTo)
+			|| request.id?.toLowerCase().startsWith(normalizedTo) === true
 			|| request.agent.toLowerCase() === normalizedTo
 			|| request.childTarget?.toLowerCase() === normalizedTo,
 		);
@@ -559,7 +568,8 @@ function resolvePendingRequest(pending: Map<string, PendingSupervisorRequest>, p
 
 function publicPendingRequests(pending: Map<string, PendingSupervisorRequest>): Array<Record<string, unknown>> {
 	return [...pending.values()].map((request) => ({
-		id: request.id,
+		requestId: request.requestId,
+		id: request.id ?? request.requestId,
 		runId: request.runId,
 		agent: request.agent,
 		childIndex: request.childIndex,
@@ -602,8 +612,8 @@ function buildParentIntercomTool(pending: Map<string, PendingSupervisorRequest>,
 				const resolved = resolvePendingRequest(pending, input);
 				if (!("request" in resolved)) return supervisorDiagnostic(resolved.status, resolved.message, pending, "pending");
 				writeReply(resolved.request, input.message ?? "");
-				pending.delete(resolved.request.id);
-				return { content: [{ type: "text", text: `Replied to supervisor request ${resolved.request.id}.` }], details: { replyTo: resolved.request.id, runId: resolved.request.runId, agent: resolved.request.agent } };
+				pending.delete(resolved.request.requestId);
+				return { content: [{ type: "text", text: `Replied to supervisor request ${resolved.request.requestId}.` }], details: { requestId: resolved.request.requestId, replyTo: resolved.request.requestId, runId: resolved.request.runId, agent: resolved.request.agent } };
 			}
 			if (input.action === "send" || input.action === "ask") {
 				return supervisorDiagnostic(
@@ -657,7 +667,7 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 				continue;
 			}
 			seenFiles.add(file);
-			if (request.expectsReply) pending.set(request.id, request);
+			if (request.expectsReply) pending.set(request.requestId, request);
 			else {
 				removeRequestFile(request.requestFile);
 			}
@@ -666,7 +676,8 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 				content: requestVisibleText(request),
 				display: true,
 				details: {
-					id: request.id,
+					requestId: request.requestId,
+					id: request.requestId,
 					reason: request.reason,
 					expectsReply: request.expectsReply,
 					runId: request.runId,
@@ -676,7 +687,7 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 			});
 			if (request.expectsReply) {
 				(pi as { events?: IntercomEventBus }).events?.emit(INTERCOM_DETACH_REQUEST_EVENT, {
-					requestId: request.id,
+					requestId: request.requestId,
 					runId: request.runId,
 					agent: request.agent,
 					childIndex: request.childIndex,

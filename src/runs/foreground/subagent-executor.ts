@@ -384,6 +384,7 @@ function rememberForegroundRun(state: SubagentState, input: { runId: string; mod
 				...(result.transcriptPath ? { transcriptPath: result.transcriptPath } : {}),
 				...(result.transcriptError ? { transcriptError: result.transcriptError } : {}),
 				...(result.detachedReason ? { detachedReason: result.detachedReason } : {}),
+				...(result.supervisorCheckpoint ? { supervisorCheckpoint: result.supervisorCheckpoint } : {}),
 				...(result.acceptance ? { acceptance: result.acceptance } : {}),
 			};
 			const recovered = previous?.children[index];
@@ -422,6 +423,7 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 		...(input.result.transcriptPath ? { transcriptPath: input.result.transcriptPath } : {}),
 		...(input.result.transcriptError ? { transcriptError: input.result.transcriptError } : {}),
 		...(input.result.detachedReason ? { detachedReason: input.result.detachedReason } : {}),
+		...(input.result.supervisorCheckpoint ? { supervisorCheckpoint: input.result.supervisorCheckpoint } : {}),
 		...(input.result.acceptance ? { acceptance: input.result.acceptance } : {}),
 	};
 	trimRememberedForegroundRuns(state);
@@ -3220,6 +3222,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		progress: params.includeProgress ? allProgress : undefined,
 		artifacts: allArtifactPaths.length ? { dir: artifactsDir, files: allArtifactPaths } : undefined,
 		truncation: r.truncation,
+		supervisorCheckpoint: r.supervisorCheckpoint,
 		totalChildUsage: sumResultsUsage([r]),
 		totalCost: sumResultsCost([r]),
 	});
@@ -3245,9 +3248,9 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 	}
 
 	if (r.detached && r.detachedReason === "sync runtime wake") {
-		const elapsedS = r.progressSummary?.durationMs !== undefined ? Math.round(r.progressSummary.durationMs / 1000) + "s" : "the foreground budget";
+		const elapsedS = r.supervisorCheckpoint ? Math.round(r.supervisorCheckpoint.elapsedMs / 1000) + "s" : "the foreground budget";
 		return {
-			content: [{ type: "text", text: `⏱ Sync wake after ${elapsedS}: ${params.agent} is STILL RUNNING in the background (run ${runId}). Check progress/health with subagent({ action: "status", id: "${runId}" }) or block until it finishes with subagent_wait({ id: "${runId}" }). Do not launch a replacement while it is active.` }],
+			content: [{ type: "text", text: `Sync wake checkpoint: ${params.agent} is STILL RUNNING after ${elapsedS} (runId ${runId}). Use checkpoint metadata to status, steer, or wait; do not launch a replacement while active.` }],
 			details,
 		};
 	}

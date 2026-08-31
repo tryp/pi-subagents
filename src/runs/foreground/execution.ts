@@ -21,6 +21,7 @@ import {
 	type ModelAttempt,
 	type RunSyncOptions,
 	type SingleResult,
+	type SupervisorCheckpoint,
 	type Usage,
 	DEFAULT_MAX_OUTPUT,
 	INTERCOM_DETACH_REQUEST_EVENT,
@@ -381,12 +382,34 @@ async function runSingleAttempt(
 		if (options.syncWakeMs !== undefined && options.syncWakeMs > 0) {
 			syncWakeTimer = setTimeout(() => {
 				if (settled || processClosed || detached) return;
+				const elapsedMs = Date.now() - startTime;
+				const childIndex = options.index ?? 0;
+				const supervisorCheckpoint: SupervisorCheckpoint = {
+					runId: options.runId,
+					elapsedMs,
+					activeChildSummary: {
+						total: 1,
+						children: [{
+							agent: agent.name,
+							index: childIndex,
+							status: "detached",
+							...(progress.currentTool ? { currentTool: progress.currentTool } : {}),
+						}],
+					},
+					reason: "supervisor_checkpoint",
+					suggestedActions: {
+						status: { tool: "subagent", action: "status", runId: options.runId },
+						steer: { tool: "subagent", action: "steer", runId: options.runId, childIndex, message: "Provide the smallest next step or ask for a decision." },
+						wait: { tool: "subagent_wait", runId: options.runId, barrier: "consume-result" },
+					},
+				};
 				detached = true;
 				processClosed = true;
 				result.detached = true;
 				result.detachedReason = "sync runtime wake";
+				result.supervisorCheckpoint = supervisorCheckpoint;
 				progress.status = "detached";
-				progress.durationMs = Date.now() - startTime;
+				progress.durationMs = elapsedMs;
 				result.progressSummary = {
 					toolCount: progress.toolCount,
 					tokens: progress.tokens,

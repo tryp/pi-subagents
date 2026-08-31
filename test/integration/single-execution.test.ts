@@ -91,6 +91,13 @@ interface RunSyncResult {
 	wrapUpRequested?: boolean;
 	detached?: boolean;
 	detachedReason?: string;
+	supervisorCheckpoint?: {
+		runId: string;
+		elapsedMs: number;
+		activeChildSummary: { total: number; children: Array<{ agent: string; index: number; status: string; currentTool?: string }> };
+		reason: "supervisor_checkpoint";
+		suggestedActions: { status: { runId: string }; steer: { runId: string; childIndex: number }; wait: { runId: string; barrier: string } };
+	};
 	savedOutputPath?: string;
 	outputMode?: "inline" | "file-only";
 	outputReference?: { path: string; bytes: number; lines: number; message: string };
@@ -2484,6 +2491,13 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.detached, true);
 		assert.equal(result.detachedReason, "sync runtime wake");
 		assert.equal(result.progress.status, "detached");
+		assert.equal(result.supervisorCheckpoint?.runId, "sync-wake-integration");
+		assert.ok((result.supervisorCheckpoint?.elapsedMs ?? 0) >= 80);
+		assert.equal(result.supervisorCheckpoint?.reason, "supervisor_checkpoint");
+		assert.deepEqual(result.supervisorCheckpoint?.activeChildSummary.children[0], { agent: "echo", index: 0, status: "detached" });
+		assert.equal(result.supervisorCheckpoint?.suggestedActions.status.runId, "sync-wake-integration");
+		assert.equal(result.supervisorCheckpoint?.suggestedActions.steer.childIndex, 0);
+		assert.equal(result.supervisorCheckpoint?.suggestedActions.wait.barrier, "consume-result");
 		assert.match(result.finalOutput ?? "", /Sync wake: foreground runtime budget exceeded/);
 		assert.match(result.outputSaveError ?? "", /not finalized/);
 		assert.equal(fs.existsSync(outputPath), false);

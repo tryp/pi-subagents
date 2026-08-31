@@ -48,7 +48,7 @@ function makeState(sessionId: string | null, ctx: unknown): SubagentState {
 	};
 }
 
-function writeRequest(input: { sessionId: string; runId: string; agent?: string; index?: number; message?: string; createdAt?: number; expiresAt?: number }): string {
+function writeRequest(input: { sessionId: string; runId: string; agent?: string; index?: number; message?: string; createdAt?: number; expiresAt?: number; legacyIdOnly?: boolean }): string {
 	const agent = input.agent ?? "worker";
 	const index = input.index ?? 0;
 	const channelDir = resolveSupervisorChannelDir(input.runId, agent, index);
@@ -57,6 +57,7 @@ function writeRequest(input: { sessionId: string; runId: string; agent?: string;
 	const requestId = randomUUID();
 	fs.writeFileSync(path.join(channelDir, "requests", `${requestId}.json`), JSON.stringify({
 		type: "subagent.supervisor.request",
+		...(input.legacyIdOnly ? {} : { requestId }),
 		id: requestId,
 		createdAt: input.createdAt ?? Date.now(),
 		...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
@@ -113,7 +114,7 @@ describe("native supervisor channel", () => {
 		const otherSessionId = `session-${randomUUID()}`;
 		const matchingId = writeRequest({ sessionId: currentSessionId, runId: `run-${randomUUID()}` });
 		const otherId = writeRequest({ sessionId: otherSessionId, runId: `run-${randomUUID()}` });
-		const sent: Array<{ content?: string; details?: { id?: string } }> = [];
+		const sent: Array<{ content?: string; details?: { id?: string; requestId?: string } }> = [];
 		const registeredTools: string[] = [];
 		const ctx = {
 			cwd: process.cwd(),
@@ -137,9 +138,33 @@ describe("native supervisor channel", () => {
 		channel.dispose();
 
 		assert.deepEqual(registeredTools, [NATIVE_SUPERVISOR_TOOL_NAME, "intercom"]);
+		assert.deepEqual(sent.map((message) => message.details?.requestId), [matchingId]);
 		assert.deepEqual(sent.map((message) => message.details?.id), [matchingId]);
 		assert.equal(channel.pending.has(matchingId), false, "disposed channel clears pending requests");
 		assert.equal(sent.some((message) => message.details?.id === otherId), false);
+	});
+
+	it("normalizes legacy id-only requests while exposing canonical requestId details", () => {
+		const currentSessionId = `session-${randomUUID()}`;
+		const runId = `run-${randomUUID()}`;
+		const requestId = writeRequest({ sessionId: currentSessionId, runId, legacyIdOnly: true });
+		const sent: Array<{ details?: { id?: string; requestId?: string } }> = [];
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: false,
+			sessionManager: { getSessionId: () => currentSessionId, getSessionFile: () => null, getEntries: () => [] },
+		};
+		const pi = {
+			getAllTools: () => [],
+			registerTool: () => {},
+			sendMessage: (message: { details?: { id?: string; requestId?: string } }) => { sent.push(message); },
+			getSessionName: () => "shared-name",
+		};
+		const channel = createNativeSupervisorChannel(pi as never, makeState(currentSessionId, ctx));
+		channel.start();
+		channel.dispose();
+		assert.equal(sent.length, 1);
+		assert.deepEqual(sent[0]?.details, { requestId, id: requestId, reason: "need_decision", expectsReply: true, runId, agent: "worker", childIndex: 0 });
 	});
 
 	it("prunes stale empty supervisor channel directories before polling", () => {
@@ -431,6 +456,30 @@ describe("native supervisor channel", () => {
 		} finally {
 			channel.dispose();
 		}
+	});
+
+	it("persists canonical requestId alongside legacy id for child progress updates", async () => {
+		const runId = `run-${randomUUID()}`;
+		const channelDir = resolveSupervisorChannelDir(runId, "worker", 0);
+		createdChannels.push(channelDir);
+		process.env[SUBAGENT_ORCHESTRATOR_TARGET_ENV] = "shared-name";
+		process.env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV] = "session-parent";
+		process.env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV] = channelDir;
+		process.env[SUBAGENT_RUN_ID_ENV] = runId;
+		process.env[SUBAGENT_CHILD_AGENT_ENV] = "worker";
+		process.env[SUBAGENT_CHILD_INDEX_ENV] = "0";
+		const registeredTools = new Map<string, { execute: (_id: string, params: { reason: string; message?: string }) => Promise<unknown> | unknown }>();
+		const pi = {
+			getAllTools: () => [...registeredTools.keys()].map((name) => ({ name })),
+			registerTool: (tool: { name: string; execute: (_id: string, params: { reason: string; message?: string }) => Promise<unknown> | unknown }) => { registeredTools.set(tool.name, tool); },
+		};
+		registerNativeSupervisorClient(pi as never, { includeIntercomFallback: false });
+		const result = await registeredTools.get("contact_supervisor")!.execute("contact", { reason: "progress_update", message: "Progress" }) as { details?: { requestId?: string } };
+		const requestId = result.details?.requestId;
+		assert.equal(typeof requestId, "string");
+		const persisted = JSON.parse(fs.readFileSync(requestFile(runId, requestId!), "utf-8")) as { requestId?: string; id?: string };
+		assert.equal(persisted.requestId, requestId);
+		assert.equal(persisted.id, requestId);
 	});
 
 	it("removes the request file when a child supervisor ask is cancelled", async () => {

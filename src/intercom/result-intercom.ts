@@ -182,6 +182,7 @@ interface GroupedResultIntercomMessageInput {
 }
 
 function asyncResumeGuidance(input: {
+	runId: string;
 	source: "foreground" | "async";
 	children: SubagentResultIntercomChild[];
 	asyncId?: string;
@@ -222,7 +223,7 @@ function formatSubagentResultIntercomMessage(input: {
 	}
 	if (input.asyncId) lines.push(`Async id: ${input.asyncId}`);
 	if (input.asyncDir) lines.push(`Async dir: ${input.asyncDir}`);
-	const resumeGuidance = asyncResumeGuidance(input);
+	const resumeGuidance = asyncResumeGuidance({ runId: input.runId, source: input.source, children: input.children, asyncId: input.asyncId });
 	if (resumeGuidance) lines.push(resumeGuidance);
 	if (input.children.some((child) => child.intercomTarget)) {
 		lines.push("");
@@ -281,7 +282,7 @@ export async function deliverSubagentResultIntercomEvent(
 	payload: SubagentResultIntercomPayload,
 	timeoutMs = 500,
 ): Promise<boolean> {
-	return deliverSubagentIntercomMessageEvent(events, payload.to, payload.message, timeoutMs, payload);
+	return deliverSubagentIntercomMessageEvent(events, payload.to, payload.message, timeoutMs, payload as unknown as Record<string, unknown>);
 }
 
 export async function deliverSubagentIntercomMessageEvent(
