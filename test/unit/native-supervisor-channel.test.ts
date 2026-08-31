@@ -395,10 +395,39 @@ describe("native supervisor channel", () => {
 			assert.match(pendingResult.content[0]!.text, /No pending supervisor requests/);
 			assert.deepEqual(pendingResult.details?.pending, []);
 			assert.equal(channel.pending.has(requestId), false);
-			await assert.rejects(
-				() => registeredTools.get(NATIVE_SUPERVISOR_TOOL_NAME)!.execute("reply", { action: "reply", replyTo: requestId, message: "Too late" }),
-				new RegExp(`No pending supervisor request found for replyTo '${requestId}'`),
-			);
+			const replyResult = await registeredTools.get(NATIVE_SUPERVISOR_TOOL_NAME)!.execute("reply", { action: "reply", replyTo: requestId, message: "Too late" });
+			assert.match(replyResult.content[0]!.text, /No pending supervisor requests need a reply/);
+			assert.deepEqual(replyResult.details, { status: "no_pending", pending: [], nextAction: "pending" });
+
+			const sendResult = await registeredTools.get(NATIVE_SUPERVISOR_TOOL_NAME)!.execute("send", { action: "send", message: "Status update" });
+			assert.match(sendResult.content[0]!.text, /child agents initiate asks with contact_supervisor/);
+			assert.deepEqual(sendResult.details, { status: "child_initiated_only", pending: [], nextAction: "pending" });
+		} finally {
+			channel.dispose();
+		}
+	});
+
+	it("returns pending candidates instead of throwing when a reply is ambiguous", async () => {
+		const currentSessionId = `session-${randomUUID()}`;
+		const firstId = writeRequest({ sessionId: currentSessionId, runId: `run-${randomUUID()}`, agent: "alpha" });
+		const secondId = writeRequest({ sessionId: currentSessionId, runId: `run-${randomUUID()}`, agent: "beta" });
+		const registeredTools = new Map<string, { execute: (_id: string, params: { action: string; message?: string }) => Promise<{ content: Array<{ text: string }>; details?: Record<string, unknown> }> }>();
+		const ctx = {
+			cwd: process.cwd(), hasUI: false,
+			sessionManager: { getSessionId: () => currentSessionId, getSessionFile: () => null, getEntries: () => [] },
+		};
+		const pi = {
+			getAllTools: () => [...registeredTools.keys()].map((name) => ({ name })),
+			registerTool: (tool: { name: string; execute: (_id: string, params: { action: string; message?: string }) => Promise<{ content: Array<{ text: string }>; details?: Record<string, unknown> }> }) => registeredTools.set(tool.name, tool),
+			sendMessage: () => {}, getSessionName: () => "shared-name",
+		};
+		const channel = createNativeSupervisorChannel(pi as never, makeState(currentSessionId, ctx));
+		try {
+			channel.start();
+			const result = await registeredTools.get(NATIVE_SUPERVISOR_TOOL_NAME)!.execute("reply", { action: "reply", message: "Choose A" });
+			assert.match(result.content[0]!.text, /Multiple pending supervisor requests need replies/);
+			assert.equal(result.details?.status, "ambiguous");
+			assert.deepEqual((result.details?.pending as Array<{ id: string }>).map((request) => request.id).sort(), [firstId, secondId].sort());
 		} finally {
 			channel.dispose();
 		}

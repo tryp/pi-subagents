@@ -43,7 +43,7 @@ import { registerWaitTool } from "../runs/background/wait-tool.ts";
 import { drainOutstandingWork } from "../runs/background/auto-drain.ts";
 import { registerBackgroundWorkProvider } from "../api/background-work.ts";
 import { createSubagentBackgroundWorkProvider } from "../runs/background/background-work-provider.ts";
-import registerSubagentNotify, { parseSubagentNotifyContent, type SubagentNotifyDetails } from "../runs/background/notify.ts";
+import registerSubagentNotify, { resolveSubagentNotifyDetails, type SubagentNotifyDetails, type SubagentNotifyEnvelope } from "../runs/background/notify.ts";
 import { formatSteeringNotice, handleSubagentSteeringNotice, SUBAGENT_STEERING_MESSAGE_TYPE, type SubagentSteeringMessageDetails } from "./steering-notices.ts";
 import { SUBAGENT_CHILD_ENV, SUBAGENT_PARENT_SESSION_ENV } from "../runs/shared/pi-args.ts";
 import { formatDuration, shortenPath } from "../shared/formatters.ts";
@@ -325,34 +325,37 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		return new Text(content, 0, 0);
 	});
 
-	pi.registerMessageRenderer<SubagentNotifyDetails>("subagent-notify", (message, options, theme) => {
+	pi.registerMessageRenderer<SubagentNotifyDetails | SubagentNotifyEnvelope>("subagent-notify", (message, options, theme) => {
 		const content = typeof message.content === "string" ? message.content : "";
-		const details = (message.details as SubagentNotifyDetails | undefined) ?? parseSubagentNotifyContent(content);
-		if (!details) return new Text(content, 0, 0);
-		const icon = details.status === "completed"
-			? theme.fg("success", "✓")
-			: details.status === "paused"
-				? theme.fg("warning", "■")
-				: theme.fg("error", "✗");
-		const parts: string[] = [];
-		if (details.taskInfo) parts.push(details.taskInfo);
-		if (details.durationMs !== undefined) parts.push(formatDuration(details.durationMs));
-		let text = `${icon} ${theme.bold(details.agent)} ${theme.fg("dim", details.status)}`;
-		if (parts.length > 0) text += ` ${theme.fg("dim", "·")} ${parts.map((part) => theme.fg("dim", part)).join(` ${theme.fg("dim", "·")} `)}`;
-		const trimmedPreview = details.resultPreview.trim();
-		const previewLines = options.expanded
-			? trimmedPreview.split("\n").filter((line) => line.trim())
-			: [trimmedPreview.split("\n", 1)[0] ?? ""].filter((line) => line.trim());
-		for (const line of previewLines.length > 0 ? previewLines : ["(no output)"]) {
-			text += `\n  ${theme.fg("dim", `⎿  ${line}`)}`;
-		}
-		if (!options.expanded && trimmedPreview.includes("\n")) {
-			const expandKey = keyText("app.tools.expand");
-			text += `\n  ${theme.fg("dim", `${expandKey} full notification`)}`;
-		}
-		if (details.sessionLabel && details.sessionValue) {
-			text += `\n  ${theme.fg("muted", `${details.sessionLabel}: ${shortenPath(details.sessionValue)}`)}`;
-		}
+		const completions = resolveSubagentNotifyDetails(message.details, content);
+		if (completions.length === 0) return new Text(content, 0, 0);
+		const text = completions.map((details) => {
+			const icon = details.status === "completed"
+				? theme.fg("success", "✓")
+				: details.status === "paused"
+					? theme.fg("warning", "■")
+					: theme.fg("error", "✗");
+			const parts: string[] = [];
+			if (details.taskInfo) parts.push(details.taskInfo);
+			if (details.durationMs !== undefined) parts.push(formatDuration(details.durationMs));
+			let rendered = `${icon} ${theme.bold(details.agent)} ${theme.fg("dim", details.status)}`;
+			if (parts.length > 0) rendered += ` ${theme.fg("dim", "·")} ${parts.map((part) => theme.fg("dim", part)).join(` ${theme.fg("dim", "·")} `)}`;
+			const trimmedPreview = details.resultPreview.trim();
+			const previewLines = options.expanded
+				? trimmedPreview.split("\n").filter((line) => line.trim())
+				: [trimmedPreview.split("\n", 1)[0] ?? ""].filter((line) => line.trim());
+			for (const line of previewLines.length > 0 ? previewLines : ["(no output)"]) {
+				rendered += `\n  ${theme.fg("dim", `⎿  ${line}`)}`;
+			}
+			if (!options.expanded && trimmedPreview.includes("\n")) {
+				const expandKey = keyText("app.tools.expand");
+				rendered += `\n  ${theme.fg("dim", `${expandKey} full notification`)}`;
+			}
+			if (details.sessionLabel && details.sessionValue) {
+				rendered += `\n  ${theme.fg("muted", `${details.sessionLabel}: ${shortenPath(details.sessionValue)}`)}`;
+			}
+			return rendered;
+		}).join("\n\n");
 		return new Text(text, 0, 0);
 	});
 

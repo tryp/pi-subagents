@@ -25,18 +25,33 @@ interface ChainStepResult {
 }
 
 export interface SubagentNotifyDetails {
+	/** Canonical parent run ID for status, steer, resume, and supervisor correlation. */
+	runId?: string;
+	/** Runtime completion ID, which can identify a child within the parent run. */
+	completionId?: string;
 	agent: string;
 	status: "completed" | "failed" | "paused";
 	source?: "async" | "foreground";
 	taskInfo?: string;
+	taskIndex?: number;
+	totalTasks?: number;
 	resultPreview: string;
 	durationMs?: number;
+	/** Original child session artifact, retained even when a share URL is preferred for display. */
+	sessionFile?: string;
 	sessionLabel?: string;
 	sessionValue?: string;
 }
 
+/** Versioned persisted details for a subagent completion notification. */
+export interface SubagentNotifyEnvelope {
+	version: 1;
+	completions: SubagentNotifyDetails[];
+}
+
 interface SubagentResult {
 	id: string | null;
+	runId?: string;
 	source?: "async" | "foreground";
 	agent: string | null;
 	success: boolean;
@@ -84,6 +99,28 @@ export function formatSingleCompletion(details: SubagentNotifyDetails): string {
 	]
 		.filter((line) => line !== undefined)
 		.join("\n");
+}
+
+function isSubagentNotifyDetails(value: unknown): value is SubagentNotifyDetails {
+	return typeof value === "object" && value !== null
+		&& typeof (value as { agent?: unknown }).agent === "string"
+		&& typeof (value as { status?: unknown }).status === "string"
+		&& typeof (value as { resultPreview?: unknown }).resultPreview === "string";
+}
+
+/**
+ * Resolve persisted notification details while accepting legacy text-only and
+ * pre-envelope single-completion records.
+ */
+export function resolveSubagentNotifyDetails(details: unknown, content: string): SubagentNotifyDetails[] {
+	if (typeof details === "object" && details !== null
+		&& (details as { version?: unknown }).version === 1
+		&& Array.isArray((details as { completions?: unknown }).completions)) {
+		return (details as { completions: unknown[] }).completions.filter(isSubagentNotifyDetails);
+	}
+	if (isSubagentNotifyDetails(details)) return [details];
+	const parsed = parseSubagentNotifyContent(content);
+	return parsed ? [parsed] : [];
 }
 
 export function parseSubagentNotifyContent(content: string): SubagentNotifyDetails | undefined {
@@ -137,11 +174,13 @@ function sendCompletion(pi: Pick<ExtensionAPI, "sendMessage">, details: Subagent
 	const content = details.length === 1
 		? formatSingleCompletion(details[0]!)
 		: formatGroupedCompletion(details);
+	const envelope: SubagentNotifyEnvelope = { version: 1, completions: details };
 	pi.sendMessage(
 		{
 			customType: "subagent-notify",
 			content,
 			display: true,
+			details: envelope,
 		},
 		{ triggerTurn: true },
 	);
@@ -179,12 +218,17 @@ export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDe
 					: undefined;
 
 	return {
+		...(typeof result.runId === "string" && result.runId ? { runId: result.runId } : typeof result.id === "string" && result.id ? { runId: result.id } : {}),
+		...(typeof result.id === "string" && result.id ? { completionId: result.id } : {}),
 		agent,
 		status,
 		...(result.source ? { source: result.source } : {}),
 		...(taskInfo ? { taskInfo } : {}),
+		...(result.taskIndex !== undefined ? { taskIndex: result.taskIndex } : {}),
+		...(result.totalTasks !== undefined ? { totalTasks: result.totalTasks } : {}),
 		resultPreview: summary,
 		...(typeof result.durationMs === "number" ? { durationMs: result.durationMs } : {}),
+		...(result.sessionFile ? { sessionFile: result.sessionFile } : {}),
 		...(session ? { sessionLabel: session.label, sessionValue: session.value } : {}),
 	};
 }

@@ -525,13 +525,22 @@ function writeReply(request: PendingSupervisorRequest, message: string): void {
 	removeRequestFile(request.requestFile);
 }
 
-function resolvePendingRequest(pending: Map<string, PendingSupervisorRequest>, params: IntercomParams): PendingSupervisorRequest {
+type PendingRequestResolution =
+	| { request: PendingSupervisorRequest }
+	| { status: "no_pending" | "ambiguous"; message: string };
+
+function resolvePendingRequest(pending: Map<string, PendingSupervisorRequest>, params: IntercomParams): PendingRequestResolution {
+	const requests = [...pending.values()].filter((request) => request.expectsReply);
 	if (params.replyTo) {
 		const request = pending.get(params.replyTo);
-		if (!request) throw new Error(`No pending supervisor request found for replyTo '${params.replyTo}'.`);
-		return request;
+		if (request?.expectsReply) return { request };
+		return {
+			status: requests.length > 0 ? "ambiguous" : "no_pending",
+			message: requests.length > 0
+				? `No pending supervisor request matches replyTo '${params.replyTo}'. Choose an id from pending requests.`
+				: "No pending supervisor requests need a reply.",
+		};
 	}
-	const requests = [...pending.values()].filter((request) => request.expectsReply);
 	if (params.to) {
 		const normalizedTo = params.to.toLowerCase();
 		const matches = requests.filter((request) =>
@@ -539,12 +548,13 @@ function resolvePendingRequest(pending: Map<string, PendingSupervisorRequest>, p
 			|| request.agent.toLowerCase() === normalizedTo
 			|| request.childTarget?.toLowerCase() === normalizedTo,
 		);
-		if (matches.length === 1) return matches[0]!;
-		if (matches.length > 1) throw new Error(`Multiple pending supervisor requests match '${params.to}'. Use replyTo.`);
+		if (matches.length === 1) return { request: matches[0]! };
+		if (matches.length > 1) return { status: "ambiguous", message: `Multiple pending supervisor requests match '${params.to}'. Use replyTo.` };
+		return { status: "no_pending", message: `No pending supervisor request matches '${params.to}'.` };
 	}
-	if (requests.length === 1) return requests[0]!;
-	if (requests.length === 0) throw new Error("No pending supervisor requests need a reply.");
-	throw new Error("Multiple pending supervisor requests need replies. Use replyTo.");
+	if (requests.length === 1) return { request: requests[0]! };
+	if (requests.length === 0) return { status: "no_pending", message: "No pending supervisor requests need a reply." };
+	return { status: "ambiguous", message: "Multiple pending supervisor requests need replies. Use replyTo." };
 }
 
 function publicPendingRequests(pending: Map<string, PendingSupervisorRequest>): Array<Record<string, unknown>> {
@@ -556,6 +566,18 @@ function publicPendingRequests(pending: Map<string, PendingSupervisorRequest>): 
 		reason: request.reason,
 		expectsReply: request.expectsReply,
 	}));
+}
+
+function supervisorDiagnostic(
+	status: "no_pending" | "ambiguous" | "child_initiated_only",
+	message: string,
+	pending: Map<string, PendingSupervisorRequest>,
+	nextAction: "pending" | "reply",
+): AgentToolResult<Record<string, unknown>> {
+	return {
+		content: [{ type: "text", text: `${message} Use ${NATIVE_SUPERVISOR_TOOL_NAME}({ action: "${nextAction}" })${nextAction === "reply" ? " with replyTo to answer a child." : " to inspect any current requests."}` }],
+		details: { status, pending: publicPendingRequests(pending), nextAction },
+	};
 }
 
 function buildParentIntercomTool(pending: Map<string, PendingSupervisorRequest>, state: SubagentState, name = "intercom"): ToolDefinition<typeof IntercomParamsSchema, Record<string, unknown>> {
@@ -577,13 +599,19 @@ function buildParentIntercomTool(pending: Map<string, PendingSupervisorRequest>,
 				return { content: [{ type: "text", text: lines.length ? lines.join("\n") : "No pending supervisor requests." }], details: { pending: publicPendingRequests(pending) } };
 			}
 			if (input.action === "reply") {
-				const request = resolvePendingRequest(pending, input);
-				writeReply(request, input.message ?? "");
-				pending.delete(request.id);
-				return { content: [{ type: "text", text: `Replied to supervisor request ${request.id}.` }], details: { replyTo: request.id, runId: request.runId, agent: request.agent } };
+				const resolved = resolvePendingRequest(pending, input);
+				if (!("request" in resolved)) return supervisorDiagnostic(resolved.status, resolved.message, pending, "pending");
+				writeReply(resolved.request, input.message ?? "");
+				pending.delete(resolved.request.id);
+				return { content: [{ type: "text", text: `Replied to supervisor request ${resolved.request.id}.` }], details: { replyTo: resolved.request.id, runId: resolved.request.runId, agent: resolved.request.agent } };
 			}
 			if (input.action === "send" || input.action === "ask") {
-				throw new Error("Native pi-subagents intercom currently handles supervisor replies. Child agents initiate asks with contact_supervisor.");
+				return supervisorDiagnostic(
+					"child_initiated_only",
+					"This is the parent-side supervisor tool; child agents initiate asks with contact_supervisor.",
+					pending,
+					"pending",
+				);
 			}
 			throw new Error(`Unsupported intercom action: ${input.action}`);
 		},

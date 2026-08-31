@@ -6,6 +6,7 @@ import registerSubagentNotify, {
 	formatGroupedCompletion,
 	formatSingleCompletion,
 	parseSubagentNotifyContent,
+	resolveSubagentNotifyDetails,
 	type RegisterSubagentNotifyOptions,
 	type SubagentNotifyDetails,
 } from "../../src/runs/background/notify.ts";
@@ -129,6 +130,7 @@ describe("registerSubagentNotify", () => {
 				customType: "subagent-notify",
 				content: "Background task completed: **worker**\n\n(no output)",
 				display: true,
+				details: { version: 1, completions: [{ runId: "notify-empty-1", completionId: "notify-empty-1", agent: "worker", status: "completed", resultPreview: "" }] },
 			},
 			options: { triggerTurn: true },
 		});
@@ -155,6 +157,7 @@ describe("registerSubagentNotify", () => {
 				customType: "subagent-notify",
 				content: "Detached foreground task completed: **reviewer**\n\nRecovered final review",
 				display: true,
+				details: { version: 1, completions: [{ runId: "foreground-run", completionId: "foreground-run:0", agent: "reviewer", status: "completed", source: "foreground", resultPreview: "Recovered final review" }] },
 			},
 			options: { triggerTurn: true },
 		});
@@ -196,6 +199,7 @@ describe("registerSubagentNotify", () => {
 				customType: "subagent-notify",
 				content: `Background task completed: **worker** (2/3)\n\n${summary}`,
 				display: true,
+				details: { version: 1, completions: [{ runId: "notify-summary-1", completionId: "notify-summary-1", agent: "worker", status: "completed", taskInfo: " (2/3)", taskIndex: 1, totalTasks: 3, resultPreview: summary }] },
 			},
 			options: { triggerTurn: true },
 		});
@@ -220,6 +224,7 @@ describe("registerSubagentNotify", () => {
 				customType: "subagent-notify",
 				content: "Background task completed: **worker**\n\nDone\n\nSession file: /tmp/session.jsonl",
 				display: true,
+				details: { version: 1, completions: [{ runId: "notify-path-1", completionId: "notify-path-1", agent: "worker", status: "completed", resultPreview: "Done", sessionFile: "/tmp/session.jsonl", sessionLabel: "Session file", sessionValue: "/tmp/session.jsonl" }] },
 			},
 			options: { triggerTurn: true },
 		}]);
@@ -244,6 +249,7 @@ describe("registerSubagentNotify", () => {
 				customType: "subagent-notify",
 				content: "Background task paused: **worker**\n\nPaused after interrupt. Waiting for explicit next action.",
 				display: true,
+				details: { version: 1, completions: [{ runId: "notify-paused-1", completionId: "notify-paused-1", agent: "worker", status: "paused", resultPreview: "Paused after interrupt. Waiting for explicit next action." }] },
 			},
 			options: { triggerTurn: true },
 		});
@@ -423,6 +429,30 @@ describe("completion formatting helpers", () => {
 			+ "1. alpha\nalpha done\n\n"
 			+ "2. beta (1/2)\n(no output)\nSession: https://share/abc",
 		);
+	});
+
+	it("buildCompletionDetails retains correlation fields", () => {
+		assert.deepEqual(buildCompletionDetails({
+			id: "run-7:1", runId: "run-7", agent: "w", success: true, summary: "ok", timestamp: 1,
+			taskIndex: 1, totalTasks: 3, sessionFile: "/tmp/child.jsonl",
+		}), {
+			runId: "run-7", completionId: "run-7:1", agent: "w", status: "completed", taskInfo: " (2/3)", taskIndex: 1, totalTasks: 3,
+			resultPreview: "ok", sessionFile: "/tmp/child.jsonl", sessionLabel: "Session file", sessionValue: "/tmp/child.jsonl",
+		});
+	});
+
+	it("resolves versioned grouped details and legacy text-only notifications", () => {
+		const grouped = resolveSubagentNotifyDetails({
+			version: 1,
+			completions: [
+				{ runId: "run-a", agent: "alpha", status: "completed", resultPreview: "done" },
+				{ runId: "run-b", agent: "beta", status: "failed", resultPreview: "boom" },
+			],
+		}, "");
+		assert.deepEqual(grouped.map((completion) => completion.runId), ["run-a", "run-b"]);
+		assert.deepEqual(resolveSubagentNotifyDetails(undefined, "Background task completed: **legacy**\n\nok"), [{
+			agent: "legacy", status: "completed", resultPreview: "ok",
+		}]);
 	});
 
 	it("buildCompletionDetails derives paused status from state and summary", () => {
