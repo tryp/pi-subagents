@@ -229,15 +229,16 @@ const SubagentParamsSchema = Type.Object({
 		description: "Management/control action only. Must be omitted for execution mode (single, parallel, or chain)."
 	})),
 	id: Type.Optional(Type.String({
-		description: "Run id or prefix for action='status', action='interrupt', action='stop', action='resume', action='steer', or action='append-step'."
+		description: "Compatibility alias for runId when targeting status, interrupt, stop, resume, steer, or append-step."
 	})),
 	runId: Type.Optional(Type.String({
-		description: "Target run ID for action='interrupt', action='stop', action='resume', action='steer', or action='append-step'. Prefer id for new calls."
+		description: "Preferred root run ID for status, interrupt, stop, resume, steer, or append-step."
 	})),
+	childIndex: Type.Optional(Type.Integer({ minimum: 0, description: "Preferred zero-based child target within runId." })),
 	dir: Type.Optional(Type.String({
 		description: "Async run directory for action='status', action='stop', action='resume', or action='steer'."
 	})),
-	index: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based child index for actions that target a specific child or transcript." })),
+	index: Type.Optional(Type.Integer({ minimum: 0, description: "Compatibility alias for childIndex." })),
 	view: Type.Optional(Type.String({
 		enum: ["fleet", "transcript"],
 		description: "Optional status view. Use view='fleet' for a read-only active foreground/async fleet surface, or view='transcript' with id/dir (and optional index) to tail a run transcript.",
@@ -306,9 +307,10 @@ const SubagentParamsSchema = Type.Object({
 export const SubagentParams = keepTopLevelParameterDescriptions(SubagentParamsSchema);
 
 const SubagentWaitParamsSchema = Type.Object({
-	id: Type.Optional(Type.String({
-		description: "Async run or remembered detached foreground run id/prefix to wait for one specific run. Omit to wait across every active async run started in this session.",
-	})),
+	runId: Type.Optional(Type.String({ description: "Preferred root run ID or prefix to wait for one specific run." })),
+	id: Type.Optional(Type.String({ description: "Compatibility alias for runId." })),
+	barrier: Type.Optional(Type.String({ enum: ["consume-result", "integration"], description: "Why this explicit blocking barrier is needed." })),
+	until: Type.Optional(Type.String({ enum: ["any-change", "all-terminal"], description: "Preferred completion condition; all-terminal waits for every initially selected run." })),
 	all: Type.Optional(Type.Boolean({
 		description: "Wait for ALL active runs to finish. Default false: return as soon as the first run finishes, so a fleet manager can spawn a replacement and wait again. Ignored when id targets a single run.",
 	})),

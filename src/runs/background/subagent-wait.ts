@@ -69,8 +69,14 @@ const MIN_POLL_INTERVAL_MS = 250;
 const DEFAULT_POLL_INTERVAL_MS = 1000;
 
 export interface SubagentWaitParams {
-	/** Optional run id/prefix to wait for. When omitted, waits across every active run in this session. */
+	/** Preferred root run ID or prefix to wait for. */
+	runId?: string;
+	/** Compatibility alias for runId. */
 	id?: string;
+	/** Why this blocking barrier is required. */
+	barrier?: "consume-result" | "integration";
+	/** Preferred completion condition. */
+	until?: "any-change" | "all-terminal";
 	/**
 	 * When true, block until EVERY active run in this session (or matching `id`)
 	 * is terminal. Default false: return as soon as the first run finishes, so a
@@ -305,7 +311,7 @@ async function waitForDetachedForegroundRun(
 		if (pending.length === 0) {
 			const outcome = summarizeForegroundChildren(current, initialDetachedIndices);
 			return result(
-				`Waited ${formatDuration(now() - startedAt)} for remembered detached foreground run "${run.runId}"; done. Outcome: ${outcome || "no recovered child status"}. Completion event observed; inspect with subagent({ action: "status", id: "${run.runId}" }) for recovered output.`,
+				`Waited ${formatDuration(now() - startedAt)} for remembered detached foreground run "${run.runId}"; done. Outcome: ${outcome || "no recovered child status"}. Completion event observed; inspect with subagent({ action: "status", runId: "${run.runId}" }) for recovered output.`,
 			);
 		}
 		if (signal?.aborted) {
@@ -314,8 +320,8 @@ async function waitForDetachedForegroundRun(
 		if (now() - startedAt >= timeoutMs) {
 			const syncWakeDetached = current.children.some((child) => initialDetachedIndices.has(child.index) && child.status === "detached" && child.detachedReason === "sync runtime wake");
 			const guidance = syncWakeDetached
-				? `The child is still running after the sync wake; call subagent_wait({ id: "${run.runId}" }) again or inspect status.`
-				: `Reply to any pending supervisor request, then call subagent_wait({ id: "${run.runId}" }) again or inspect status.`;
+				? `The child is still running after the sync wake supervisor checkpoint; call subagent_wait({ runId: "${run.runId}", barrier: "consume-result" }) only when its result is needed, or inspect status.`
+				: `Reply to any pending supervisor request, then call subagent_wait({ runId: "${run.runId}", barrier: "consume-result" }) only when its result is needed, or inspect status.`;
 			return result(
 				`Wait timed out after ${formatDuration(timeoutMs)} with remembered foreground run "${run.runId}" still detached. ${guidance} Do not resume or launch a replacement while it remains detached.`,
 				true,
@@ -342,47 +348,55 @@ export async function waitForSubagents(
 		return result("subagent_wait requires an active session identity to scope background work safely.", true);
 	}
 
+	if (params.runId && params.id && params.runId !== params.id) {
+		return result("runId and id target different runs; provide one target or matching values.", true);
+	}
+	if (params.until && params.all !== undefined && (params.until === "all-terminal") !== params.all) {
+		return result("until and all specify different completion conditions; provide one or matching values.", true);
+	}
+	const runId = params.runId ?? params.id;
 	const now = deps.now ?? Date.now;
 	const pollIntervalMs = Math.max(MIN_POLL_INTERVAL_MS, deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS);
 	const timeoutMs = params.timeoutMs !== undefined && params.timeoutMs > 0 ? params.timeoutMs : DEFAULT_TIMEOUT_MS;
 	const startedAt = now();
-	const waitForAll = params.id ? true : params.all === true;
+	const waitForAll = runId ? true : params.until === "all-terminal" || params.all === true;
 
 	let active: AsyncRunSummary[];
 	let foreground: ForegroundResumeRun[];
 	let providerSnapshot: BackgroundWorkSnapshot;
 	try {
-		active = activeRunsForSession(params, deps);
-		foreground = activeDetachedForegroundRuns(params, deps);
-		providerSnapshot = params.id ? { providers: [], items: [] } : backgroundWorkForSession(deps, startedAt);
+		active = activeRunsForSession({ ...params, id: runId }, deps);
+		foreground = activeDetachedForegroundRuns({ ...params, id: runId }, deps);
+		providerSnapshot = runId ? { providers: [], items: [] } : backgroundWorkForSession(deps, startedAt);
 	} catch (error) {
 		return result(error instanceof Error ? error.message : String(error), true);
 	}
 
-	if (params.id) {
+	if (runId) {
 		const candidates = [
 			...active.map((run) => ({ kind: "async" as const, id: run.id, run })),
 			...foreground.map((run) => ({ kind: "foreground" as const, id: run.runId, run })),
 		];
-		const exact = candidates.filter((candidate) => candidate.id === params.id);
-		const matches = exact.length > 0 ? exact : candidates;
+		const exact = candidates.filter((candidate) => candidate.id === runId);
+		const matches = exact.length > 0 ? exact : candidates.filter((candidate) => candidate.id.startsWith(runId));
 		if (matches.length > 1) {
-			return result(`Ambiguous subagent run id prefix "${params.id}" matched ${matches.length} active runs: ${matches.map((candidate) => candidate.id).join(", ")}. Pass a longer id.`, true);
+			return result(`Ambiguous subagent run id prefix "${runId}" matched ${matches.length} active runs: ${matches.map((candidate) => candidate.id).join(", ")}. Pass a longer runId.`, true);
 		}
 		const selected = matches[0];
 		if (selected?.kind === "foreground") {
 			return waitForDetachedForegroundRun(selected.run, signal, deps, startedAt, now, pollIntervalMs, timeoutMs);
 		}
 		active = selected?.kind === "async" ? [selected.run] : [];
+		if (!selected) return result(`No active run matched "${runId}". Nothing to wait for.`);
 	}
 
 	let providerActive = providerSnapshot.items;
 	if (active.length === 0 && providerActive.length === 0) {
-		return result(params.id
-			? `No active run matched "${params.id}". Nothing to wait for.`
+		return result(runId
+			? `No active run matched "${runId}". Nothing to wait for.`
 			: "No active async runs or registered provider work in this session. Nothing to wait for.");
 	}
-	const waitParams = params.id ? { ...params, id: active[0]!.id } : params;
+	const waitParams = runId ? { ...params, id: active[0]!.id, runId: active[0]!.id } : params;
 	const initialAsyncIds = new Set(active.map((run) => run.id));
 	const initialProviderIds = new Set(providerActive.map(backgroundWorkIdentity));
 	const initialProviderNames = new Set(providerActive.map((item) => item.provider));
@@ -422,7 +436,7 @@ export async function waitForSubagents(
 			await waitForWake(pollIntervalMs, signal, deps);
 			active = activeRunsForSession(waitParams, deps);
 			attention = attentionRunsForSession(waitParams, deps, initialAsyncIds);
-			providerSnapshot = params.id ? providerSnapshot : backgroundWorkForSession(deps, now());
+			providerSnapshot = runId ? providerSnapshot : backgroundWorkForSession(deps, now());
 			for (const provider of initialProviderNames) {
 				if (!providerSnapshot.providers.includes(provider)) {
 					return result(`Background-work provider '${provider}' disappeared while subagent_wait was tracking its active work; completion cannot be confirmed.`, true);
@@ -459,8 +473,8 @@ export async function waitForSubagents(
 	const outcome = terminalSummary ? ` Outcome: ${terminalSummary}.` : "";
 
 	if (waitForAll) {
-		const scope = params.id
-			? `run "${params.id}"`
+		const scope = runId
+			? `run "${runId}"`
 			: initialProviderIds.size === 0
 				? `${initialAsyncIds.size} async run(s)`
 				: `${initialAsyncIds.size} async run(s) and ${initialProviderIds.size} provider item(s)`;

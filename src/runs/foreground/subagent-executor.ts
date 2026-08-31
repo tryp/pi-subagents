@@ -141,6 +141,7 @@ export interface SubagentParamsLike {
 	id?: string;
 	runId?: string;
 	dir?: string;
+	childIndex?: number;
 	index?: number;
 	view?: "fleet" | "transcript";
 	lines?: number;
@@ -3329,7 +3330,18 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		deps.state.foregroundRuns ??= new Map();
 		deps.state.foregroundControls ??= new Map();
 		deps.state.lastForegroundControlId ??= null;
-		const requestParams = omitExecutionModeActionAlias(params);
+		if (params.runId && params.id && params.runId !== params.id) {
+			return { content: [{ type: "text", text: "runId and id target different runs; provide one target or matching values." }], isError: true, details: { mode: "management", results: [] } };
+		}
+		if (params.childIndex !== undefined && params.index !== undefined && params.childIndex !== params.index) {
+			return { content: [{ type: "text", text: "childIndex and index target different children; provide one target or matching values." }], isError: true, details: { mode: "management", results: [] } };
+		}
+		const legacyParams = omitExecutionModeActionAlias(params);
+		const requestParams = {
+			...legacyParams,
+			...(legacyParams.runId ?? legacyParams.id ? { runId: legacyParams.runId ?? legacyParams.id, id: legacyParams.runId ?? legacyParams.id } : {}),
+			...((legacyParams.childIndex ?? legacyParams.index) !== undefined ? { index: legacyParams.childIndex ?? legacyParams.index } : {}),
+		};
 		const requestCwd = resolveRequestedCwd(ctx.cwd, requestParams.cwd);
 		const paramsWithResolvedCwd = requestParams.cwd === undefined ? requestParams : { ...requestParams, cwd: requestCwd };
 		const action = paramsWithResolvedCwd.action;
