@@ -57,6 +57,28 @@ describe("agent management config parsing", () => {
 		assert.doesNotMatch(readText(result), /- scout \(builtin/);
 	});
 
+	it("lists only models enabled by the session scope", () => {
+		const models = [
+			{ provider: "openai", id: "gpt-5-mini" },
+			{ provider: "anthropic", id: "claude-sonnet-4" },
+		];
+		const scopedResult = handleList(
+			{},
+			{
+				cwd: tempDir,
+				modelRegistry: { getAvailable: () => models },
+				scopedModels: [{ model: models[1] }],
+			},
+		);
+		const scopedText = readText(scopedResult);
+		assert.match(scopedText, /Available models \(use with model parameter\):\n- anthropic\/claude-sonnet-4/);
+		assert.doesNotMatch(scopedText, /- openai\/gpt-5-mini/);
+
+		const unscopedText = readText(handleList({}, { cwd: tempDir, modelRegistry: { getAvailable: () => models } }));
+		assert.match(unscopedText, /- openai\/gpt-5-mini/);
+		assert.match(unscopedText, /- anthropic\/claude-sonnet-4/);
+	});
+
 	it("gets only the effective agent detail and respects explicit scope", () => {
 		const projectAgentsDir = path.join(tempDir, ".pi", "agents");
 		const userAgentsDir = path.join(tempDir, "agent-home", "agents");

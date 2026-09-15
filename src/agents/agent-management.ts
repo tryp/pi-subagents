@@ -38,7 +38,11 @@ import { getProjectConfigDir } from "../shared/utils.ts";
 
 type ManagementAction = "list" | "get" | "models" | "create" | "update" | "delete" | "eject" | "disable" | "enable" | "reset";
 type ManagementScope = "user" | "project";
-type ManagementContext = Pick<ExtensionContext, "cwd" | "modelRegistry"> & { model?: ExtensionContext["model"]; config?: ExtensionConfig };
+type ManagementContext = Pick<ExtensionContext, "cwd" | "modelRegistry"> & {
+	model?: ExtensionContext["model"];
+	scopedModels?: ExtensionContext["scopedModels"];
+	config?: ExtensionConfig;
+};
 
 interface ManagementParams {
 	action?: string;
@@ -89,6 +93,13 @@ function normalizeListScope(scope: unknown): AgentScope | undefined {
 	if (scope === undefined) return "both";
 	if (scope === "user" || scope === "project" || scope === "both") return scope;
 	return undefined;
+}
+
+/** Match the model set exposed by the /model dialogue: an active scope, or all available models. */
+function getVisibleModels(ctx: ManagementContext) {
+	return ctx.scopedModels?.length
+		? ctx.scopedModels.map((scoped) => scoped.model)
+		: ctx.modelRegistry.getAvailable();
 }
 
 function sanitizeName(name: string): string {
@@ -664,7 +675,7 @@ export function handleList(params: ManagementParams, ctx: ManagementContext): Ag
 		})
 		: ["- (none)"];
 
-	const availableModels = ctx.modelRegistry.getAvailable();
+	const availableModels = getVisibleModels(ctx);
 	const modelLines = availableModels.length > 0
 		? ["", "Available models (use with model parameter):", ...availableModels.map((m) => `- ${m.provider}/${m.id}`)]
 		: [];
