@@ -726,7 +726,82 @@ describe("subagent_wait tool", () => {
 				baseDeps(root, state),
 			);
 			assert.equal(result.isError, true);
-			assert.match(textOf(result), /specify different completion conditions/);
+			assert.match(textOf(result), /contradicts until|specify different completion conditions/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects any-change combined with an integration barrier instead of silently using any-change", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-integration-any-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			// Two active runs, so overriding the barrier really would return early.
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			writeStatus(asyncRoot, "run-b", "running", { sessionId: "sess-1", pid: 999998 });
+
+			const result = await waitForSubagents(
+				{ barrier: "integration", until: "any-change" },
+				undefined,
+				baseDeps(root, state),
+			);
+			assert.equal(result.isError, true, "an integration barrier must not be silently weakened");
+			assert.match(textOf(result), /contradicts until|specify different completion conditions/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("mentions a sibling that needs attention even when an early result returns", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-early-attention-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-done", "running", { sessionId: "sess-1", pid: 999999 });
+			// needsAttention() reads activityState, not state.
+			writeStatus(asyncRoot, "run-blocked", "running", {
+				sessionId: "sess-1",
+				pid: 999998,
+				activityState: "needs_attention",
+			});
+			writeStepResult(asyncRoot, "run-done", 0, "DONE");
+
+			let polls = 0;
+			const result = await waitForSubagents({}, undefined, baseDeps(root, state, {
+				sleep: async () => {
+					polls += 1;
+				},
+			}));
+
+			const text = textOf(result);
+			assert.deepEqual(stepResultsOf(result).map((view) => view.output), ["DONE"]);
+			// The early path returns before the isDone() attention check, so it has to
+			// carry the attention state itself or a blocked sibling goes unmentioned.
+			assert.match(text, /need attention/);
+			assert.match(text, /run-blocked/);
+			assert.ok(polls <= 1, `the early result should return promptly, polled ${polls}`);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("defaults to first-result for an id prefix too", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-prefix-default-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-alpha", "running", { sessionId: "sess-1", pid: 999999 });
+			writeStepResult(asyncRoot, "run-alpha", 0, "ALPHA");
+
+			// No runId: a prefix must still resolve and take the first-result default,
+			// which is the regression the retargeted prefix tests no longer cover.
+			const resolved = await waitForSubagents({ id: "run-al" }, undefined, baseDeps(root, state, {
+				sleep: async () => {},
+			}));
+			assert.equal(resolved.isError, undefined);
+			assert.match(textOf(resolved), /child result\(s\) finished before the rest of the batch/);
+			assert.deepEqual(stepResultsOf(resolved).map((view) => view.output), ["ALPHA"]);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

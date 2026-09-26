@@ -304,10 +304,10 @@ export const SubagentParams = keepTopLevelParameterDescriptions(SubagentParamsSc
 const SubagentWaitParamsSchema = Type.Object({
 	runId: Type.Optional(Type.String({ description: "Preferred root run ID or prefix to wait for one specific run." })),
 	id: Type.Optional(Type.String({ description: "Compatibility alias for runId." })),
-	barrier: Type.Optional(Type.String({ enum: ["consume-result", "integration"], description: "Why this explicit blocking barrier is needed. 'integration' means the batch must be finished before you proceed, so it implies waiting for every selected run; 'consume-result' keeps the default first-result condition." })),
+	barrier: Type.Optional(Type.String({ enum: ["consume-result", "integration"], description: "Why this explicit blocking barrier is needed. 'integration' means the batch must be finished before you proceed, so it requires all-terminal and any other until value is rejected as contradictory; 'consume-result' keeps the default first-result condition." })),
 	until: Type.Optional(Type.String({ enum: ["any-change", "all-terminal", "first-result"], description: "Completion condition. Default first-result: return as soon as one finished child publishes a result, without waiting for the rest of its batch, and consume it so repeated calls drain the batch one report at a time. all-terminal waits for every selected run. any-change returns when the first tracked run finishes (fleet-manager style, where you spawn a replacement and wait again)." })),
 	all: Type.Optional(Type.Boolean({
-		description: "Wait for ALL active runs to finish. Default false: return as soon as the first run finishes, so a fleet manager can spawn a replacement and wait again. Ignored when id targets a single run.",
+		description: "Wait for ALL active runs to finish. Default false, which now means the first-result condition: return as soon as one finished child publishes a result. Use until: \"any-change\" to return at the first tracked run's completion instead, for a fleet manager that spawns a replacement and waits again. Ignored when id targets a single run.",
 	})),
 	timeoutMs: Type.Optional(Type.Integer({
 		minimum: 1,

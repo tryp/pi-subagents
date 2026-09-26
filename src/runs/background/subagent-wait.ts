@@ -14,12 +14,15 @@
  * inside the turn, the completion the model was told to wait for is actually
  * observed before the tool returns.
  *
- * By default `subagent_wait` returns as soon as ONE run finishes, so a fleet
- * manager can use it in a rolling-replacement loop: launch N workers, wait for
- * the next one to finish, spawn its replacement, then call `subagent_wait`
- * again — keeping N in flight instead of draining to zero between batches.
- * Pass `all: true` to block until every tracked async run is terminal, or `id`
- * to block on one specific async or remembered detached foreground run.
+ * By default `subagent_wait` returns as soon as ONE child of a parallel batch has
+ * published a result, so a parent can act on a partial batch instead of blocking
+ * for the slowest child: it consumes what is ready and repeating the call drains
+ * the children that finish later. `all: true`, `until: "all-terminal"`, and
+ * `barrier: "integration"` block until every tracked run is terminal, and
+ * `until: "any-change"` returns at the first tracked run's completion for a
+ * rolling-replacement loop (launch N workers, wait for the next to finish, spawn
+ * its replacement, wait again). Use `id` to block on one specific async or
+ * remembered detached foreground run.
  *
  * Returns results, not just status. Terminal children publish an artifact under
  * `<asyncDir>/step-results/step-<index>.json` as each child finishes (see
@@ -95,9 +98,10 @@ export interface SubagentWaitParams {
 	until?: "any-change" | "all-terminal" | "first-result";
 	/**
 	 * When true, block until EVERY active run in this session (or matching `id`)
-	 * is terminal. Default false: return as soon as the first run finishes, so a
-	 * fleet manager can spawn a replacement and wait again. Ignored when `id`
-	 * targets a single run.
+	 * is terminal. Default false, which now means the first-result condition: return
+	 * as soon as one finished child publishes a result. Use `until: "any-change"`
+	 * when you want to return at the first tracked run's completion instead (a
+	 * rolling-replacement loop over several runs).
 	 */
 	all?: boolean;
 	/** Give up after this many milliseconds. Defaults to 30 minutes. */
@@ -526,8 +530,11 @@ export async function waitForSubagents(
 	if (params.until && params.all !== undefined && (params.until === "all-terminal") !== params.all) {
 		return result("until and all specify different completion conditions; provide one or matching values.", true);
 	}
-	if (params.until === "first-result" && params.barrier === "integration") {
-		return result("until: first-result and barrier: integration specify different completion conditions; use all-terminal for integration.", true);
+	if (params.until && params.barrier === "integration" && params.until !== "all-terminal") {
+		return result(
+			`barrier: integration means the whole batch must be finished, which contradicts until: "${params.until}"; use until: "all-terminal" or drop until.`,
+			true,
+		);
 	}
 	const runId = params.runId ?? params.id;
 	const untilMode = params.until ?? (params.all === true || params.barrier === "integration" ? "all-terminal" : "first-result");
@@ -647,9 +654,20 @@ export async function waitForSubagents(
 		// finished with unconsumed results must still report them.
 		const earlyResults = firstResultMode ? consumeStepResultViews(trackedRuns(), deps) : [];
 		if (earlyResults.length > 0) {
+			// An early result must not hide a sibling that needs attention: the
+			// attention check lives in isDone(), which this branch returns before.
+			const earlyAttention = attention.filter((run) => initialAsyncIds.has(run.id));
+			const attentionNote = earlyAttention.length > 0
+				? ` ${earlyAttention.length} run(s) need attention: ${earlyAttention.map((run) => run.id).join(", ")} — inspect with subagent({ action: "status" }).`
+				: "";
+			const stillRunning = active.filter((run) => initialAsyncIds.has(run.id)).length;
+			const remainingNote = stillRunning > 0
+				? ` ${stillRunning} run(s) still in flight — call subagent_wait again to catch the next one.`
+				: "";
 			return resultWithStepResults(
-				`Waited ${formatDuration(now() - startedAt)}; ${earlyResults.length} child result(s) finished before the rest of the batch.\n${formatStepResultViews(earlyResults, "")}`,
+				`Waited ${formatDuration(now() - startedAt)}; ${earlyResults.length} child result(s) finished before the rest of the batch.${attentionNote}${remainingNote}\n${formatStepResultViews(earlyResults, "")}`,
 				earlyResults,
+				deps.failOnFailedRuns === true && earlyResults.some((view) => !view.success),
 			);
 		}
 		if (isDone()) break;
