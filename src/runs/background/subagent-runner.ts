@@ -99,6 +99,48 @@ import { waitForImportedAsyncRoot } from "./chain-root-attachment.ts";
 import { appendRunnerStepsToStatus, consumeChainAppendRequests, countPendingChainAppendRequests } from "./chain-append.ts";
 import { appendTurnBudgetSystemPrompt, formatTurnBudgetOutput, initialTurnBudgetState, turnBudgetDecision, turnBudgetDeferredNote, turnBudgetDeferredState, turnBudgetExceededMessage, turnBudgetSoftNote, turnBudgetState } from "../shared/turn-budget.ts";
 import { initialToolBudgetState, toolBudgetState } from "../shared/tool-budget.ts";
+import {
+	STEP_RESULT_ARTIFACT_VERSION,
+	stepResultState,
+	writeStepResultArtifact,
+	type StepResultState,
+} from "../shared/step-results.ts";
+
+/**
+ * Publish one child's terminal result: write the artifact, then emit the event.
+ *
+ * The event is the contract for "a consumable result exists at `resultPath`", so
+ * it is only emitted once the artifact actually landed. A failed write is
+ * already logged by `writeStepResultArtifact`; emitting the event anyway would
+ * hand consumers a path to a file that does not exist, and a parent waking on it
+ * would find nothing to read.
+ */
+function publishStepResult(input: {
+	eventsPath: string;
+	asyncDir: string;
+	runId: string;
+	stepIndex: number;
+	agent: string;
+	state: StepResultState;
+	startedAt: number;
+	endedAt: number;
+	durationMs: number;
+	result: StepResult;
+}): string | undefined {
+	const resultPath = writeStepResultArtifact(input);
+	if (!resultPath) return undefined;
+	appendJsonl(input.eventsPath, JSON.stringify({
+		type: "subagent.step.result.completed",
+		stepResultArtifactVersion: STEP_RESULT_ARTIFACT_VERSION,
+		ts: input.endedAt,
+		runId: input.runId,
+		stepIndex: input.stepIndex,
+		agent: input.agent,
+		state: input.state,
+		resultPath,
+	}));
+	return resultPath;
+}
 import { resolveWatchdogConfig } from "../../watchdog/settings.ts";
 import { createBoundedByteTail, createBoundedLineReader, formatProtocolOutputLimit, MAX_CHILD_STDERR_BYTES, projectChildLifecycle, type ChildLifecycleAction, type ProtocolOutputLimit } from "../shared/child-protocol.ts";
 import { acquireSessionLease, type SessionLeaseRequest } from "../shared/session-lease.ts";
@@ -185,85 +227,6 @@ interface StepResult {
 
 const ASYNC_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
 
-/**
- * Version of the per-child artifact written to `<asyncDir>/step-results/`.
- *
- * Deliberately a separate key from the run-level `lifecycleArtifactVersion`
- * (SUBAGENT_LIFECYCLE_ARTIFACT_VERSION) so a future generic version check
- * cannot conflate a step artifact with a run artifact.
- */
-const STEP_RESULT_ARTIFACT_VERSION = 1;
-
-type StepResultState = "complete" | "failed" | "paused" | "stopped";
-
-/**
- * Map a child's normalized outcome onto the state vocabulary used in both
- * status.json and the per-child artifact.
- */
-function stepResultState(input: {
-	stopped: boolean;
-	timedOut: boolean;
-	interrupted: boolean;
-	exitCode?: number | null;
-}): StepResultState {
-	if (input.stopped) return "stopped";
-	if (input.timedOut) return "failed";
-	if (input.interrupted) return "paused";
-	return input.exitCode === 0 ? "complete" : "failed";
-}
-
-/**
- * Persist one child's result as soon as that child finishes, so a parent can
- * read a finished child's output without waiting for the whole run to join.
- *
- * The file is written atomically under `runId` + `stepIndex`, so re-running the
- * write for the same child is idempotent. Whole-run `result.json` keeps its
- * existing shape; this artifact is purely additive.
- *
- * The write is synchronous and happens inside the concurrency-limited callback,
- * which means it briefly holds that child's semaphore slot. That is acceptable:
- * the same callback already performs a strictly larger synchronous
- * `writeStatusPayload()` per child completion, so this adds a smaller write to a
- * path that already blocks. It is written here rather than at the batch join
- * because the whole point is availability before the join.
- *
- * Children that never start (pre-run timeout/stop/interrupt guards) get no
- * artifact, matching the fact that they never get a terminal status either.
- */
-function writeStepResultArtifact(input: {
-	asyncDir: string;
-	runId: string;
-	stepIndex: number;
-	agent: string;
-	state: StepResultState;
-	startedAt: number;
-	endedAt: number;
-	durationMs: number;
-	result: StepResult;
-}): string | undefined {
-	const filePath = path.join(input.asyncDir, "step-results", `step-${input.stepIndex}.json`);
-	try {
-		writeAtomicJson(filePath, {
-			stepResultArtifactVersion: STEP_RESULT_ARTIFACT_VERSION,
-			runId: input.runId,
-			stepIndex: input.stepIndex,
-			agent: input.agent,
-			state: input.state,
-			startedAt: input.startedAt,
-			endedAt: input.endedAt,
-			durationMs: input.durationMs,
-			// ``success`` is derived here rather than copied so the artifact agrees
-			// with the same child's entry in the whole-run result.json, where the
-			// join computes it from the normalized outcome.
-			result: { ...input.result, success: input.state === "complete" },
-		});
-		return filePath;
-	} catch (err) {
-		// A missing convenience artifact must never fail the run itself.
-		console.error(`Failed to write step result ${filePath}:`, err);
-		return undefined;
-	}
-}
 const DEFAULT_MAX_ASYNC_EVENTS_BYTES = 50 * 1024 * 1024;
 const ASYNC_EVENTS_MAX_BYTES_ENV = "PI_SUBAGENT_ASYNC_EVENTS_MAX_BYTES";
 const TRUNCATED_EVENT_TYPE = "subagent.events.truncated";
@@ -2918,17 +2881,11 @@ async function runSubagent(
 						type: "subagent.step.failed", ts: skippedAt, runId: id, stepIndex: fi, agent: task.agent, exitCode: -1, durationMs: 0,
 					}));
 					const skippedResult: StepResult = { agent: task.agent, output: "(skipped — fail-fast)", exitCode: -1 as number | null, skipped: true };
-					const skippedPath = writeStepResultArtifact({
-						asyncDir, runId: id, stepIndex: fi, agent: task.agent,
+					const skippedPath = publishStepResult({
+						eventsPath, asyncDir, runId: id, stepIndex: fi, agent: task.agent,
 						state: "failed", startedAt: skippedAt, endedAt: skippedAt, durationMs: 0,
 						result: skippedResult,
 					});
-					appendJsonl(eventsPath, JSON.stringify({
-						type: "subagent.step.result.completed",
-						stepResultArtifactVersion: STEP_RESULT_ARTIFACT_VERSION,
-						ts: skippedAt, runId: id, stepIndex: fi, agent: task.agent,
-						state: "failed", resultPath: skippedPath,
-					}));
 					return skippedResult;
 				}
 				const taskStartTime = Date.now();
@@ -3018,7 +2975,8 @@ async function runSubagent(
 				const stepState = stepResultState({ stopped: stopped || childStopped, timedOut, interrupted: childInterrupted, exitCode: singleResult.exitCode });
 				// Written at child completion, not at the batch join, so the parent can
 				// consume this child's result while stragglers are still running.
-				const stepResultPath = writeStepResultArtifact({
+				const stepResultPath = publishStepResult({
+					eventsPath,
 					asyncDir,
 					runId: id,
 					stepIndex: fi,
@@ -3029,16 +2987,6 @@ async function runSubagent(
 					durationMs: taskEndTime - taskStartTime,
 					result: normalizedStepResult,
 				});
-				appendJsonl(eventsPath, JSON.stringify({
-					type: "subagent.step.result.completed",
-					stepResultArtifactVersion: STEP_RESULT_ARTIFACT_VERSION,
-					ts: taskEndTime,
-					runId: id,
-					stepIndex: fi,
-					agent: task.agent,
-					state: stepState,
-					resultPath: stepResultPath,
-				}));
 				return normalizedStepResult;
 			}, globalSemaphore);
 
@@ -3249,17 +3197,11 @@ async function runSubagent(
 							const skippedResult: StepResult = { agent: task.agent, output: "(skipped — fail-fast)", exitCode: -1 as number | null, skipped: true };
 							// A skipped child is terminal in status.json, so it also gets a
 							// per-child artifact instead of being an unexplained gap.
-							const skippedPath = writeStepResultArtifact({
-								asyncDir, runId: id, stepIndex: fi, agent: task.agent,
+							const skippedPath = publishStepResult({
+								eventsPath, asyncDir, runId: id, stepIndex: fi, agent: task.agent,
 								state: "failed", startedAt: skippedAt, endedAt: skippedAt, durationMs: 0,
 								result: skippedResult,
 							});
-							appendJsonl(eventsPath, JSON.stringify({
-								type: "subagent.step.result.completed",
-								stepResultArtifactVersion: STEP_RESULT_ARTIFACT_VERSION,
-								ts: skippedAt, runId: id, stepIndex: fi, agent: task.agent,
-								state: "failed", resultPath: skippedPath,
-							}));
 							return skippedResult;
 						}
 
@@ -3381,7 +3323,8 @@ async function runSubagent(
 						const normalizedStepResult: StepResult = stopped || childStopped ? { ...singleResult, output: stopMessage, error: stopMessage, exitCode: 1, interrupted: false, timedOut: false, stopped: true, skipped: false } : timedOut ? { ...singleResult, output: timeoutMessage ?? "Subagent timed out.", error: timeoutMessage ?? "Subagent timed out.", exitCode: 1, interrupted: false, timedOut: true, skipped: false } : { ...singleResult, skipped: false };
 						// Written at child completion, not at the batch join, so the parent can
 						// consume this child's result while stragglers are still running.
-						const stepResultPath = writeStepResultArtifact({
+						const stepResultPath = publishStepResult({
+							eventsPath,
 							asyncDir,
 							runId: id,
 							stepIndex: fi,
@@ -3392,16 +3335,6 @@ async function runSubagent(
 							durationMs: taskDuration,
 							result: normalizedStepResult,
 						});
-						appendJsonl(eventsPath, JSON.stringify({
-							type: "subagent.step.result.completed",
-							stepResultArtifactVersion: STEP_RESULT_ARTIFACT_VERSION,
-							ts: taskEndTime,
-							runId: id,
-							stepIndex: fi,
-							agent: task.agent,
-							state: stepResultState({ stopped: stopped || childStopped, timedOut, interrupted: childInterrupted, exitCode: singleResult.exitCode }),
-							resultPath: stepResultPath,
-						}));
 						return normalizedStepResult;
 					},
 					globalSemaphore,
@@ -3669,7 +3602,8 @@ async function runSubagent(
 			}));
 			// Sequential steps get the same per-child artifact contract as parallel
 			// children, so consumers never need to special-case the run mode.
-			const stepResultPath = writeStepResultArtifact({
+			const stepResultPath = publishStepResult({
+				eventsPath,
 				asyncDir,
 				runId: id,
 				stepIndex: flatIndex,
@@ -3680,16 +3614,6 @@ async function runSubagent(
 				durationMs: stepEndTime - stepStartTime,
 				result: seqStepResult,
 			});
-			appendJsonl(eventsPath, JSON.stringify({
-				type: "subagent.step.result.completed",
-				stepResultArtifactVersion: STEP_RESULT_ARTIFACT_VERSION,
-				ts: stepEndTime,
-				runId: id,
-				stepIndex: flatIndex,
-				agent: seqStep.agent,
-				state: stepState,
-				resultPath: stepResultPath,
-			}));
 			if (singleResult.completionGuardTriggered) {
 				const event = buildControlEvent({
 					from: statusPayload.steps[flatIndex].activityState,

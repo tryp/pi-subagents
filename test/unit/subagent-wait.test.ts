@@ -48,6 +48,37 @@ function textOf(result: { content: Array<{ type: string; text?: string }> }): st
 	return result.content.map((c) => c.text ?? "").join("");
 }
 
+function writeStepResult(
+	asyncRoot: string,
+	runId: string,
+	stepIndex: number,
+	output: string,
+	options: { state?: "complete" | "failed" | "paused" | "stopped"; agent?: string } = {},
+): void {
+	const dir = path.join(asyncRoot, runId, "step-results");
+	fs.mkdirSync(dir, { recursive: true });
+	const state = options.state ?? "complete";
+	fs.writeFileSync(
+		path.join(dir, `step-${stepIndex}.json`),
+		JSON.stringify({
+			stepResultArtifactVersion: 1,
+			runId,
+			stepIndex,
+			agent: options.agent ?? "scout",
+			state,
+			startedAt: Date.now() - 1000,
+			endedAt: Date.now(),
+			durationMs: 1000,
+			result: { agent: options.agent ?? "scout", output, success: state === "complete" },
+		}),
+		"utf-8",
+	);
+}
+
+function stepResultsOf(result: { details?: { stepResults?: Array<{ stepIndex: number; output: string }> } }): Array<{ stepIndex: number; output: string }> {
+	return result.details?.stepResults ?? [];
+}
+
 function baseDeps(root: string, state: SubagentState, overrides: Partial<SubagentWaitDeps> = {}): SubagentWaitDeps {
 	return {
 		state,
@@ -575,6 +606,127 @@ describe("subagent_wait tool", () => {
 			assert.equal(result.isError, undefined);
 			assert.match(textOf(result), /done/i);
 			assert.ok(polls >= 1);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+	it("returns finished children's output instead of only a status line", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-results-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			writeStepResult(asyncRoot, "run-a", 0, "ALPHA");
+
+			// The child result is already on disk; the run only finishes on the poll.
+			const sleep = async () => writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1" });
+			const result = await waitForSubagents({ runId: "run-a" }, undefined, baseDeps(root, state, { sleep }));
+
+			assert.equal(result.isError, undefined);
+			const text = textOf(result);
+			assert.match(text, /step 0 \(scout\) \[complete\]/);
+			assert.match(text, /ALPHA/);
+			assert.deepEqual(stepResultsOf(result).map((view) => view.output), ["ALPHA"]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("until:first-result returns before the rest of the batch finishes", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-first-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			// The batch stays running for the whole call: only child 0 is done.
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			writeStepResult(asyncRoot, "run-a", 0, "ALPHA");
+
+			let slept = false;
+			const result = await waitForSubagents({ runId: "run-a", until: "first-result" }, undefined, baseDeps(root, state, {
+				sleep: async () => {
+					slept = true;
+					throw new Error("first-result should return without polling while a child result exists");
+				},
+			}));
+
+			assert.equal(result.isError, undefined);
+			assert.match(textOf(result), /ALPHA/);
+			assert.match(textOf(result), /before the rest of the batch/);
+			assert.equal(slept, false, "must not wait for the straggler once a child result exists");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("until:first-result consumes each child once so repeated calls drain the batch", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-drain-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			writeStepResult(asyncRoot, "run-a", 0, "ALPHA");
+			const deps = baseDeps(root, state, { sleep: async () => {} });
+
+			const first = await waitForSubagents({ runId: "run-a", until: "first-result" }, undefined, deps);
+			assert.match(textOf(first), /ALPHA/);
+			assert.deepEqual(stepResultsOf(first).map((view) => view.stepIndex), [0]);
+
+			// Child 1 finishes later; the second call must report it, not replay ALPHA.
+			writeStepResult(asyncRoot, "run-a", 1, "BETA");
+			const second = await waitForSubagents({ runId: "run-a", until: "first-result" }, undefined, deps);
+			assert.doesNotMatch(textOf(second), /ALPHA/);
+			assert.match(textOf(second), /BETA/);
+			assert.deepEqual(stepResultsOf(second).map((view) => view.stepIndex), [1]);
+
+			// Both children have been reported; a third call reports nothing and says so.
+			writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1" });
+			const third = await waitForSubagents({ runId: "run-a", until: "first-result" }, undefined, deps);
+			assert.equal(third.isError, undefined);
+			assert.match(textOf(third), /no unconsumed per-child results/i);
+			assert.deepEqual(stepResultsOf(third), []);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("until:first-result still delivers results when the batch already finished", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-done-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			// Terminal, so it is not an "active" run and the old code answered
+			// "No active run matched" while the child's output sat on disk.
+			writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1" });
+			writeStepResult(asyncRoot, "run-a", 0, "ALPHA");
+			writeStepResult(asyncRoot, "run-a", 1, "BETA");
+
+			const result = await waitForSubagents({ runId: "run-a", until: "first-result" }, undefined, baseDeps(root, state));
+
+			assert.equal(result.isError, undefined);
+			const text = textOf(result);
+			assert.match(text, /no longer active/);
+			assert.match(text, /ALPHA/);
+			assert.match(text, /BETA/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("reports failed children as failures rather than successes", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-failed-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			writeStepResult(asyncRoot, "run-a", 0, "boom", { state: "failed" });
+			const sleep = async () => writeStatus(asyncRoot, "run-a", "failed", { sessionId: "sess-1" });
+
+			const result = await waitForSubagents({ runId: "run-a" }, undefined, baseDeps(root, state, { sleep }));
+
+			assert.match(textOf(result), /step 0 \(scout\) \[failed\]/);
+			const [view] = stepResultsOf(result) as Array<{ success: boolean; state: string }>;
+			assert.equal(view?.success, false);
+			assert.equal(view?.state, "failed");
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

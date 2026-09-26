@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { createEventBus, createMockPi, createTempDir, events, makeAgent, makeMinimalCtx, removeTempDir, tryImport } from "../support/helpers.ts";
 import type { MockPi } from "../support/helpers.ts";
 import { deliverInterruptRequest, deliverStopRequest, deliverTimeoutRequest } from "../../src/runs/background/control-channel.ts";
+import { waitForSubagents, type SubagentWaitDeps } from "../../src/runs/background/subagent-wait.ts";
 import { writeAtomicJson } from "../../src/shared/atomic-json.ts";
 import { CHILD_WATCHDOG_STATUS_EVENT } from "../../src/watchdog/child-status.ts";
 import { MAX_CHILD_PENDING_LINE_BYTES, MAX_CHILD_STDERR_BYTES } from "../../src/runs/shared/child-protocol.ts";
@@ -202,6 +203,31 @@ const executeAsyncSingle = asyncMod?.executeAsyncSingle;
 const executeAsyncChain = asyncMod?.executeAsyncChain;
 const readStatus = utils?.readStatus;
 const ASYNC_DIR = typesMod?.ASYNC_DIR;
+
+function textOfResult(result: { content: Array<{ type: string; text?: string }> }): string {
+	return result.content.map((part) => part.text ?? "").join("");
+}
+
+/**
+ * Minimal session state for driving the real wait tool against real run dirs.
+ * `consumedStepResults` is created lazily by the wait tool itself.
+ */
+function makeWaitState(sessionId: string | null): SubagentWaitDeps["state"] {
+	return {
+		baseCwd: "",
+		currentSessionId: sessionId,
+		asyncJobs: new Map(),
+		foregroundControls: new Map(),
+		lastForegroundControlId: null,
+		cleanupTimers: new Map(),
+		lastUiContext: null,
+		poller: null,
+		completionSeen: new Map(),
+		watcher: null,
+		watcherRestartTimer: null,
+		resultFileCoalescer: { schedule: () => false, clear: () => {} },
+	} as SubagentWaitDeps["state"];
+}
 const RESULTS_DIR = typesMod?.RESULTS_DIR;
 const TEMP_ROOT_DIR = typesMod?.TEMP_ROOT_DIR;
 const createSubagentExecutor = executorMod?.createSubagentExecutor;
@@ -4070,4 +4096,78 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.results[0]?.success, true);
 		assert.equal(payload.results[1]?.success, false);
 	});
+	it("subagent_wait returns a finished child before its batch finishes", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
+		// End-to-end composition of the two halves: the runner publishes child 1's
+		// artifact at that child's completion (stage 1), and subagent_wait reads it
+		// while child 2 is still gated (stage 2). This is the parent-visible
+		// improvement: the wait returns as soon as a usable result exists instead of
+		// blocking until the slowest child finishes.
+		const release = path.join(tempDir, "release-first-result");
+		mockPi.onCall({ matchArgIncludes: "EARLY_CHILD", output: "early child done" });
+		mockPi.onCall({ matchArgIncludes: "LATE_CHILD", output: "late child done", waitForPath: release });
+
+		const executor = makeAsyncExecutor([makeAgent("worker", { completionGuard: false })]);
+		const result = await executor.execute(
+			"async-first-result-wait",
+			{
+				tasks: [
+					{ agent: "worker", task: "EARLY_CHILD report" },
+					{ agent: "worker", task: "LATE_CHILD report" },
+				],
+				async: true,
+				clarify: false,
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const asyncId = result.details?.asyncId;
+		assert.ok(asyncId, "expected asyncId");
+		const asyncDir = path.join(ASYNC_DIR, asyncId);
+		const secondArtifact = path.join(asyncDir, "step-results", "step-1.json");
+
+		// Wait for the runner to exist before asking wait to find it.
+		const statusDeadline = Date.now() + 30_000;
+		while (!fs.existsSync(path.join(asyncDir, "status.json"))) {
+			if (Date.now() > statusDeadline) assert.fail(`Timed out waiting for ${asyncDir}/status.json`);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		const sessionId = (JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as { sessionId?: string }).sessionId;
+
+		const startedAt = Date.now();
+		// One session state across both calls: consumption is per session, so the
+		// second call must report only the child that has not been reported yet.
+		const waitState = makeWaitState(sessionId ?? null);
+		const waitDeps = {
+			state: waitState,
+			asyncDirRoot: ASYNC_DIR,
+			resultsDir: RESULTS_DIR,
+			kill: () => true,
+			pollIntervalMs: 50,
+		} as SubagentWaitDeps;
+		const waited = await waitForSubagents({ runId: asyncId, until: "first-result" }, undefined, waitDeps);
+
+		assert.equal(waited.isError, undefined, textOfResult(waited));
+		const text = textOfResult(waited);
+		assert.match(text, /early child done/, text);
+		assert.doesNotMatch(text, /late child done/, "the gated child must not be reported yet");
+		assert.deepEqual(waited.details?.stepResults?.map((view) => view.output), ["early child done"]);
+
+		// The straggler was still blocked when wait returned: that is the whole
+		// point, and it is what the previous behaviour could not do.
+		assert.equal(fs.existsSync(secondArtifact), false, "straggler must not have finished yet");
+		assert.equal(fs.existsSync(release), false, "straggler release must not have been written yet");
+		assert.ok(Date.now() - startedAt < 30_000);
+
+		// Release the straggler and confirm wait can then drain the second child,
+		// so early return does not lose the rest of the batch.
+		fs.writeFileSync(release, "go", "utf-8");
+		await waitForAsyncResultFile(asyncId, 30_000);
+		const drained = await waitForSubagents({ runId: asyncId, until: "first-result" }, undefined, waitDeps);
+		assert.equal(drained.isError, undefined, textOfResult(drained));
+		assert.match(textOfResult(drained), /late child done/);
+		assert.deepEqual(drained.details?.stepResults?.map((view) => view.output), ["late child done"]);
+	});
 });
+

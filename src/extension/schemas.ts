@@ -305,7 +305,7 @@ const SubagentWaitParamsSchema = Type.Object({
 	runId: Type.Optional(Type.String({ description: "Preferred root run ID or prefix to wait for one specific run." })),
 	id: Type.Optional(Type.String({ description: "Compatibility alias for runId." })),
 	barrier: Type.Optional(Type.String({ enum: ["consume-result", "integration"], description: "Why this explicit blocking barrier is needed." })),
-	until: Type.Optional(Type.String({ enum: ["any-change", "all-terminal"], description: "Preferred completion condition; all-terminal waits for every initially selected run." })),
+	until: Type.Optional(Type.String({ enum: ["any-change", "all-terminal", "first-result"], description: "Preferred completion condition. any-change (default) returns when the first tracked run finishes; all-terminal waits for every initially selected run; first-result returns as soon as one finished child publishes a result, without waiting for the rest of its batch, and consumes it so repeated calls drain the batch one report at a time." })),
 	all: Type.Optional(Type.Boolean({
 		description: "Wait for ALL active runs to finish. Default false: return as soon as the first run finishes, so a fleet manager can spawn a replacement and wait again. Ignored when id targets a single run.",
 	})),

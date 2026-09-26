@@ -21,6 +21,15 @@
  * Pass `all: true` to block until every tracked async run is terminal, or `id`
  * to block on one specific async or remembered detached foreground run.
  *
+ * Returns results, not just status. Terminal children publish an artifact under
+ * `<asyncDir>/step-results/step-<index>.json` as each child finishes (see
+ * `runs/shared/step-results.ts`), so a wait can hand the caller the child's
+ * output instead of a status line that forces a second `subagent({ action:
+ * "status" })` round trip. `until: "first-result"` goes further: it returns as
+ * soon as one child of the tracked run(s) has published a result, without
+ * waiting for the rest of the batch, and consumes that result so repeated calls
+ * drain children one at a time instead of re-reporting the same one.
+ *
  * `subagent_wait` also returns when a run needs attention — not just on
  * completion. A child that goes idle or blocks for a decision surfaces
  * `needs_attention` (the same signal Pi shows as a control notice and,
@@ -46,6 +55,13 @@ import {
 	type RegisteredBackgroundWorkItem,
 } from "../../api/background-work.ts";
 import { listAsyncRuns, type AsyncRunSummary } from "./async-status.ts";
+import {
+	listStepResultArtifacts,
+	stepResultArtifactPath,
+	type StepResultArtifact,
+	type StepResultPresentation,
+} from "../shared/step-results.ts";
+import { truncateOutput } from "../../shared/types.ts";
 import {
 	ASYNC_DIR,
 	RESULTS_DIR,
@@ -76,7 +92,7 @@ export interface SubagentWaitParams {
 	/** Why this blocking barrier is required. */
 	barrier?: "consume-result" | "integration";
 	/** Preferred completion condition. */
-	until?: "any-change" | "all-terminal";
+	until?: "any-change" | "all-terminal" | "first-result";
 	/**
 	 * When true, block until EVERY active run in this session (or matching `id`)
 	 * is terminal. Default false: return as soon as the first run finishes, so a
@@ -289,6 +305,112 @@ function result(text: string, isError = false): AgentToolResult<Details> {
 	};
 }
 
+/** One child's result as the parent receives it in a wait result. */
+export interface WaitStepResultView {
+	runId: string;
+	stepIndex: number;
+	agent: string;
+	state: StepResultArtifact["state"];
+	success: boolean;
+	endedAt: number;
+	output: string;
+	error?: string;
+	artifactPath: string;
+}
+
+/** Wait results stay small: a batch of children may each carry a large output. */
+const WAIT_STEP_RESULT_MAX = { bytes: 8 * 1024, lines: 120 };
+
+function stepResultView(run: AsyncRunSummary, artifact: StepResultArtifact): WaitStepResultView {
+	const payload = artifact.result as unknown as StepResultPresentation;
+	return {
+		runId: run.id,
+		stepIndex: artifact.stepIndex,
+		agent: artifact.agent,
+		state: artifact.state,
+		success: artifact.state === "complete",
+		endedAt: artifact.endedAt,
+		output: typeof payload.output === "string" ? payload.output : "",
+		error: typeof payload.error === "string" ? payload.error : undefined,
+		artifactPath: stepResultArtifactPath(run.asyncDir, artifact.stepIndex),
+	};
+}
+
+/**
+ * Render the per-child results a wait is about to return.
+ *
+ * Bounded on purpose: the whole point is to save a follow-up status call, not to
+ * inline several unbounded child transcripts. Truncated outputs point at the
+ * artifact that holds the full text.
+ */
+function formatStepResultViews(views: WaitStepResultView[], header: string): string {
+	if (views.length === 0) return "";
+	const blocks = views.map((view) => {
+		const status = view.success
+			? "complete"
+			: `${view.state}${view.error ? `: ${view.error.split("\n")[0]}` : ""}`;
+		const truncated = truncateOutput(view.output || "(no output)", WAIT_STEP_RESULT_MAX, view.artifactPath);
+		return `--- step ${view.stepIndex} (${view.agent}) [${status}] ---\n${truncated.text}`;
+	});
+	return `${header}\n${blocks.join("\n")}`;
+}
+
+/**
+ * Collect this session's unconsumed per-child results.
+ *
+ * Reads the artifacts children publish at their own completion, so a result is
+ * visible here while the rest of its batch is still running.
+ */
+function availableStepResults(
+	runs: AsyncRunSummary[],
+	consumed: Set<string>,
+): Array<{ run: AsyncRunSummary; view: WaitStepResultView }> {
+	const available: Array<{ run: AsyncRunSummary; view: WaitStepResultView }> = [];
+	for (const run of runs) {
+		for (const artifact of listStepResultArtifacts(run.asyncDir, { runId: run.id })) {
+			if (consumed.has(stepResultKey(run.id, artifact.stepIndex))) continue;
+			available.push({ run, view: stepResultView(run, artifact) });
+		}
+	}
+	return available;
+}
+
+function stepResultKey(runId: string, stepIndex: number): string {
+	return `${runId}:${stepIndex}`;
+}
+
+/** Lazily create the session-scoped set of results already reported to the parent. */
+function consumedStepResultSet(deps: SubagentWaitDeps): Set<string> {
+	if (!deps.state.consumedStepResults) deps.state.consumedStepResults = new Set();
+	return deps.state.consumedStepResults;
+}
+
+/**
+ * Read this session's not-yet-reported per-child results and mark them consumed,
+ * so a later `until: "first-result"` call reports the NEXT child instead of
+ * repeating one the parent has already seen.
+ */
+function consumeStepResultViews(runs: AsyncRunSummary[], deps: SubagentWaitDeps): WaitStepResultView[] {
+	const consumed = consumedStepResultSet(deps);
+	const available = availableStepResults(runs, consumed);
+	for (const entry of available) consumed.add(stepResultKey(entry.run.id, entry.view.stepIndex));
+	return available.map((entry) => entry.view);
+}
+
+/** Wait result that carries the child results it is reporting. */
+function resultWithStepResults(
+	text: string,
+	views: WaitStepResultView[],
+	isError = false,
+): AgentToolResult<Details> {
+	if (views.length === 0) return result(text, isError);
+	return {
+		content: [{ type: "text", text }],
+		...(isError ? { isError: true } : {}),
+		details: { mode: "management", results: [], stepResults: views },
+	};
+}
+
 async function waitForDetachedForegroundRun(
 	run: ForegroundResumeRun,
 	signal: AbortSignal | undefined,
@@ -355,6 +477,7 @@ export async function waitForSubagents(
 		return result("until and all specify different completion conditions; provide one or matching values.", true);
 	}
 	const runId = params.runId ?? params.id;
+	const firstResultMode = params.until === "first-result";
 	const now = deps.now ?? Date.now;
 	const pollIntervalMs = Math.max(MIN_POLL_INTERVAL_MS, deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS);
 	const timeoutMs = params.timeoutMs !== undefined && params.timeoutMs > 0 ? params.timeoutMs : DEFAULT_TIMEOUT_MS;
@@ -387,7 +510,26 @@ export async function waitForSubagents(
 			return waitForDetachedForegroundRun(selected.run, signal, deps, startedAt, now, pollIntervalMs, timeoutMs);
 		}
 		active = selected?.kind === "async" ? [selected.run] : [];
-		if (!selected) return result(`No active run matched "${runId}". Nothing to wait for.`);
+		if (!selected) {
+			// A batch can finish before the parent gets to wait for it. With
+			// `until: "first-result"` the finished children's results are still the
+			// thing the caller asked for, so deliver them instead of "nothing to
+			// wait for".
+			if (firstResultMode) {
+				const [terminal] = allRunsForSession({ ...params, id: runId }, deps).filter((run) => run.id === runId);
+				const recovered = terminal ? consumeStepResultViews([terminal], deps) : [];
+				if (recovered.length > 0) {
+					return resultWithStepResults(
+						`Run "${runId}" is no longer active, but ${recovered.length} finished child result(s) had not been consumed yet.\n${formatStepResultViews(recovered, "")}`,
+						recovered,
+					);
+				}
+				if (terminal) {
+					return result(`Run "${runId}" is ${terminal.state} and has no unconsumed per-child results. Use subagent({ action: "status", runId: "${runId}" }) for its joined output.`);
+				}
+			}
+			return result(`No active run matched "${runId}". Nothing to wait for.`);
+		}
 	}
 
 	let providerActive = providerSnapshot.items;
@@ -416,7 +558,48 @@ export async function waitForSubagents(
 			|| [...initialProviderIds].some((id) => !activeProviderIds.has(id));
 	};
 
-	while (!isDone()) {
+	/**
+	 * Runs this wait is tracking, with a lookup that survives completion.
+	 *
+	 * A run that reaches a terminal state leaves the active listing, but its
+	 * children's artifacts are still on disk and are exactly what a terminal
+	 * return must report. Only pay for the all-states listing when a tracked run
+	 * is no longer active.
+	 */
+	const trackedRuns = (): AsyncRunSummary[] => {
+		const byId = new Map(active.map((run) => [run.id, run]));
+		const found: AsyncRunSummary[] = [];
+		const missing: string[] = [];
+		for (const id of initialAsyncIds) {
+			const run = byId.get(id);
+			if (run) found.push(run);
+			else missing.push(id);
+		}
+		if (missing.length === 0) return found;
+		for (const run of allRunsForSession(waitParams, deps)) {
+			if (missing.includes(run.id) && !byId.has(run.id)) found.push(run);
+		}
+		return found;
+	};
+	// `until: "first-result"` consumes as it reports, so repeated calls drain the
+	// children of a batch one report at a time. Every other mode only consumes on
+	// a terminal return, where reporting the results is the point of the call.
+	const resultsForTerminalReturn = (alreadyConsumed: WaitStepResultView[]): WaitStepResultView[] =>
+		firstResultMode ? alreadyConsumed : consumeStepResultViews(trackedRuns(), deps);
+
+	while (true) {
+		// Check for finished children before the completion check: a result is
+		// consumable while the rest of its batch is still running, and a run that
+		// finished with unconsumed results must still report them.
+		const earlyResults = firstResultMode ? consumeStepResultViews(trackedRuns(), deps) : [];
+		if (earlyResults.length > 0) {
+			return resultWithStepResults(
+				`Waited ${formatDuration(now() - startedAt)}; ${earlyResults.length} child result(s) finished before the rest of the batch.\n${formatStepResultViews(earlyResults, "")}`,
+				earlyResults,
+			);
+		}
+		if (isDone()) break;
+
 		const activeInitialRuns = active.filter((run) => initialAsyncIds.has(run.id));
 		const activeInitialProviderItems = providerActive.filter((item) => initialProviderIds.has(backgroundWorkIdentity(item)));
 		const stillActive = [
@@ -424,11 +607,18 @@ export async function waitForSubagents(
 			...activeInitialProviderItems.map((item) => `${item.provider}/${item.id}`),
 		].join(", ");
 		if (signal?.aborted) {
-			return result(`Wait aborted after ${formatDuration(now() - startedAt)}. Still active: ${stillActive}.`, true);
+			const views = resultsForTerminalReturn(earlyResults);
+			return resultWithStepResults(
+				`Wait aborted after ${formatDuration(now() - startedAt)}. Still active: ${stillActive}.${formatStepResultViews(views, "\n")}`,
+				views,
+				true,
+			);
 		}
 		if (now() - startedAt >= timeoutMs) {
-			return result(
-				`Wait timed out after ${formatDuration(timeoutMs)} with ${activeInitialRuns.length} async run(s) and ${activeInitialProviderItems.length} provider item(s) still active: ${stillActive}. The work keeps going; call subagent_wait again or inspect subagent status.`,
+			const views = resultsForTerminalReturn(earlyResults);
+			return resultWithStepResults(
+				`Wait timed out after ${formatDuration(timeoutMs)} with ${activeInitialRuns.length} async run(s) and ${activeInitialProviderItems.length} provider item(s) still active: ${stillActive}. The work keeps going; call subagent_wait again or inspect subagent status.${formatStepResultViews(views, "\n")}`,
+				views,
 				true,
 			);
 		}
@@ -472,6 +662,11 @@ export async function waitForSubagents(
 	const elapsed = formatDuration(now() - startedAt);
 	const outcome = terminalSummary ? ` Outcome: ${terminalSummary}.` : "";
 
+	// Read once more before the final summary: a child can publish its artifact
+	// between the last consume and the completion check above.
+	const terminalStepResults = consumeStepResultViews(trackedRuns(), deps);
+	const stepResultBlock = formatStepResultViews(terminalStepResults, "\n");
+
 	if (waitForAll) {
 		const scope = runId
 			? `run "${runId}"`
@@ -479,8 +674,9 @@ export async function waitForSubagents(
 				? `${initialAsyncIds.size} async run(s)`
 				: `${initialAsyncIds.size} async run(s) and ${initialProviderIds.size} provider item(s)`;
 		const status = relevantAttention.length > 0 ? "attention required" : "done";
-		return result(
-			`Waited ${elapsed} for ${scope}; ${status}.${outcome}${attentionNote} Completion/control events have been observed; inspect status if a notification is not visible yet.`,
+		return resultWithStepResults(
+			`Waited ${elapsed} for ${scope}; ${status}.${outcome}${attentionNote}${stepResultBlock} Completion/control events have been observed; inspect status if a notification is not visible yet.`,
+			terminalStepResults,
 			deps.failOnFailedRuns === true && failedAsyncCount > 0,
 		);
 	}
@@ -495,8 +691,9 @@ export async function waitForSubagents(
 	const progress = relevantAttention.length > 0 && finishedCount === 0
 		? `${relevantAttention.length} of ${initialCount} ${subject} need attention`
 		: `${finishedCount} of ${initialCount} ${subject} finished`;
-	return result(
-		`Waited ${elapsed}; ${progress}.${outcome}${attentionNote}${remainder} Relevant completion/control events have been observed; inspect status if a notification is not visible yet.`,
+	return resultWithStepResults(
+		`Waited ${elapsed}; ${progress}.${outcome}${attentionNote}${remainder}${stepResultBlock} Relevant completion/control events have been observed; inspect status if a notification is not visible yet.`,
+		terminalStepResults,
 		deps.failOnFailedRuns === true && failedAsyncCount > 0,
 	);
 }

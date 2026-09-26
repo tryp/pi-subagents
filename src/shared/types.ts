@@ -675,6 +675,12 @@ export interface Details {
 	runId?: string;
 	context?: "fresh" | "fork";
 	results: SingleResult[];
+	/**
+	 * Per-child results a `subagent_wait` call is reporting, read from the
+	 * artifacts children publish at their own completion. Populated only for wait
+	 * results; `results` stays the joined-run shape.
+	 */
+	stepResults?: import("../runs/background/subagent-wait.ts").WaitStepResultView[];
 	controlEvents?: ControlEvent[];
 	steering?: SteerActionResult;
 	asyncId?: string;
@@ -1067,6 +1073,13 @@ export interface SubagentState {
 	lastUiContext: ExtensionContext | null;
 	poller: NodeJS.Timeout | null;
 	completionSeen: Map<string, number>;
+	/**
+	 * `runId:stepIndex` keys of per-child results that `subagent_wait` already
+	 * returned to the parent under `until: "first-result"`. Session-scoped and
+	 * in-memory: a restart can re-deliver a result, which is preferable to losing
+	 * one. Mirrors `completionSeen`'s dedupe role for the run-level notification.
+	 */
+	consumedStepResults?: Set<string>;
 	watcher: FSWatcher | null;
 	watcherRestartTimer: ReturnType<typeof setTimeout> | null;
 	resultFileCoalescer: {
