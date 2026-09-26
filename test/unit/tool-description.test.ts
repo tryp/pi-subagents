@@ -46,7 +46,11 @@ describe("registered subagent tool description", () => {
 		assert.doesNotMatch(description, /omit for async\/background runs/i);
 		assert.match(description, /SAFETY-CRITICAL SUBAGENT GUIDANCE/);
 		assert.match(description, /Do not sleep or poll status just to wait/i);
-		assert.match(description, /use subagent_wait/i);
+		assert.match(description, /call subagent_wait/i);
+		// The default must be stated in the guidance, not just in the schema: it is what
+		// makes an early wait the cheap move instead of a full-batch block.
+		assert.match(description, /returns the first finished child by default/i);
+		assert.match(description, /until:\"all-terminal\"/i);
 		assert.match(description, /interactive session.*normally return control/i);
 		assert.match(description, /Headless sessions auto-drain current-session work at agent_end/i);
 		assert.doesNotMatch(description, /MUST call subagent_wait/i);

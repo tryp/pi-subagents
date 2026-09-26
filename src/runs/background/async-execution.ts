@@ -239,13 +239,15 @@ export function formatAsyncStartedMessage(headline: string, interactive: boolean
 	const guidance = interactive
 		? [
 			"The async run is detached and running in the background.",
-			"You are in an interactive session. By default, return control to the user now; Pi will wake you on completion when the run finishes or needs attention. Do NOT call subagent_wait() merely to wait, and do not run sleep/polling loops to wait for it.",
-			"Override that default and call subagent_wait() before ending the turn only when the current request is run-to-completion — for example, the user asked you to report results back here before continuing, or a skill must finish in one turn. In that case, call subagent_wait() to block until the run completes so its results are delivered in this turn instead of deferred.",
+			"You are in an interactive session. By default, return control to the user now; Pi will wake you on completion when the run finishes or needs attention. Do NOT run sleep/polling loops while you wait for it.",
+			"When you need a result now rather than at the end of the batch, call subagent_wait(). It returns the first finished child by default, so you can act on a partial batch without blocking for the stragglers; repeat it to drain the children that finish later.",
+			"Ask for the whole batch instead - subagent_wait({ until: \"all-terminal\" }) or barrier: \"integration\" - when you cannot proceed until every child is done.",
 			"Otherwise, continue any independent work or return control to the user. Use subagent({ action: \"status\", id: \"...\" }) for a one-shot status/result or to inspect a blocked/stale run, never as a wait loop.",
 		]
 		: [
 			"The async run is detached. Do not run sleep timers or polling loops just to wait for it.",
-			"This is a non-interactive run: Pi auto-drains current-session background work at agent_end so detached children are not abandoned; call subagent_wait() when this turn must receive the run's results before it ends, otherwise let the headless auto-drain finish the work.",
+			"This is a non-interactive run: Pi auto-drains current-session background work at agent_end so detached children are not abandoned; call subagent_wait() when this turn must receive results before it ends, otherwise let the headless auto-drain finish the work.",
+			"A wait returns the first finished child by default, so it is safe to call early and act on a partial batch; pass until: \"all-terminal\" when the whole batch must be finished first.",
 			"Use subagent({ action: \"status\", id: \"...\" }) when you need a one-shot status/result or to inspect a blocked/stale run. To block until completion, use subagent_wait() — do not poll in a loop.",
 		];
 	return [headline, "", ...guidance].join("\n");

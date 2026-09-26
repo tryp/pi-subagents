@@ -451,7 +451,13 @@ describe("subagent_wait tool", () => {
 				if (polls === 1) writeStatus(asyncRoot, "run-alpha", "complete", { sessionId: "sess-1" });
 			};
 
-			const result = await waitForSubagents({ id: "run-al" }, undefined, baseDeps(root, state, { sleep }));
+			const result = await waitForSubagents(
+				// all-terminal keeps the run-level summary this test asserts on; the
+				// default (first-result) reports child results instead of naming the run.
+				{ id: "run-al", until: "all-terminal" },
+				undefined,
+				baseDeps(root, state, { sleep }),
+			);
 			assert.equal(result.isError, undefined);
 			assert.match(textOf(result), /run "run-al".*done/is);
 		} finally {
@@ -473,7 +479,7 @@ describe("subagent_wait tool", () => {
 			assert.match(textOf(ambiguous), /run-alpha/);
 
 			let polls = 0;
-			const exact = await waitForSubagents({ id: "run" }, undefined, baseDeps(root, state, {
+			const exact = await waitForSubagents({ id: "run", until: "all-terminal" }, undefined, baseDeps(root, state, {
 				sleep: async () => {
 					polls += 1;
 					writeStatus(asyncRoot, "run", "complete", { sessionId: "sess-1" });
@@ -632,6 +638,161 @@ describe("subagent_wait tool", () => {
 		}
 	});
 
+	it("defaults to first-result on a targeted multi-child run", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-default-first-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			// Only child 0 is done; child 1 never finishes during the call.
+			writeStepResult(asyncRoot, "run-a", 0, "ALPHA");
+
+			let polls = 0;
+			const sleep = async () => {
+				polls += 1;
+			};
+			const result = await waitForSubagents({ runId: "run-a" }, undefined, baseDeps(root, state, { sleep }));
+
+			assert.equal(result.isError, undefined);
+			assert.deepEqual(stepResultsOf(result).map((view) => view.output), ["ALPHA"]);
+			// Returning at the first child means no blocking for the straggler: the
+			// default must not behave like all-terminal.
+			assert.ok(polls <= 1, `default wait should return at the first child, polled ${polls}`);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("all: true still waits for every child, which is what headless auto-drain relies on", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-all-invariant-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			// Both children are done but the run has not reached a terminal state yet.
+			writeStepResult(asyncRoot, "run-a", 0, "ALPHA");
+			writeStepResult(asyncRoot, "run-a", 1, "BETA");
+
+			let polls = 0;
+			const sleep = async () => {
+				polls += 1;
+				if (polls === 2) writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1" });
+			};
+			const result = await waitForSubagents({ all: true }, undefined, baseDeps(root, state, { sleep }));
+
+			assert.equal(result.isError, undefined);
+			assert.deepEqual(stepResultsOf(result).map((view) => view.output), ["ALPHA", "BETA"]);
+			assert.ok(polls >= 2, `all:true must keep waiting for the run to finish, polled ${polls}`);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("barrier integration implies waiting for the whole batch", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-integration-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			writeStepResult(asyncRoot, "run-a", 0, "ALPHA");
+			writeStepResult(asyncRoot, "run-a", 1, "BETA");
+
+			let polls = 0;
+			const sleep = async () => {
+				polls += 1;
+				if (polls === 2) writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1" });
+			};
+			const result = await waitForSubagents(
+				{ runId: "run-a", barrier: "integration" },
+				undefined,
+				baseDeps(root, state, { sleep }),
+			);
+
+			assert.equal(result.isError, undefined);
+			assert.deepEqual(stepResultsOf(result).map((view) => view.output), ["ALPHA", "BETA"]);
+			assert.ok(polls >= 2, `an integration barrier must wait for the batch, polled ${polls}`);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects first-result combined with an integration barrier", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-contradiction-"));
+		try {
+			const state = makeState("sess-1");
+			const result = await waitForSubagents(
+				{ runId: "run-a", until: "first-result", barrier: "integration" },
+				undefined,
+				baseDeps(root, state),
+			);
+			assert.equal(result.isError, true);
+			assert.match(textOf(result), /specify different completion conditions/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("explicit any-change still returns at the first tracked run, not the first child", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-any-change-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			// A finished child is available immediately, so this fixture can tell the
+			// two modes apart: first-result has something to report, any-change does not.
+			writeStepResult(asyncRoot, "run-a", 0, "ALPHA");
+
+			let polls = 0;
+			const sleep = async () => {
+				polls += 1;
+				if (polls === 1) writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1" });
+			};
+			const result = await waitForSubagents({ until: "any-change" }, undefined, baseDeps(root, state, { sleep }));
+			assert.equal(result.isError, undefined);
+			const text = textOf(result);
+			// any-change returns at the run level: it must not use the first-result
+			// header, and it must actually wait for the run to finish.
+			assert.doesNotMatch(text, /child result\(s\) finished before the rest of the batch/);
+			assert.match(text, /1 of 1 run\(s\) finished/);
+			assert.ok(polls >= 1, `any-change must wait for the run, polled ${polls}`);
+			// The terminal path still reports the child's output in either mode.
+			assert.deepEqual(stepResultsOf(result).map((view) => view.output), ["ALPHA"]);
+
+			// Same fixture shape on a second run: the first wait consumed run-a's child,
+			// so first-result needs its own unconsumed artifact to fire on.
+			writeStatus(asyncRoot, "run-b", "running", { sessionId: "sess-1", pid: 999998 });
+			writeStepResult(asyncRoot, "run-b", 0, "GAMMA");
+			let earlyPolls = 0;
+			const early = await waitForSubagents({ runId: "run-b" }, undefined, baseDeps(root, state, {
+				sleep: async () => {
+					earlyPolls += 1;
+				},
+			}));
+			assert.match(textOf(early), /child result\(s\) finished before the rest of the batch/);
+			assert.deepEqual(stepResultsOf(early).map((view) => view.output), ["GAMMA"]);
+			assert.ok(earlyPolls <= 1, `first-result should not block on the straggler, polled ${earlyPolls}`);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("a first-result wait on a run that never publishes artifacts still returns", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-no-artifacts-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1" });
+			// No step-results directory at all. A short timeout keeps a regression
+			// failing fast instead of hanging the suite for 30 minutes.
+			const result = await waitForSubagents({ runId: "run-a", timeoutMs: 1_000 }, undefined, baseDeps(root, state));
+			assert.equal(result.isError, undefined);
+			assert.deepEqual(stepResultsOf(result), []);
+			assert.match(textOf(result), /complete/i);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("bounds the total output of a many-child batch and points at the omitted artifacts", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-budget-"));
 		try {
@@ -645,7 +806,9 @@ describe("subagent_wait tool", () => {
 			}
 
 			const sleep = async () => writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1" });
-			const result = await waitForSubagents({ runId: "run-a" }, undefined, baseDeps(root, state, { sleep }));
+			// Explicitly all-terminal: the default (first-result) would report only the
+			// first child, which is a different test.
+			const result = await waitForSubagents({ runId: "run-a", until: "all-terminal" }, undefined, baseDeps(root, state, { sleep }));
 
 			const text = textOf(result);
 			const views = stepResultsOf(result);

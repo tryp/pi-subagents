@@ -526,13 +526,17 @@ export async function waitForSubagents(
 	if (params.until && params.all !== undefined && (params.until === "all-terminal") !== params.all) {
 		return result("until and all specify different completion conditions; provide one or matching values.", true);
 	}
+	if (params.until === "first-result" && params.barrier === "integration") {
+		return result("until: first-result and barrier: integration specify different completion conditions; use all-terminal for integration.", true);
+	}
 	const runId = params.runId ?? params.id;
-	const firstResultMode = params.until === "first-result";
+	const untilMode = params.until ?? (params.all === true || params.barrier === "integration" ? "all-terminal" : "first-result");
+	const firstResultMode = untilMode === "first-result";
 	const now = deps.now ?? Date.now;
 	const pollIntervalMs = Math.max(MIN_POLL_INTERVAL_MS, deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS);
 	const timeoutMs = params.timeoutMs !== undefined && params.timeoutMs > 0 ? params.timeoutMs : DEFAULT_TIMEOUT_MS;
 	const startedAt = now();
-	const waitForAll = runId ? true : params.until === "all-terminal" || params.all === true;
+	const waitForAll = params.all === true || untilMode === "all-terminal";
 
 	let active: AsyncRunSummary[];
 	let foreground: ForegroundResumeRun[];

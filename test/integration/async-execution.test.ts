@@ -1062,7 +1062,9 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		});
 		assert.match(interactiveResult.content[0]?.text ?? "", /interactive session/);
 		assert.match(interactiveResult.content[0]?.text ?? "", /return control to the user/);
-		assert.match(interactiveResult.content[0]?.text ?? "", /Do NOT call subagent_wait\(\) merely to wait/);
+		// Guidance now describes the early default rather than forbidding waits.
+		assert.match(interactiveResult.content[0]?.text ?? "", /first finished child by default/i);
+		assert.match(interactiveResult.content[0]?.text ?? "", /until: "all-terminal"/);
 		assert.doesNotMatch(interactiveResult.content[0]?.text ?? "", /auto-drain/);
 		await waitForAsyncResultFile(interactiveId, 30_000);
 
