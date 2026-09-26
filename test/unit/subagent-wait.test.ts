@@ -632,6 +632,76 @@ describe("subagent_wait tool", () => {
 		}
 	});
 
+	it("bounds the total output of a many-child batch and points at the omitted artifacts", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-budget-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			// 40 children x 64 KiB each: without a batch budget this inlines 2.5 MB.
+			const children = 40;
+			for (let index = 0; index < children; index++) {
+				writeStepResult(asyncRoot, "run-a", index, `CHILD-${index}\n${"x".repeat(64 * 1024)}`);
+			}
+
+			const sleep = async () => writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1" });
+			const result = await waitForSubagents({ runId: "run-a" }, undefined, baseDeps(root, state, { sleep }));
+
+			const text = textOf(result);
+			const views = stepResultsOf(result);
+			assert.equal(views.length, children, "every child is still reported");
+			// Per-child truncation (8 KiB) plus block headers, under a 32 KiB shared budget.
+			assert.ok(
+				Buffer.byteLength(text, "utf-8") < 48 * 1024,
+				`content should stay near the shared budget, got ${Buffer.byteLength(text, "utf-8")} bytes`,
+			);
+			// Later children are named with a path instead of inlined.
+			assert.match(text, /output omitted: wait result budget reached; read .*step-\d+\.json/);
+			// The early children keep their output, so the budget spent where it was useful.
+			assert.match(text, /CHILD-0/);
+			const omitted = text.match(/output omitted/g) ?? [];
+			assert.ok(omitted.length > 0, "expected some children to be referenced by path only");
+			assert.ok(omitted.length < children, "expected some children to still have output");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the consumed-result set bounded across many waits", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-consumed-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			// 520 distinct runs, each a single finished child, so each wait consumes one key
+			// (just past the 512-key cap).
+			for (let index = 0; index < 520; index++) {
+				const runId = `run-${index}`;
+				writeStatus(asyncRoot, runId, "complete", { sessionId: "sess-1" });
+				writeStepResult(asyncRoot, runId, 0, `OUT-${index}`);
+			}
+
+			// A 1 ms poll keeps the 600-call loop fast; these runs are terminal.
+			const deps = () => baseDeps(root, state, { pollIntervalMs: 1 });
+			const first = await waitForSubagents({ runId: "run-0", until: "first-result" }, undefined, deps());
+			assert.deepEqual(stepResultsOf(first).map((view) => view.output), ["OUT-0"]);
+
+			for (let index = 1; index < 520; index++) {
+				await waitForSubagents({ runId: `run-${index}`, until: "first-result" }, undefined, deps());
+			}
+
+			const consumed = (state as SubagentState & { consumedStepResults?: Set<string> }).consumedStepResults;
+			assert.ok(consumed, "expected the consumption set to exist");
+			assert.ok(
+				consumed.size <= 512,
+				`consumption state should stay bounded, got ${consumed.size} keys`,
+			);
+			// The most recent child is still remembered, so no immediate duplicate.
+			assert.ok(consumed.has("run-519:0"));
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("until:first-result returns before the rest of the batch finishes", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-first-"));
 		try {

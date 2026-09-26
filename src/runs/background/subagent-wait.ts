@@ -321,6 +321,18 @@ export interface WaitStepResultView {
 /** Wait results stay small: a batch of children may each carry a large output. */
 const WAIT_STEP_RESULT_MAX = { bytes: 8 * 1024, lines: 120 };
 
+/**
+ * Total budget for all children in one wait result.
+ *
+ * Per-child truncation alone does not bound the result: a 40-child batch at 8 KiB
+ * each would inline 320 KiB into the tool content and `details.stepResults`.
+ * Children past the budget are reported by name, state, and artifact path only.
+ */
+const WAIT_STEP_RESULTS_TOTAL_MAX = { bytes: 32 * 1024, lines: 480 };
+
+/** Below this remaining budget a child's output is not worth inlining at all. */
+const WAIT_STEP_RESULT_MIN_INLINE_BYTES = 512;
+
 function stepResultView(run: AsyncRunSummary, artifact: StepResultArtifact): WaitStepResultView {
 	const payload = artifact.result as unknown as StepResultPresentation;
 	return {
@@ -340,17 +352,36 @@ function stepResultView(run: AsyncRunSummary, artifact: StepResultArtifact): Wai
  * Render the per-child results a wait is about to return.
  *
  * Bounded on purpose: the whole point is to save a follow-up status call, not to
- * inline several unbounded child transcripts. Truncated outputs point at the
- * artifact that holds the full text.
+ * inline several unbounded child transcripts. Each child is truncated, and the
+ * children together share WAIT_STEP_RESULTS_TOTAL_MAX; anything past the shared
+ * budget is reported by state and artifact path so the parent still knows it has
+ * a result to read. Truncated outputs point at the artifact holding the full text.
  */
 function formatStepResultViews(views: WaitStepResultView[], header: string): string {
 	if (views.length === 0) return "";
+	let remainingBytes = WAIT_STEP_RESULTS_TOTAL_MAX.bytes;
+	let remainingLines = WAIT_STEP_RESULTS_TOTAL_MAX.lines;
 	const blocks = views.map((view) => {
 		const status = view.success
 			? "complete"
 			: `${view.state}${view.error ? `: ${view.error.split("\n")[0]}` : ""}`;
-		const truncated = truncateOutput(view.output || "(no output)", WAIT_STEP_RESULT_MAX, view.artifactPath);
-		return `--- step ${view.stepIndex} (${view.agent}) [${status}] ---\n${truncated.text}`;
+		const prefix = `--- step ${view.stepIndex} (${view.agent}) [${status}] ---`;
+
+		if (remainingBytes < WAIT_STEP_RESULT_MIN_INLINE_BYTES || remainingLines < 1) {
+			return `${prefix}\n(output omitted: wait result budget reached; read ${view.artifactPath})`;
+		}
+
+		const truncated = truncateOutput(
+			view.output || "(no output)",
+			{
+				bytes: Math.min(WAIT_STEP_RESULT_MAX.bytes, remainingBytes),
+				lines: Math.min(WAIT_STEP_RESULT_MAX.lines, remainingLines),
+			},
+			view.artifactPath,
+		);
+		remainingBytes -= Buffer.byteLength(truncated.text, "utf-8");
+		remainingLines -= truncated.text.split("\n").length + 1;
+		return `${prefix}\n${truncated.text}`;
 	});
 	return `${header}\n${blocks.join("\n")}`;
 }
@@ -379,6 +410,17 @@ function stepResultKey(runId: string, stepIndex: number): string {
 	return `${runId}:${stepIndex}`;
 }
 
+/**
+ * Cap on remembered consumed keys.
+ *
+ * The set is session-scoped and otherwise grew for the session's lifetime: every
+ * reported child added a key and nothing ever removed one. Evicting the oldest
+ * key at worst lets an already-reported child from a long-finished run be
+ * reported again, which the same in-memory-only caveat already permits across a
+ * restart (see Details.consumedStepResults).
+ */
+const CONSUMED_STEP_RESULTS_MAX = 512;
+
 /** Lazily create the session-scoped set of results already reported to the parent. */
 function consumedStepResultSet(deps: SubagentWaitDeps): Set<string> {
 	if (!deps.state.consumedStepResults) deps.state.consumedStepResults = new Set();
@@ -393,7 +435,15 @@ function consumedStepResultSet(deps: SubagentWaitDeps): Set<string> {
 function consumeStepResultViews(runs: AsyncRunSummary[], deps: SubagentWaitDeps): WaitStepResultView[] {
 	const consumed = consumedStepResultSet(deps);
 	const available = availableStepResults(runs, consumed);
-	for (const entry of available) consumed.add(stepResultKey(entry.run.id, entry.view.stepIndex));
+	for (const entry of available) {
+		consumed.add(stepResultKey(entry.run.id, entry.view.stepIndex));
+	}
+	// Sets iterate in insertion order, so deleting from the front drops the oldest keys.
+	while (consumed.size > CONSUMED_STEP_RESULTS_MAX) {
+		const oldest = consumed.values().next().value;
+		if (oldest === undefined) break;
+		consumed.delete(oldest);
+	}
 	return available.map((entry) => entry.view);
 }
 
