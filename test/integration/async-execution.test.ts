@@ -17,6 +17,8 @@ import { createEventBus, createMockPi, createTempDir, events, makeAgent, makeMin
 import type { MockPi } from "../support/helpers.ts";
 import { deliverInterruptRequest, deliverStopRequest, deliverTimeoutRequest } from "../../src/runs/background/control-channel.ts";
 import { waitForSubagents, type SubagentWaitDeps } from "../../src/runs/background/subagent-wait.ts";
+import { registerStepNotifications } from "../../src/runs/background/step-notify.ts";
+import { consumedStepResultSet, stepResultKey } from "../../src/runs/shared/step-results.ts";
 import { writeAtomicJson } from "../../src/shared/atomic-json.ts";
 import { CHILD_WATCHDOG_STATUS_EVENT } from "../../src/watchdog/child-status.ts";
 import { MAX_CHILD_PENDING_LINE_BYTES, MAX_CHILD_STDERR_BYTES } from "../../src/runs/shared/child-protocol.ts";
@@ -4170,6 +4172,145 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(drained.isError, undefined, textOfResult(drained));
 		assert.match(textOfResult(drained), /late child done/);
 		assert.deepEqual(drained.details?.stepResults?.map((view) => view.output), ["late child done"]);
+	});
+
+	it("notifies one finished child from a gated async batch without leaking the straggler", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
+		const release = path.join(tempDir, "release-step-notify-straggler");
+		mockPi.onCall({ matchArgIncludes: "NOTIFY_EARLY_CHILD", output: "only early child payload" });
+		mockPi.onCall({ matchArgIncludes: "NOTIFY_LATE_CHILD", output: "late sibling secret", waitForPath: release });
+		const executor = makeAsyncExecutor([makeAgent("worker", { completionGuard: false })]);
+		const launched = await executor.execute(
+			"async-step-notify-no-wait",
+			{ tasks: [
+				{ agent: "worker", task: "NOTIFY_EARLY_CHILD" },
+				{ agent: "worker", task: "NOTIFY_LATE_CHILD" },
+			], async: true, clarify: false },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const runId = launched.details?.asyncId;
+		assert.ok(runId);
+		const asyncDir = path.join(ASYNC_DIR, runId);
+		const statusDeadline = Date.now() + 30_000;
+		while (!fs.existsSync(path.join(asyncDir, "step-results", "step-0.json"))) {
+			if (Date.now() > statusDeadline) assert.fail("Timed out waiting for early child artifact");
+			await new Promise((resolve) => setTimeout(resolve, 30));
+		}
+		const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as { sessionId?: string };
+		const state = makeWaitState(status.sessionId ?? null);
+		state.asyncJobs.set(runId, { asyncId: runId, asyncDir, status: "running" });
+		let idle = true;
+		state.lastUiContext = { hasUI: true, isIdle: () => idle } as SubagentWaitDeps["state"]["lastUiContext"];
+		const messages: Array<{ customType: string; content: string; details?: unknown }> = [];
+		const notifier = registerStepNotifications({
+			events: createEventBus(),
+			sendMessage: (message: any) => { messages.push(message); },
+		} as any, state, true, { pollIntervalMs: 20 });
+		try {
+			const deadline = Date.now() + 5_000;
+			while (messages.length === 0) {
+				if (Date.now() > deadline) assert.fail("Timed out waiting for first-result notification");
+				await new Promise((resolve) => setTimeout(resolve, 25));
+			}
+			assert.equal(messages.length, 1);
+			assert.equal(messages[0]?.customType, "subagent-step-notify");
+			assert.match(messages[0]!.content, /only early child payload/);
+			assert.doesNotMatch(messages[0]!.content, /late sibling secret/);
+			const receipt = messages[0]!.details as { notifications: Array<{ artifactPath: string }> };
+			assert.equal(receipt.notifications.length, 1);
+			assert.ok(fs.readFileSync(receipt.notifications[0]!.artifactPath, "utf-8").includes("only early child payload"));
+			assert.equal(fs.existsSync(path.join(asyncDir, "step-results", "step-1.json")), false);
+
+			fs.writeFileSync(release, "go", "utf-8");
+			const lateArtifact = path.join(asyncDir, "step-results", "step-1.json");
+			const lateDeadline = Date.now() + 30_000;
+			while (!fs.existsSync(lateArtifact)) {
+				if (Date.now() > lateDeadline) assert.fail("Timed out waiting for straggler artifact");
+				await new Promise((resolve) => setTimeout(resolve, 25));
+			}
+			const secondDeadline = Date.now() + 5_000;
+			while (messages.length < 2) {
+				if (Date.now() > secondDeadline) assert.fail("Timed out waiting for straggler notification");
+				await new Promise((resolve) => setTimeout(resolve, 25));
+			}
+			assert.equal(messages.length, 2, "each published child is notified once");
+			assert.match(messages[1]!.content, /late sibling secret/);
+			assert.doesNotMatch(messages[1]!.content, /only early child payload/);
+			await waitForAsyncResultFile(runId, 30_000);
+		} finally {
+			notifier();
+			fs.writeFileSync(release, "go", "utf-8");
+			await waitForAsyncResultFile(runId, 30_000);
+		}
+	});
+
+	it("does not notify a child consumed by wait, and holds a busy-turn result until idle", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
+		const release = path.join(tempDir, "release-step-notify-consumed");
+		mockPi.onCall({ matchArgIncludes: "CONSUMED_EARLY_CHILD", output: "already returned" });
+		mockPi.onCall({ matchArgIncludes: "CONSUMED_LATE_CHILD", output: "still gated", waitForPath: release });
+		const executor = makeAsyncExecutor([makeAgent("worker", { completionGuard: false })]);
+		const launched = await executor.execute(
+			"async-step-notify-consumed",
+			{ tasks: [
+				{ agent: "worker", task: "CONSUMED_EARLY_CHILD" },
+				{ agent: "worker", task: "CONSUMED_LATE_CHILD" },
+			], async: true, clarify: false },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const runId = launched.details?.asyncId;
+		assert.ok(runId);
+		const asyncDir = path.join(ASYNC_DIR, runId);
+		const artifactDeadline = Date.now() + 30_000;
+		while (!fs.existsSync(path.join(asyncDir, "step-results", "step-0.json"))) {
+			if (Date.now() > artifactDeadline) assert.fail("Timed out waiting for first child artifact");
+			await new Promise((resolve) => setTimeout(resolve, 30));
+		}
+		const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as { sessionId?: string };
+		const state = makeWaitState(status.sessionId ?? null);
+		state.asyncJobs.set(runId, { asyncId: runId, asyncDir, status: "running" });
+		const waitResult = await waitForSubagents({ runId, until: "first-result" }, undefined, {
+			state,
+			asyncDirRoot: ASYNC_DIR!,
+			resultsDir: RESULTS_DIR!,
+			kill: () => true,
+			pollIntervalMs: 20,
+		} as SubagentWaitDeps);
+		assert.match(textOfResult(waitResult), /already returned/);
+		assert.equal(consumedStepResultSet(state).has(stepResultKey(runId, 0)), true);
+		let idle = false;
+		state.lastUiContext = { hasUI: true, isIdle: () => idle } as SubagentWaitDeps["state"]["lastUiContext"];
+		const messages: Array<{ content: string }> = [];
+		const notifier = registerStepNotifications({
+			events: createEventBus(),
+			sendMessage: (message: any) => { messages.push(message); },
+		} as any, state, true, { pollIntervalMs: 20 });
+		try {
+			fs.writeFileSync(release, "go", "utf-8");
+			const lateArtifact = path.join(asyncDir, "step-results", "step-1.json");
+			const lateDeadline = Date.now() + 30_000;
+			while (!fs.existsSync(lateArtifact)) {
+				if (Date.now() > lateDeadline) assert.fail("Timed out waiting for the released sibling artifact");
+				await new Promise((resolve) => setTimeout(resolve, 25));
+			}
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			assert.equal(messages.length, 0, "must not trigger a turn while the parent is active");
+			idle = true;
+			const deadline = Date.now() + 5_000;
+			while (messages.length === 0) {
+				if (Date.now() > deadline) assert.fail("Timed out waiting for the unconsumed sibling");
+				await new Promise((resolve) => setTimeout(resolve, 25));
+			}
+			assert.equal(messages.length, 1);
+			assert.doesNotMatch(messages[0]!.content, /already returned/);
+			assert.match(messages[0]!.content, /still gated/);
+		} finally {
+			notifier();
+			fs.writeFileSync(release, "go", "utf-8");
+			await waitForAsyncResultFile(runId, 30_000);
+		}
 	});
 });
 

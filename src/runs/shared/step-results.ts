@@ -14,6 +14,35 @@ export const STEP_RESULT_ARTIFACT_VERSION = 1;
 
 export const STEP_RESULTS_DIR_NAME = "step-results";
 
+/** Stable identity shared by wait consumption and step notifications. */
+export function stepResultKey(runId: string, stepIndex: number): string {
+	return `${runId}:${stepIndex}`;
+}
+
+/** Lazily create the session-scoped set shared by wait and notification paths. */
+export function consumedStepResultSet(state: { consumedStepResults?: Set<string> }): Set<string> {
+	if (!state.consumedStepResults) state.consumedStepResults = new Set();
+	return state.consumedStepResults;
+}
+
+/**
+ * Session-scoped consumption otherwise grows for the session's lifetime. Evicting
+ * the oldest key can at worst let an already-reported child from a long-finished
+ * run be reported again, matching the existing in-memory-only restart caveat.
+ */
+export const CONSUMED_STEP_RESULTS_MAX = 512;
+
+/** Record consumption while preserving the existing oldest-first 512-key cap. */
+export function markStepResultConsumed(state: { consumedStepResults?: Set<string> }, runId: string, stepIndex: number): void {
+	const consumed = consumedStepResultSet(state);
+	consumed.add(stepResultKey(runId, stepIndex));
+	while (consumed.size > CONSUMED_STEP_RESULTS_MAX) {
+		const oldest = consumed.values().next().value;
+		if (oldest === undefined) break;
+		consumed.delete(oldest);
+	}
+}
+
 /** States a child can be in once it will never produce another result. */
 export type StepResultState = "complete" | "failed" | "paused" | "stopped";
 

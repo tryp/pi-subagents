@@ -39,6 +39,8 @@ import { registerSubagentRpcBridge } from "./rpc.ts";
 import { clearSlashSnapshots, getSlashRenderableSnapshot, resolveSlashMessageDetails, restoreSlashFinalSnapshots, type SlashMessageDetails } from "../slash/slash-live-state.ts";
 import { inspectSubagentStatus } from "../runs/background/run-status.ts";
 import { resolveWaitToolConfig } from "../runs/background/subagent-wait.ts";
+import { resolveStepNotifyConfig } from "../runs/background/step-notify-config.ts";
+import { registerStepNotifications } from "../runs/background/step-notify.ts";
 import { registerWaitTool } from "../runs/background/wait-tool.ts";
 import { drainOutstandingWork } from "../runs/background/auto-drain.ts";
 import { registerBackgroundWorkProvider } from "../api/background-work.ts";
@@ -211,6 +213,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	const config = loadConfig();
 	const waitToolConfig = resolveWaitToolConfig(config.waitTool);
+	const stepNotifyConfig = resolveStepNotifyConfig(config.stepNotify);
 	const asyncByDefault = config.asyncByDefault === true;
 	const tempArtifactsDir = getArtifactsDir(null);
 	cleanupAllArtifactDirs(DEFAULT_ARTIFACT_CONFIG.cleanupDays);
@@ -252,6 +255,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	});
 	let disposeBackgroundWorkProvider = registerBackgroundWorkProvider(backgroundWorkProvider);
 	let disposeSubagentNotify = () => {};
+	let disposeStepNotifications = () => {};
 	const { startResultWatcher, primeExistingResults, stopResultWatcher } = createResultWatcher(
 		pi,
 		state,
@@ -265,6 +269,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		disposeBackgroundWorkProvider();
 		disposeBackgroundWorkProvider = () => {};
 		disposeSubagentNotify();
+		disposeStepNotifications();
 		mainWatchdog.dispose();
 		stopResultWatcher();
 		scheduledRunManager.stop();
@@ -497,6 +502,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		}
 	}
 	disposeSubagentNotify = registerSubagentNotify(pi, state, { batchConfig: config.completionBatch });
+	disposeStepNotifications = registerStepNotifications(pi, state, stepNotifyConfig.enabled);
 
 	const existingVisibleControlNotices = globalStore[controlNoticeSeenStoreKey];
 	const visibleControlNotices = existingVisibleControlNotices instanceof Set ? existingVisibleControlNotices as Set<string> : new Set<string>();

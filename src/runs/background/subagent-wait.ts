@@ -59,8 +59,11 @@ import {
 } from "../../api/background-work.ts";
 import { listAsyncRuns, type AsyncRunSummary } from "./async-status.ts";
 import {
+	consumedStepResultSet,
 	listStepResultArtifacts,
+	markStepResultConsumed,
 	stepResultArtifactPath,
+	stepResultKey,
 	type StepResultArtifact,
 	type StepResultPresentation,
 } from "../shared/step-results.ts";
@@ -410,43 +413,16 @@ function availableStepResults(
 	return available;
 }
 
-function stepResultKey(runId: string, stepIndex: number): string {
-	return `${runId}:${stepIndex}`;
-}
-
-/**
- * Cap on remembered consumed keys.
- *
- * The set is session-scoped and otherwise grew for the session's lifetime: every
- * reported child added a key and nothing ever removed one. Evicting the oldest
- * key at worst lets an already-reported child from a long-finished run be
- * reported again, which the same in-memory-only caveat already permits across a
- * restart (see Details.consumedStepResults).
- */
-const CONSUMED_STEP_RESULTS_MAX = 512;
-
-/** Lazily create the session-scoped set of results already reported to the parent. */
-function consumedStepResultSet(deps: SubagentWaitDeps): Set<string> {
-	if (!deps.state.consumedStepResults) deps.state.consumedStepResults = new Set();
-	return deps.state.consumedStepResults;
-}
-
 /**
  * Read this session's not-yet-reported per-child results and mark them consumed,
  * so a later `until: "first-result"` call reports the NEXT child instead of
  * repeating one the parent has already seen.
  */
 function consumeStepResultViews(runs: AsyncRunSummary[], deps: SubagentWaitDeps): WaitStepResultView[] {
-	const consumed = consumedStepResultSet(deps);
+	const consumed = consumedStepResultSet(deps.state);
 	const available = availableStepResults(runs, consumed);
 	for (const entry of available) {
-		consumed.add(stepResultKey(entry.run.id, entry.view.stepIndex));
-	}
-	// Sets iterate in insertion order, so deleting from the front drops the oldest keys.
-	while (consumed.size > CONSUMED_STEP_RESULTS_MAX) {
-		const oldest = consumed.values().next().value;
-		if (oldest === undefined) break;
-		consumed.delete(oldest);
+		markStepResultConsumed(deps.state, entry.run.id, entry.view.stepIndex);
 	}
 	return available.map((entry) => entry.view);
 }

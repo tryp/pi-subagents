@@ -1356,6 +1356,16 @@ Controls the above-editor widget for background runs. The default is `true`. Set
 
 Keeps the `subagent_wait` tool registered but makes direct calls return immediately instead of blocking on active subagent or provider work. The default is enabled. You can also set `"waitTool": false`; set `PI_SUBAGENT_WAIT_TOOL_ENABLED=false` (or `0`, `off`, `disabled`) to override config for one process. The effective value is passed explicitly to child runtimes. Headless `agent_end` auto-drain remains a lifecycle safeguard even when direct wait calls are disabled. Invalid config or environment values fail instead of being coerced.
 
+### `stepNotify`
+
+```json
+{ "stepNotify": { "enabled": true } }
+```
+
+Progressively notifies an interactive parent when individual async children publish results, without waiting for the whole batch. This is **off by default** while duplicate-turn exposure is measured. Override per process with `PI_SUBAGENT_STEP_NOTIFY_ENABLED=true` (or `1`, `yes`, `on`, `enabled`); set it to `false` (or `0`, `no`, `off`, `disabled`) to disable. **Rule 8: interactive UI only.** Headless sessions never receive step notifications: `agent_end` auto-drain already delivers the work, and the notifier fails closed when no UI context is available, including when `hasUI` is missing.
+
+Each notification is a bounded receipt (agent/state/step, duration, artifact path, byte/line counts, short preview), not the full transcript. Read or search the named artifact when more detail is needed. The notification does not consume the result; a later `subagent_wait` can still return it. Notifications are held while a turn is active, coalesced, and capped at three per run. Invalid config or environment values fail instead of being coerced.
+
 ### `forceTopLevelAsync`
 
 ```json
@@ -1526,7 +1536,7 @@ Metadata records timing, usage, exit code, final model, attempted models, fallba
 
 Session files are stored under a per-run session directory. With `context: "fork"`, each child starts with `--session <branched-session-file>` produced from the parent’s current leaf. That is a real session fork, not an injected summary.
 
-Async completions notify only the originating session. The result watcher emits `subagent:async-complete`, and the extension consumes that event to render completion notifications. Successful sibling completions are held briefly and delivered as a single grouped message when they finish within a short window (see `completionBatch`); failed and paused completions always fire immediately.
+Async completions notify only the originating session. The result watcher emits `subagent:async-complete`, and the extension consumes that event to render completion notifications. Successful sibling completions are held briefly and delivered as a single grouped message when they finish within a short window (see `completionBatch`); failed and paused completions always fire immediately. Optional per-child step notifications (`stepNotify`, default off) are interactive-only; headless runs rely on `agent_end` auto-drain and never trigger notification turns.
 
 Async runs write:
 

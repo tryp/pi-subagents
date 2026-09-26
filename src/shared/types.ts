@@ -190,6 +190,11 @@ export interface WaitToolConfigObject {
 
 export type WaitToolConfig = boolean | WaitToolConfigObject;
 
+export interface StepNotifyConfigObject {
+	enabled?: boolean;
+}
+export type StepNotifyConfig = boolean | StepNotifyConfigObject;
+
 export interface ControlEvent {
 	type: ControlEventType;
 	from?: ActivityState;
@@ -1080,6 +1085,8 @@ export interface SubagentState {
 	 * one. Mirrors `completionSeen`'s dedupe role for the run-level notification.
 	 */
 	consumedStepResults?: Set<string>;
+	/** Per-child keys queued or delivered by bounded step notifications. */
+	stepNotifiedResults?: Set<string>;
 	watcher: FSWatcher | null;
 	watcherRestartTimer: ReturnType<typeof setTimeout> | null;
 	resultFileCoalescer: {
@@ -1230,6 +1237,8 @@ export interface ExtensionConfig {
 	toolDescriptionMode?: ToolDescriptionMode;
 	forceTopLevelAsync?: boolean;
 	waitTool?: WaitToolConfig;
+	/** Progressive child-result notifications. Defaults off until duplicate-turn exposure is measured. */
+	stepNotify?: StepNotifyConfig;
 	defaultSessionDir?: string;
 	singleRunOutputBaseDir?: string;
 	maxSubagentDepth?: number;
