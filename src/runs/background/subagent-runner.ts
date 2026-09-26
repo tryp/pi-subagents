@@ -184,6 +184,86 @@ interface StepResult {
 }
 
 const ASYNC_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
+
+/**
+ * Version of the per-child artifact written to `<asyncDir>/step-results/`.
+ *
+ * Deliberately a separate key from the run-level `lifecycleArtifactVersion`
+ * (SUBAGENT_LIFECYCLE_ARTIFACT_VERSION) so a future generic version check
+ * cannot conflate a step artifact with a run artifact.
+ */
+const STEP_RESULT_ARTIFACT_VERSION = 1;
+
+type StepResultState = "complete" | "failed" | "paused" | "stopped";
+
+/**
+ * Map a child's normalized outcome onto the state vocabulary used in both
+ * status.json and the per-child artifact.
+ */
+function stepResultState(input: {
+	stopped: boolean;
+	timedOut: boolean;
+	interrupted: boolean;
+	exitCode?: number | null;
+}): StepResultState {
+	if (input.stopped) return "stopped";
+	if (input.timedOut) return "failed";
+	if (input.interrupted) return "paused";
+	return input.exitCode === 0 ? "complete" : "failed";
+}
+
+/**
+ * Persist one child's result as soon as that child finishes, so a parent can
+ * read a finished child's output without waiting for the whole run to join.
+ *
+ * The file is written atomically under `runId` + `stepIndex`, so re-running the
+ * write for the same child is idempotent. Whole-run `result.json` keeps its
+ * existing shape; this artifact is purely additive.
+ *
+ * The write is synchronous and happens inside the concurrency-limited callback,
+ * which means it briefly holds that child's semaphore slot. That is acceptable:
+ * the same callback already performs a strictly larger synchronous
+ * `writeStatusPayload()` per child completion, so this adds a smaller write to a
+ * path that already blocks. It is written here rather than at the batch join
+ * because the whole point is availability before the join.
+ *
+ * Children that never start (pre-run timeout/stop/interrupt guards) get no
+ * artifact, matching the fact that they never get a terminal status either.
+ */
+function writeStepResultArtifact(input: {
+	asyncDir: string;
+	runId: string;
+	stepIndex: number;
+	agent: string;
+	state: StepResultState;
+	startedAt: number;
+	endedAt: number;
+	durationMs: number;
+	result: StepResult;
+}): string | undefined {
+	const filePath = path.join(input.asyncDir, "step-results", `step-${input.stepIndex}.json`);
+	try {
+		writeAtomicJson(filePath, {
+			stepResultArtifactVersion: STEP_RESULT_ARTIFACT_VERSION,
+			runId: input.runId,
+			stepIndex: input.stepIndex,
+			agent: input.agent,
+			state: input.state,
+			startedAt: input.startedAt,
+			endedAt: input.endedAt,
+			durationMs: input.durationMs,
+			// ``success`` is derived here rather than copied so the artifact agrees
+			// with the same child's entry in the whole-run result.json, where the
+			// join computes it from the normalized outcome.
+			result: { ...input.result, success: input.state === "complete" },
+		});
+		return filePath;
+	} catch (err) {
+		// A missing convenience artifact must never fail the run itself.
+		console.error(`Failed to write step result ${filePath}:`, err);
+		return undefined;
+	}
+}
 const DEFAULT_MAX_ASYNC_EVENTS_BYTES = 50 * 1024 * 1024;
 const ASYNC_EVENTS_MAX_BYTES_ENV = "PI_SUBAGENT_ASYNC_EVENTS_MAX_BYTES";
 const TRUNCATED_EVENT_TYPE = "subagent.events.truncated";
@@ -2832,7 +2912,24 @@ async function runSubagent(
 					statusPayload.steps[fi].exitCode = -1;
 					statusPayload.lastUpdate = skippedAt;
 					writeStatusPayload();
-					return { agent: task.agent, output: "(skipped — fail-fast)", exitCode: -1 as number | null, skipped: true };
+					// Mirrors the regular parallel skip path: a terminal child emits a
+					// step event and a per-child result artifact.
+					appendJsonl(eventsPath, JSON.stringify({
+						type: "subagent.step.failed", ts: skippedAt, runId: id, stepIndex: fi, agent: task.agent, exitCode: -1, durationMs: 0,
+					}));
+					const skippedResult: StepResult = { agent: task.agent, output: "(skipped — fail-fast)", exitCode: -1 as number | null, skipped: true };
+					const skippedPath = writeStepResultArtifact({
+						asyncDir, runId: id, stepIndex: fi, agent: task.agent,
+						state: "failed", startedAt: skippedAt, endedAt: skippedAt, durationMs: 0,
+						result: skippedResult,
+					});
+					appendJsonl(eventsPath, JSON.stringify({
+						type: "subagent.step.result.completed",
+						stepResultArtifactVersion: STEP_RESULT_ARTIFACT_VERSION,
+						ts: skippedAt, runId: id, stepIndex: fi, agent: task.agent,
+						state: "failed", resultPath: skippedPath,
+					}));
+					return skippedResult;
 				}
 				const taskStartTime = Date.now();
 				statusPayload.currentStep = fi;
@@ -2880,7 +2977,7 @@ async function runSubagent(
 				const taskEndTime = Date.now();
 				const childInterrupted = singleResult.interrupted === true;
 				const childStopped = singleResult.stopped === true;
-				statusPayload.steps[fi].status = stopped || childStopped ? "stopped" : timedOut ? "failed" : childInterrupted ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
+				statusPayload.steps[fi].status = stepResultState({ stopped: stopped || childStopped, timedOut, interrupted: childInterrupted, exitCode: singleResult.exitCode });
 				statusPayload.steps[fi].endedAt = taskEndTime;
 				statusPayload.steps[fi].durationMs = taskEndTime - taskStartTime;
 				statusPayload.steps[fi].exitCode = stopped || childStopped ? 1 : timedOut ? 1 : childInterrupted ? 0 : singleResult.exitCode;
@@ -2917,7 +3014,32 @@ async function runSubagent(
 					exitCode: stopped || childStopped ? 1 : timedOut ? 1 : childInterrupted ? 0 : singleResult.exitCode, durationMs: taskEndTime - taskStartTime,
 				}));
 				if (singleResult.exitCode !== 0 && failFast) aborted = true;
-				return stopped || childStopped ? { ...singleResult, output: stopMessage, error: stopMessage, exitCode: 1, interrupted: false, timedOut: false, stopped: true, skipped: false } : timedOut ? { ...singleResult, output: timeoutMessage ?? "Subagent timed out.", error: timeoutMessage ?? "Subagent timed out.", exitCode: 1, interrupted: false, timedOut: true, skipped: false } : { ...singleResult, skipped: false };
+				const normalizedStepResult: StepResult = stopped || childStopped ? { ...singleResult, output: stopMessage, error: stopMessage, exitCode: 1, interrupted: false, timedOut: false, stopped: true, skipped: false } : timedOut ? { ...singleResult, output: timeoutMessage ?? "Subagent timed out.", error: timeoutMessage ?? "Subagent timed out.", exitCode: 1, interrupted: false, timedOut: true, skipped: false } : { ...singleResult, skipped: false };
+				const stepState = stepResultState({ stopped: stopped || childStopped, timedOut, interrupted: childInterrupted, exitCode: singleResult.exitCode });
+				// Written at child completion, not at the batch join, so the parent can
+				// consume this child's result while stragglers are still running.
+				const stepResultPath = writeStepResultArtifact({
+					asyncDir,
+					runId: id,
+					stepIndex: fi,
+					agent: task.agent,
+					state: stepState,
+					startedAt: taskStartTime,
+					endedAt: taskEndTime,
+					durationMs: taskEndTime - taskStartTime,
+					result: normalizedStepResult,
+				});
+				appendJsonl(eventsPath, JSON.stringify({
+					type: "subagent.step.result.completed",
+					stepResultArtifactVersion: STEP_RESULT_ARTIFACT_VERSION,
+					ts: taskEndTime,
+					runId: id,
+					stepIndex: fi,
+					agent: task.agent,
+					state: stepState,
+					resultPath: stepResultPath,
+				}));
+				return normalizedStepResult;
 			}, globalSemaphore);
 
 			flatIndex += dynamicSteps.length;
@@ -3124,7 +3246,21 @@ async function runSubagent(
 							appendJsonl(eventsPath, JSON.stringify({
 								type: "subagent.step.failed", ts: skippedAt, runId: id, stepIndex: fi, agent: task.agent, exitCode: -1, durationMs: 0,
 							}));
-							return { agent: task.agent, output: "(skipped — fail-fast)", exitCode: -1 as number | null, skipped: true };
+							const skippedResult: StepResult = { agent: task.agent, output: "(skipped — fail-fast)", exitCode: -1 as number | null, skipped: true };
+							// A skipped child is terminal in status.json, so it also gets a
+							// per-child artifact instead of being an unexplained gap.
+							const skippedPath = writeStepResultArtifact({
+								asyncDir, runId: id, stepIndex: fi, agent: task.agent,
+								state: "failed", startedAt: skippedAt, endedAt: skippedAt, durationMs: 0,
+								result: skippedResult,
+							});
+							appendJsonl(eventsPath, JSON.stringify({
+								type: "subagent.step.result.completed",
+								stepResultArtifactVersion: STEP_RESULT_ARTIFACT_VERSION,
+								ts: skippedAt, runId: id, stepIndex: fi, agent: task.agent,
+								state: "failed", resultPath: skippedPath,
+							}));
+							return skippedResult;
 						}
 
 						const taskStartTime = Date.now();
@@ -3190,7 +3326,7 @@ async function runSubagent(
 						const childInterrupted = singleResult.interrupted === true;
 						const childStopped = singleResult.stopped === true;
 
-						statusPayload.steps[fi].status = stopped || childStopped ? "stopped" : timedOut ? "failed" : childInterrupted ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
+						statusPayload.steps[fi].status = stepResultState({ stopped: stopped || childStopped, timedOut, interrupted: childInterrupted, exitCode: singleResult.exitCode });
 						statusPayload.steps[fi].endedAt = taskEndTime;
 						statusPayload.steps[fi].durationMs = taskDuration;
 						statusPayload.steps[fi].exitCode = stopped || childStopped ? 1 : timedOut ? 1 : childInterrupted ? 0 : singleResult.exitCode;
@@ -3242,7 +3378,31 @@ async function runSubagent(
 						}
 
 						if (singleResult.exitCode !== 0 && failFast) aborted = true;
-						return stopped || childStopped ? { ...singleResult, output: stopMessage, error: stopMessage, exitCode: 1, interrupted: false, timedOut: false, stopped: true, skipped: false } : timedOut ? { ...singleResult, output: timeoutMessage ?? "Subagent timed out.", error: timeoutMessage ?? "Subagent timed out.", exitCode: 1, interrupted: false, timedOut: true, skipped: false } : { ...singleResult, skipped: false };
+						const normalizedStepResult: StepResult = stopped || childStopped ? { ...singleResult, output: stopMessage, error: stopMessage, exitCode: 1, interrupted: false, timedOut: false, stopped: true, skipped: false } : timedOut ? { ...singleResult, output: timeoutMessage ?? "Subagent timed out.", error: timeoutMessage ?? "Subagent timed out.", exitCode: 1, interrupted: false, timedOut: true, skipped: false } : { ...singleResult, skipped: false };
+						// Written at child completion, not at the batch join, so the parent can
+						// consume this child's result while stragglers are still running.
+						const stepResultPath = writeStepResultArtifact({
+							asyncDir,
+							runId: id,
+							stepIndex: fi,
+							agent: task.agent,
+							state: stepResultState({ stopped: stopped || childStopped, timedOut, interrupted: childInterrupted, exitCode: singleResult.exitCode }),
+							startedAt: taskStartTime,
+							endedAt: taskEndTime,
+							durationMs: taskDuration,
+							result: normalizedStepResult,
+						});
+						appendJsonl(eventsPath, JSON.stringify({
+							type: "subagent.step.result.completed",
+							stepResultArtifactVersion: STEP_RESULT_ARTIFACT_VERSION,
+							ts: taskEndTime,
+							runId: id,
+							stepIndex: fi,
+							agent: task.agent,
+							state: stepResultState({ stopped: stopped || childStopped, timedOut, interrupted: childInterrupted, exitCode: singleResult.exitCode }),
+							resultPath: stepResultPath,
+						}));
+						return normalizedStepResult;
 					},
 					globalSemaphore,
 				);
@@ -3396,7 +3556,8 @@ async function runSubagent(
 
 			previousOutput = singleResult.output;
 			const childStopped = singleResult.stopped === true;
-			results.push({
+			const childInterrupted = singleResult.interrupted === true;
+			const seqStepResult: StepResult = {
 				agent: singleResult.agent,
 				output: stopped || childStopped ? stopMessage : timedOut ? (timeoutMessage ?? "Subagent timed out.") : singleResult.output,
 				error: stopped || childStopped ? stopMessage : timedOut ? (timeoutMessage ?? "Subagent timed out.") : singleResult.error,
@@ -3426,7 +3587,8 @@ async function runSubagent(
 				wrapUpRequested: singleResult.wrapUpRequested,
 				toolBudget: singleResult.toolBudget,
 				toolBudgetBlocked: singleResult.toolBudgetBlocked,
-			});
+			};
+			results.push(seqStepResult);
 			if (seqStep.outputName) {
 				outputs[seqStep.outputName] = outputEntryFromAsyncResult({
 					agent: singleResult.agent,
@@ -3458,8 +3620,8 @@ async function runSubagent(
 			}
 
 			const stepEndTime = Date.now();
-			const childInterrupted = singleResult.interrupted === true;
-			statusPayload.steps[flatIndex].status = stopped || childStopped ? "stopped" : timedOut ? "failed" : childInterrupted ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
+			const stepState = stepResultState({ stopped: stopped || childStopped, timedOut, interrupted: childInterrupted, exitCode: singleResult.exitCode });
+			statusPayload.steps[flatIndex].status = stepState;
 			statusPayload.steps[flatIndex].endedAt = stepEndTime;
 			statusPayload.steps[flatIndex].durationMs = stepEndTime - stepStartTime;
 			statusPayload.steps[flatIndex].exitCode = stopped || childStopped ? 1 : timedOut ? 1 : childInterrupted ? 0 : singleResult.exitCode;
@@ -3504,6 +3666,29 @@ async function runSubagent(
 				exitCode: stopped || childStopped ? 1 : timedOut ? 1 : childInterrupted ? 0 : singleResult.exitCode,
 				durationMs: stepEndTime - stepStartTime,
 				tokens: stepTokens,
+			}));
+			// Sequential steps get the same per-child artifact contract as parallel
+			// children, so consumers never need to special-case the run mode.
+			const stepResultPath = writeStepResultArtifact({
+				asyncDir,
+				runId: id,
+				stepIndex: flatIndex,
+				agent: seqStep.agent,
+				state: stepState,
+				startedAt: stepStartTime,
+				endedAt: stepEndTime,
+				durationMs: stepEndTime - stepStartTime,
+				result: seqStepResult,
+			});
+			appendJsonl(eventsPath, JSON.stringify({
+				type: "subagent.step.result.completed",
+				stepResultArtifactVersion: STEP_RESULT_ARTIFACT_VERSION,
+				ts: stepEndTime,
+				runId: id,
+				stepIndex: flatIndex,
+				agent: seqStep.agent,
+				state: stepState,
+				resultPath: stepResultPath,
 			}));
 			if (singleResult.completionGuardTriggered) {
 				const event = buildControlEvent({

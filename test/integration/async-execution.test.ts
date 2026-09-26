@@ -3941,4 +3941,133 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.deepEqual(status.steps[0].recentTools.map((tool: { tool: string; args: string }) => ({ tool: tool.tool, args: tool.args })), [{ tool: "bash", args: "ls" }]);
 		assert.deepEqual(status.steps[0].recentOutput, ["file-a", "file-b", "Done streaming"]);
 	});
+
+	it("publishes each parallel child's result artifact before the batch joins", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
+		// Child 2 blocks until the test releases it, so child 1's artifact must be
+		// observable while the batch is still running. This is the regression guard
+		// for 'results only exist after the whole batch completes'.
+		const release = path.join(tempDir, "release-straggler");
+		mockPi.onCall({ matchArgIncludes: "FIRST_CHILD", output: "first child done" });
+		mockPi.onCall({ matchArgIncludes: "SECOND_CHILD", output: "second child done", waitForPath: release });
+
+		const executor = makeAsyncExecutor([makeAgent("worker", { completionGuard: false })]);
+		const result = await executor.execute(
+			"async-parallel-step-results",
+			{
+				tasks: [
+					{ agent: "worker", task: "FIRST_CHILD report" },
+					{ agent: "worker", task: "SECOND_CHILD report" },
+				],
+				async: true,
+				clarify: false,
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const asyncId = result.details?.asyncId;
+		assert.ok(asyncId, "expected asyncId");
+		const asyncDir = path.join(ASYNC_DIR, asyncId);
+		const firstArtifact = path.join(asyncDir, "step-results", "step-0.json");
+		const secondArtifact = path.join(asyncDir, "step-results", "step-1.json");
+		const resultPath = path.join(RESULTS_DIR, `${asyncId}.json`);
+
+		const deadline = Date.now() + 30_000;
+		while (!fs.existsSync(firstArtifact)) {
+			if (Date.now() > deadline) {
+				assert.fail([
+					`Timed out waiting for ${firstArtifact}`,
+					readIfExists(path.join(asyncDir, "status.json")),
+					readIfExists(path.join(asyncDir, "runner.stderr.log")),
+				].filter(Boolean).join("\n"));
+			}
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+
+		assert.equal(fs.existsSync(secondArtifact), false, "straggler must not have an artifact yet");
+		assert.equal(fs.existsSync(resultPath), false, "whole-run result.json must not exist yet");
+		const midStatus = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(midStatus.steps?.[0]?.status, "complete");
+		assert.notEqual(midStatus.steps?.[1]?.status, "complete", "straggler should still be running");
+
+		const first = JSON.parse(fs.readFileSync(firstArtifact, "utf-8"));
+		assert.equal(first.lifecycleArtifactVersion, undefined);
+		assert.equal(first.stepResultArtifactVersion, 1);
+		assert.equal(first.runId, asyncId);
+		assert.equal(first.stepIndex, 0);
+		assert.equal(first.agent, "worker");
+		assert.equal(first.state, "complete");
+		assert.equal(first.result.output, "first child done");
+		assert.equal(typeof first.durationMs, "number");
+
+		// Release the straggler and confirm the second artifact plus the join.
+		fs.writeFileSync(release, "go", "utf-8");
+		await waitForAsyncResultFile(asyncId, 30_000);
+		const finalDeadline = Date.now() + 10_000;
+		while (!fs.existsSync(secondArtifact)) {
+			if (Date.now() > finalDeadline) assert.fail(`Timed out waiting for ${secondArtifact}`);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+
+		// The per-child artifact must agree with the child's entry in result.json,
+		// so the early-read path can never serve a different answer than the join.
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const second = JSON.parse(fs.readFileSync(secondArtifact, "utf-8"));
+		assert.equal(second.state, "complete");
+		assert.equal(second.result.output, payload.results[1]?.output);
+		assert.equal(first.result.output, payload.results[0]?.output);
+		assert.equal(first.result.success, payload.results[0]?.success);
+
+		const events = fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8")
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line) as { type?: string; stepIndex?: number; resultPath?: string });
+		const resultEvents = events.filter((event) => event.type === "subagent.step.result.completed");
+		assert.equal(resultEvents.length, 2);
+		assert.deepEqual(resultEvents.map((event) => event.stepIndex).sort(), [0, 1]);
+		assert.equal(resultEvents[0]?.resultPath, firstArtifact);
+	});
+
+	it("writes a step artifact for sequential children and for failed children", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ matchArgIncludes: "SEQUENTIAL_STEP", output: "sequential done" });
+		mockPi.onCall({ matchArgIncludes: "FAILING_STEP", output: "", stderr: "boom", exitCode: 1 });
+
+		const executor = makeAsyncExecutor([makeAgent("worker", { completionGuard: false })]);
+		const result = await executor.execute(
+			"async-step-results-sequential",
+			{
+				chain: [
+					{ agent: "worker", task: "SEQUENTIAL_STEP report" },
+					{ agent: "worker", task: "FAILING_STEP report" },
+				],
+				async: true,
+				clarify: false,
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const asyncId = result.details?.asyncId;
+		assert.ok(asyncId, "expected asyncId");
+		const asyncDir = path.join(ASYNC_DIR, asyncId);
+		await waitForAsyncResultFile(asyncId, 30_000);
+
+		const complete = JSON.parse(fs.readFileSync(path.join(asyncDir, "step-results", "step-0.json"), "utf-8"));
+		const failed = JSON.parse(fs.readFileSync(path.join(asyncDir, "step-results", "step-1.json"), "utf-8"));
+		assert.equal(complete.state, "complete");
+		assert.equal(complete.result.success, true);
+		assert.equal(complete.result.output, "sequential done");
+		assert.equal(failed.state, "failed");
+		assert.equal(failed.result.success, false);
+
+		// The artifact's success flag must agree with the joined result entry for
+		// the same child in both directions.
+		const payload = JSON.parse(fs.readFileSync(path.join(RESULTS_DIR, `${asyncId}.json`), "utf-8")) as AsyncResultPayload;
+		assert.equal(complete.result.success, payload.results[0]?.success);
+		assert.equal(failed.result.success, payload.results[1]?.success);
+		assert.equal(payload.results[0]?.success, true);
+		assert.equal(payload.results[1]?.success, false);
+	});
 });
