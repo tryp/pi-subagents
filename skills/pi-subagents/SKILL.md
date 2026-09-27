@@ -348,7 +348,7 @@ call `structured_output` with schema-valid JSON, or the step fails.
 
 ### Async/background
 
-Async is the default: omit `async` and the launch detaches, for every shape (single task, batch, chain) and every agent. Do not set `async: true` — it is already the behavior. Blocking is the explicit opt-in: pass `async: false` only when the result is needed inline before the next step, because a foreground launch cannot overlap anything and a foreground batch cannot overlap its own children. This applies to scouts, researchers, workers, reviewers, validators, oracle checks, one-off delegates, chains, and parallel groups. Keep the write path single-threaded even when the run is async.
+Async is the default: omit `async` and the launch detaches, for every shape (single task, batch, chain) and every agent. Do not set `async: true` — it is already the behavior. The one exception is a single-shot `pi -p`/print run, where the process ends at `agent_end` and a detached result has nowhere to land: there an omitted `async` stays inline, so nothing is lost. Pass `async: true` explicitly if you want a headless run detached anyway, and read the run's artifacts for its output. Blocking is the explicit opt-in: pass `async: false` only when the result is needed inline before the next step, because a foreground launch cannot overlap anything and a foreground batch cannot overlap its own children. This applies to scouts, researchers, workers, reviewers, validators, oracle checks, one-off delegates, chains, and parallel groups. Keep the write path single-threaded even when the run is async.
 
 Async does not mean parallel writes. Do not edit the same active worktree while an async worker is changing it. Parent-side overlap should be reading, validation prep, synthesis, command planning, or review of unaffected context unless the writer is isolated in a separate worktree.
 
@@ -748,7 +748,7 @@ Runtime config can change orchestration behavior. `asyncByDefault` and `forceTop
 
 ### Prefer async orchestration
 
-Launch every subagent asynchronously by default. Use `async: true` for scouts, researchers, workers, reviewers, validators, oracle checks, one-off delegates, chains, and parallel groups unless you intentionally need a foreground/blocking run. The parent should keep moving: inspect code while scouts run, prepare validation while a worker implements, do a local diff pass while reviewers review, and synthesize or verify while a fix worker applies accepted feedback. Async is the default orchestration posture; foreground runs are the explicit opt-out.
+Launch subagents asynchronously by default: omit `async` for scouts, researchers, workers, reviewers, validators, oracle checks, one-off delegates, chains, and parallel groups. The default already detaches in an interactive or RPC session, so `async: true` is only needed to force detaching in a single-shot `pi -p` run, where a detached result would otherwise have nowhere to land. The parent should keep moving: inspect code while scouts run, prepare validation while a worker implements, do a local diff pass while reviewers review, and synthesize or verify while a fix worker applies accepted feedback. Async is the default orchestration posture; foreground runs are the explicit opt-out.
 
 ### Use subagent_wait() to block until async runs finish
 

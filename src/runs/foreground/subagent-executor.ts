@@ -186,6 +186,8 @@ interface ExecutorDeps {
 	state: SubagentState;
 	config: ExtensionConfig;
 	asyncByDefault: boolean;
+	/** True when the user configured `asyncByDefault` themselves; see resolveAsyncByDefault. */
+	asyncByDefaultExplicit?: boolean;
 	waitToolEnabled?: boolean;
 	handleScheduledRunAction?: (params: SubagentParamsLike, ctx: ExtensionContext) => Promise<AgentToolResult<Details>>;
 	watchdog?: MainWatchdogRuntime;
@@ -3774,6 +3776,11 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			explicit: explicitAsyncRequest,
 			asyncAvailable: isAsyncAvailable(),
 			asyncByDefault: deps.asyncByDefault,
+			asyncByDefaultExplicit: deps.asyncByDefaultExplicit,
+			// A detached result needs a later turn to land in. Interactive and RPC
+			// sessions have one; a single-shot print/json run ends at agent_end with
+			// nowhere to deliver, so an omitted async stays inline there.
+			canDeliverResult: ctx.hasUI === true,
 		});
 		if (asyncDecision.fallbackToForeground) {
 			console.info(

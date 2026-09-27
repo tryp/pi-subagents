@@ -5,6 +5,12 @@ export const ASYNC_DEFAULT_ENV = "PI_SUBAGENT_ASYNC_DEFAULT";
 export interface ResolvedAsyncDefaultConfig {
 	/** True means an omitted `async` launches detached. */
 	asyncByDefault: boolean;
+	/**
+	 * True when the user set this themselves (`asyncByDefault` in config or the env
+	 * var) rather than inheriting the built-in default. An explicit setting is
+	 * intent, so it also applies where the built-in default declines to detach.
+	 */
+	asyncByDefaultExplicit: boolean;
 }
 
 const TRUE_VALUES = new Set(["1", "true", "yes", "on", "async"]);
@@ -38,7 +44,9 @@ export function resolveAsyncByDefault(
 	if (configured !== undefined && typeof configured !== "boolean") {
 		throw new Error("config.asyncByDefault must be a boolean.");
 	}
-	return { asyncByDefault: environmentValue(env[ASYNC_DEFAULT_ENV]) ?? configured ?? true };
+	const fromEnvironment = environmentValue(env[ASYNC_DEFAULT_ENV]);
+	const resolved = fromEnvironment ?? configured;
+	return { asyncByDefault: resolved ?? true, asyncByDefaultExplicit: resolved !== undefined };
 }
 
 export interface LaunchAsyncInput {
@@ -50,6 +58,17 @@ export interface LaunchAsyncInput {
 	asyncAvailable: boolean;
 	/** Whether an omitted `async` means detach. */
 	asyncByDefault: boolean;
+	/** Whether the user set `asyncByDefault` themselves (see `ResolvedAsyncDefaultConfig`). */
+	asyncByDefaultExplicit?: boolean;
+	/**
+	 * Whether a later turn can still deliver a detached child's result.
+	 *
+	 * True for interactive and RPC sessions, which have a live session after the turn
+	 * ends, and false for `print`/`json` single-shot runs, where `agent_end` is the end
+	 * of the process. Omitted means "assume yes" so callers that never had this
+	 * information keep the previous behavior.
+	 */
+	canDeliverResult?: boolean;
 }
 
 export interface LaunchAsyncDecision {
@@ -70,10 +89,27 @@ export interface LaunchAsyncDecision {
  * environment, or `forceTopLevelAsync` - carries no such intent, so an unavailable
  * runner degrades to a foreground run rather than turning every default launch into a
  * hard error on a machine without the background runner installed.
+ *
+ * A defaulted detach additionally needs somewhere for the result to land. In a
+ * single-shot `print`/`json` run the process ends at `agent_end`, so a detached child
+ * whose output the parent never waits for is output the parent never sees - measured
+ * live, not assumed: a headless run that launched detached ended with the
+ * acknowledgement as the last parent message and no child result in the transcript.
+ * Blocking cannot lose a result, and in that mode it also cannot overlap anything, so
+ * an omitted `async` stays inline there. Setting `asyncByDefault` explicitly opts back
+ * into detaching anywhere, and `async: true` always detaches.
  */
 export function resolveLaunchAsync(input: LaunchAsyncInput): LaunchAsyncDecision {
 	const explicit = input.explicit === true;
-	const wanted = (input.requested ?? input.asyncByDefault) === true;
+	let wanted: boolean;
+	if (input.requested === true) {
+		wanted = true;
+	} else if (input.requested === false) {
+		wanted = false;
+	} else {
+		const deliveryPossible = input.asyncByDefaultExplicit === true || input.canDeliverResult !== false;
+		wanted = input.asyncByDefault && deliveryPossible;
+	}
 	if (!wanted) return { async: false, fallbackToForeground: false };
 	if (input.asyncAvailable) return { async: true, fallbackToForeground: false };
 	return explicit

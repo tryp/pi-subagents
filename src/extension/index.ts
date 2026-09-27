@@ -216,7 +216,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	const config = loadConfig();
 	const waitToolConfig = resolveWaitToolConfig(config.waitTool);
 	const stepNotifyConfig = resolveStepNotifyConfig(config.stepNotify);
-	const asyncByDefault = resolveAsyncByDefault(config).asyncByDefault;
+	const resolvedAsyncDefault = resolveAsyncByDefault(config);
+	const asyncByDefault = resolvedAsyncDefault.asyncByDefault;
 	const tempArtifactsDir = getArtifactsDir(null);
 	cleanupAllArtifactDirs(DEFAULT_ARTIFACT_CONFIG.cleanupDays);
 
@@ -308,6 +309,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		state,
 		config,
 		asyncByDefault,
+		asyncByDefaultExplicit: resolvedAsyncDefault.asyncByDefaultExplicit,
 		waitToolEnabled: waitToolConfig.enabled,
 		handleScheduledRunAction: (params, ctx) => scheduledRunManager.handleToolCall(params, ctx),
 		watchdog: mainWatchdog,

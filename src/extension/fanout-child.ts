@@ -148,6 +148,7 @@ export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI): 
 		state,
 		config,
 		asyncByDefault: resolveAsyncByDefault(config).asyncByDefault,
+		asyncByDefaultExplicit: resolveAsyncByDefault(config).asyncByDefaultExplicit,
 		waitToolEnabled: resolveWaitToolConfig(config.waitTool).enabled,
 		tempArtifactsDir: getArtifactsDir(null),
 		getSubagentSessionRoot,

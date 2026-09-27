@@ -7,27 +7,36 @@ import {
 } from "../../src/runs/background/async-default-config.ts";
 
 describe("async default", () => {
-	it("detaches when nothing is configured", () => {
-		// The whole point of the default: a caller that says nothing gets the shape
-		// that can overlap work, rather than a blocking call it has to remember to
-		// opt out of.
-		assert.deepEqual(resolveAsyncByDefault(undefined, {}), { asyncByDefault: true });
+	it("detaches when nothing is configured, and marks that as inherited", () => {
+		// The built-in default is the shape that can overlap work. The `Explicit: false`
+		// flag matters: an inherited default may still decline to detach where the
+		// result could not be delivered, while a configured one is intent.
+		assert.deepEqual(resolveAsyncByDefault(undefined, {}), {
+			asyncByDefault: true,
+			asyncByDefaultExplicit: false,
+		});
 	});
 
 	it("treats asyncByDefault false as the blocking opt-in", () => {
-		assert.deepEqual(resolveAsyncByDefault({ asyncByDefault: false }, {}), { asyncByDefault: false });
-		assert.deepEqual(resolveAsyncByDefault({ asyncByDefault: true }, {}), { asyncByDefault: true });
+		assert.deepEqual(resolveAsyncByDefault({ asyncByDefault: false }, {}), {
+			asyncByDefault: false,
+			asyncByDefaultExplicit: true,
+		});
+		assert.deepEqual(resolveAsyncByDefault({ asyncByDefault: true }, {}), {
+			asyncByDefault: true,
+			asyncByDefaultExplicit: true,
+		});
 	});
 
 	it("lets the environment override config in either direction", () => {
-		assert.deepEqual(
-			resolveAsyncByDefault({ asyncByDefault: false }, { [ASYNC_DEFAULT_ENV]: "true" }),
-			{ asyncByDefault: true },
-		);
-		assert.deepEqual(
-			resolveAsyncByDefault({ asyncByDefault: true }, { [ASYNC_DEFAULT_ENV]: "blocking" }),
-			{ asyncByDefault: false },
-		);
+		assert.deepEqual(resolveAsyncByDefault({ asyncByDefault: false }, { [ASYNC_DEFAULT_ENV]: "true" }), {
+			asyncByDefault: true,
+			asyncByDefaultExplicit: true,
+		});
+		assert.deepEqual(resolveAsyncByDefault({ asyncByDefault: true }, { [ASYNC_DEFAULT_ENV]: "blocking" }), {
+			asyncByDefault: false,
+			asyncByDefaultExplicit: true,
+		});
 	});
 
 	it("fails closed on invalid input instead of guessing", () => {
@@ -58,32 +67,60 @@ describe("launch async decision", () => {
 		);
 	});
 
-	it("keeps an explicit async request an error when the runner is missing", () => {
-		// The caller asked to detach; silently running inline would change its contract.
+	it("keeps a single-shot run inline, because a detached result has nowhere to land", () => {
+		// Measured live: a headless `print` run that launched detached ended with the
+		// acknowledgement as its last message and no child result in the transcript.
+		// Blocking cannot lose a result, so the built-in default stays inline there.
 		assert.deepEqual(
-			resolveLaunchAsync({ requested: true, explicit: true, asyncAvailable: false, asyncByDefault: true }),
+			resolveLaunchAsync({
+				requested: undefined,
+				asyncAvailable: true,
+				asyncByDefault: true,
+				canDeliverResult: false,
+			}),
+			{ async: false, fallbackToForeground: false },
+		);
+	});
+
+	it("still detaches a single-shot run when the user configured asyncByDefault", () => {
+		// An explicit setting is intent, so it overrides the delivery guard; the user
+		// asked for detaching everywhere and may be reading the artifacts themselves.
+		assert.deepEqual(
+			resolveLaunchAsync({
+				requested: undefined,
+				asyncAvailable: true,
+				asyncByDefault: true,
+				asyncByDefaultExplicit: true,
+				canDeliverResult: false,
+			}),
 			{ async: true, fallbackToForeground: false },
 		);
 	});
 
-	it("treats a config-forced async like a default, not a request", () => {
-		// forceTopLevelAsync sets async: true without the caller asking for it.
+	it("detaches an explicit async request even where a result cannot be delivered", () => {
+		// The caller asked to detach; the drain still waits for the child, so nothing
+		// is abandoned and the run artifacts hold the output.
 		assert.deepEqual(
-			resolveLaunchAsync({ requested: true, explicit: false, asyncAvailable: false, asyncByDefault: true }),
-			{ async: false, fallbackToForeground: true },
+			resolveLaunchAsync({
+				requested: true,
+				explicit: true,
+				asyncAvailable: true,
+				asyncByDefault: true,
+				canDeliverResult: false,
+			}),
+			{ async: true, fallbackToForeground: false },
 		);
 	});
 
-	it("honors the blocking opt-in in every environment", () => {
-		for (const asyncAvailable of [true, false]) {
-			assert.deepEqual(
-				resolveLaunchAsync({ requested: false, asyncAvailable, asyncByDefault: true }),
-				{ async: false, fallbackToForeground: false },
-			);
-			assert.deepEqual(
-				resolveLaunchAsync({ requested: undefined, asyncAvailable, asyncByDefault: false }),
-				{ async: false, fallbackToForeground: false },
-			);
-		}
+	it("keeps blocking opt-in working in a delivery-capable session too", () => {
+		assert.deepEqual(
+			resolveLaunchAsync({
+				requested: false,
+				asyncAvailable: true,
+				asyncByDefault: true,
+				canDeliverResult: true,
+			}),
+			{ async: false, fallbackToForeground: false },
+		);
 	});
 });
