@@ -1123,6 +1123,15 @@ export const INTERCOM_DETACH_REQUEST_EVENT = "pi-intercom:detach-request";
 export const INTERCOM_DETACH_RESPONSE_EVENT = "pi-intercom:detach-response";
 export const SUBAGENT_ASYNC_STARTED_EVENT = "subagent:async-started";
 export const SUBAGENT_ASYNC_COMPLETE_EVENT = "subagent:async-complete";
+/**
+ * One child published a consumable result while its run was still going.
+ *
+ * Run-level completion fires only after the whole batch joins, so this is the only
+ * channel that can wake a sleeper as soon as a single child is usable. Emitted by
+ * `runs/background/step-result-events.ts`, which reads the durable
+ * `subagent.step.result.completed` line from the run's `events.jsonl`.
+ */
+export const SUBAGENT_STEP_RESULT_EVENT = "subagent:step-result";
 export const SUBAGENT_FOREGROUND_COMPLETE_EVENT = "subagent:foreground-complete";
 export const SUBAGENT_CONTROL_EVENT = "subagent:control-event";
 export const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";

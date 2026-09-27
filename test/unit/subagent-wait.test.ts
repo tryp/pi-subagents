@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { WAIT_TOOL_ENABLED_ENV, resolveWaitToolConfig, waitForSubagents, type SubagentWaitDeps } from "../../src/runs/background/subagent-wait.ts";
-import type { SubagentState } from "../../src/shared/types.ts";
+import { SUBAGENT_STEP_RESULT_EVENT, type SubagentState } from "../../src/shared/types.ts";
 
 function writeStatus(asyncRoot: string, runId: string, state: string, extra: object = {}): void {
 	const dir = path.join(asyncRoot, runId);
@@ -711,6 +711,151 @@ describe("subagent_wait tool", () => {
 			assert.equal(result.isError, undefined);
 			assert.deepEqual(stepResultsOf(result).map((view) => view.output), ["ALPHA", "BETA"]);
 			assert.ok(polls >= 2, `an integration barrier must wait for the batch, polled ${polls}`);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("ends the sleep when a child publication event fires", async () => {
+		// The wake guarantee: a sleeping wait must be woken by the event, not by its
+		// poll interval. One poll is allowed here (the event fires inside it) - what
+		// must not happen is the loop spinning until the interval or the timeout.
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-event-wake-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+
+			const handlers = new Map<string, Array<(payload: unknown) => void>>();
+			const events = {
+				on: (channel: string, handler: (payload: unknown) => void) => {
+					const list = handlers.get(channel) ?? [];
+					list.push(handler);
+					handlers.set(channel, list);
+					return () => {};
+				},
+			};
+			const fire = (channel: string) => {
+				for (const handler of handlers.get(channel) ?? []) handler({ runId: "run-a", stepIndex: 0 });
+			};
+
+			let sleeps = 0;
+			const sleep = async () => {
+				sleeps += 1;
+				// The child publishes while the agent is asleep. Only the event can make
+				// this iteration productive; a poll-only implementation would sleep again.
+				writeStepResult(asyncRoot, "run-a", 0, "ALPHA");
+				fire(SUBAGENT_STEP_RESULT_EVENT);
+			};
+
+			const result = await waitForSubagents(
+				{ runId: "run-a", until: "next-event" },
+				undefined,
+				baseDeps(root, state, { sleep, events }),
+			);
+
+			assert.equal(result.isError, undefined);
+			assert.deepEqual(stepResultsOf(result).map((view) => view.output), ["ALPHA"]);
+			assert.equal(sleeps, 1, `the event must end the first sleep, slept ${sleeps}`);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("still reports a result when no event arrives, because the poll reconciles", async () => {
+		// A missed event must not become a lost result: the interval remains the
+		// reconciliation path for anything the bus did not deliver.
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-event-missed-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			const events = { on: () => () => {} };
+
+			let sleeps = 0;
+			const sleep = async () => {
+				sleeps += 1;
+				if (sleeps === 2) writeStepResult(asyncRoot, "run-a", 0, "ALPHA");
+			};
+
+			const result = await waitForSubagents(
+				{ runId: "run-a", until: "next-event" },
+				undefined,
+				baseDeps(root, state, { sleep, events }),
+			);
+
+			assert.deepEqual(stepResultsOf(result).map((view) => view.output), ["ALPHA"]);
+			assert.equal(sleeps, 2, `the poll must notice the publication, slept ${sleeps}`);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("sleeps until the next event and returns at the first child publication", async () => {
+		// `until: "next-event"` is the explicit sleep: it must return the moment any
+		// child publishes, without blocking for the straggler and without waiting out
+		// the poll interval.
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-next-event-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			writeStepResult(asyncRoot, "run-a", 0, "ALPHA");
+
+			let polls = 0;
+			const sleep = async () => {
+				polls += 1;
+			};
+			const result = await waitForSubagents(
+				{ runId: "run-a", until: "next-event" },
+				undefined,
+				baseDeps(root, state, { sleep }),
+			);
+
+			assert.equal(result.isError, undefined);
+			assert.deepEqual(stepResultsOf(result).map((view) => view.output), ["ALPHA"]);
+			assert.ok(polls <= 1, `next-event must return at the first event, polled ${polls}`);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("consumes like first-result so a second sleep reports the next child", async () => {
+		// Without consumption a sleeper would return immediately on the same result
+		// forever. The second call must report the sibling instead of repeating ALPHA.
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-next-event-drain-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			// Only the first child has published when the sleep returns, so the caller
+			// gets exactly that child and nothing of the straggler.
+			writeStepResult(asyncRoot, "run-a", 0, "ALPHA");
+
+			const first = await waitForSubagents({ runId: "run-a", until: "next-event" }, undefined, baseDeps(root, state));
+			assert.deepEqual(stepResultsOf(first).map((view) => view.output), ["ALPHA"]);
+
+			// The consumed child is not re-reported; the next sleep notices the sibling
+			// that published in the meantime.
+			writeStepResult(asyncRoot, "run-a", 1, "BETA");
+			const second = await waitForSubagents({ runId: "run-a", until: "next-event" }, undefined, baseDeps(root, state));
+			assert.deepEqual(stepResultsOf(second).map((view) => view.output), ["BETA"]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects next-event combined with all-terminal intent", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-next-event-contradiction-"));
+		try {
+			const state = makeState("sess-1");
+			const result = await waitForSubagents(
+				{ runId: "run-a", until: "next-event", all: true },
+				undefined,
+				baseDeps(root, state),
+			);
+			assert.equal(result.isError, true);
+			assert.match(textOf(result), /contradicts until|specify different completion conditions/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

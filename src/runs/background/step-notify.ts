@@ -2,7 +2,7 @@
 import * as fs from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AsyncJobState, SubagentState } from "../../shared/types.ts";
-import { SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_FOREGROUND_COMPLETE_EVENT } from "../../shared/types.ts";
+import { SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_FOREGROUND_COMPLETE_EVENT, SUBAGENT_STEP_RESULT_EVENT } from "../../shared/types.ts";
 import { consumedStepResultSet, listStepResultArtifacts, stepResultArtifactPath, stepResultKey, type StepResultArtifact, type StepResultPresentation } from "../shared/step-results.ts";
 import { createCompletionBatcher, DEFAULT_COMPLETION_BATCH_CONFIG, type CompletionBatcher, type ResolvedCompletionBatchConfig } from "./completion-batcher.ts";
 
@@ -244,6 +244,11 @@ export function registerStepNotifications(
 		pi.events.on(SUBAGENT_ASYNC_COMPLETE_EVENT, completionHandler),
 		pi.events.on(SUBAGENT_FOREGROUND_COMPLETE_EVENT, completionHandler),
 	].filter((unsubscribe): unsubscribe is () => void => typeof unsubscribe === "function");
+
+	// Delivery is event-driven; the interval below is reconciliation for missed or
+	// pre-existing lines (a publication that landed before this session subscribed).
+	const stepResultUnsubscribe = pi.events.on(SUBAGENT_STEP_RESULT_EVENT, () => tick());
+	if (typeof stepResultUnsubscribe === "function") unsubscribers.push(stepResultUnsubscribe);
 
 	const tick = () => {
 		if (disposed || state.asyncJobs.size === 0) return;

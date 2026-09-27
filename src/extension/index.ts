@@ -41,6 +41,7 @@ import { inspectSubagentStatus } from "../runs/background/run-status.ts";
 import { resolveWaitToolConfig } from "../runs/background/subagent-wait.ts";
 import { resolveStepNotifyConfig } from "../runs/background/step-notify-config.ts";
 import { registerStepNotifications } from "../runs/background/step-notify.ts";
+import { registerStepResultEvents } from "../runs/background/step-result-events.ts";
 import { resolveAsyncByDefault } from "../runs/background/async-default-config.ts";
 import { registerWaitTool } from "../runs/background/wait-tool.ts";
 import { drainOutstandingWork } from "../runs/background/auto-drain.ts";
@@ -257,6 +258,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	let disposeBackgroundWorkProvider = registerBackgroundWorkProvider(backgroundWorkProvider);
 	let disposeSubagentNotify = () => {};
 	let disposeStepNotifications = () => {};
+	let disposeStepResultEvents = () => {};
 	const { startResultWatcher, primeExistingResults, stopResultWatcher } = createResultWatcher(
 		pi,
 		state,
@@ -271,6 +273,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		disposeBackgroundWorkProvider = () => {};
 		disposeSubagentNotify();
 		disposeStepNotifications();
+		disposeStepResultEvents();
 		mainWatchdog.dispose();
 		stopResultWatcher();
 		scheduledRunManager.stop();
@@ -503,6 +506,9 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		}
 	}
 	disposeSubagentNotify = registerSubagentNotify(pi, state, { batchConfig: config.completionBatch });
+	// Always on: this is what wakes a sleeping wait, independent of whether the
+	// progressive notification feature is enabled.
+	disposeStepResultEvents = registerStepResultEvents(pi, state);
 	disposeStepNotifications = registerStepNotifications(pi, state, stepNotifyConfig.enabled);
 
 	const existingVisibleControlNotices = globalStore[controlNoticeSeenStoreKey];

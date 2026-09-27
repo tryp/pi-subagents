@@ -76,6 +76,7 @@ import {
 	SUBAGENT_CONTROL_EVENT,
 	SUBAGENT_CONTROL_INTERCOM_EVENT,
 	SUBAGENT_RESULT_INTERCOM_EVENT,
+	SUBAGENT_STEP_RESULT_EVENT,
 	type Details,
 	type ForegroundResumeRun,
 	type SubagentState,
@@ -154,6 +155,10 @@ export interface SubagentWaitDeps {
 
 /** Bus channels that indicate a run changed state or needs attention. */
 const WAKE_CHANNELS = [
+	// A child publishing a result is a state change a sleeper cares about. Without this
+	// channel the loop would notice it only on the next poll interval, which is the
+	// difference between waking on the event and polling for it.
+	SUBAGENT_STEP_RESULT_EVENT,
 	SUBAGENT_ASYNC_COMPLETE_EVENT,
 	SUBAGENT_FOREGROUND_COMPLETE_EVENT,
 	SUBAGENT_CONTROL_EVENT,
