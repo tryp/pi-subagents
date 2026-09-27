@@ -68,7 +68,11 @@ def parse_itemize(output: str) -> tuple[list[str], list[str]]:
         code, path = item[0], item[1].strip()
         if code.startswith("*deleting"):
             extra.append(path)
-        elif code.startswith(">f"):
+        elif code == ">f+++++++++":
+            # The source has a new file; rsync will create it without overwriting
+            # anything in the runtime, so it is clean drift-wise.
+            continue
+        elif code.startswith(">f") and any(flag in "cst" for flag in code[2:5].lower()):
             modified.append(path)
     return sorted(set(extra)), sorted(set(modified))
 

@@ -51,7 +51,7 @@ function writeStamp(f: Fixture): string {
 }
 
 describe("deploy drift CLI", () => {
-	it("treats a missing runtime directory as clean before first deploy", () => {
+	it("treats a missing or empty runtime directory as clean on first deploy", () => {
 		withFixture((f) => {
 			fs.rmSync(f.runtime, { recursive: true });
 			const result = preflight(f);
@@ -61,6 +61,16 @@ describe("deploy drift CLI", () => {
 			const empty = preflight(f);
 			assert.equal(empty.status, 0, empty.stderr);
 			assert.match(empty.stdout, /runtime is empty/);
+		});
+	});
+
+	it("treats a source-only new file as a benign creation, not modified drift", () => {
+		withFixture((f) => {
+			fs.writeFileSync(path.join(f.source, "new-source-file.txt"), "created on source\n");
+			const result = preflight(f);
+			assert.equal(result.status, 0, result.stderr);
+			assert.doesNotMatch(result.stdout, /new-source-file\.txt/);
+			assert.match(result.stdout, /matches/);
 		});
 	});
 
