@@ -35,7 +35,7 @@ export interface TimerApi {
 }
 
 export interface StepResultEventBridgeDeps {
-	/** Active runs to watch. Only queued/running runs publish new results. */
+	/** Runs to watch. Terminal runs are included: their final flush holds the result line. */
 	runs: () => Iterable<StepResultEventSource>;
 	events: { emit(channel: string, payload: unknown): void };
 	fs?: {
@@ -86,21 +86,36 @@ export function createStepResultEventBridge(deps: StepResultEventBridgeDeps): St
 		const event = parsed as Record<string, unknown>;
 		if (event.type !== STEP_RESULT_EVENT_TYPE) return;
 		if (typeof event.stepIndex !== "number") return;
-		deps.events.emit(SUBAGENT_STEP_RESULT_EVENT, {
+		const payload = {
 			runId: typeof event.runId === "string" ? event.runId : run.asyncId,
 			stepIndex: event.stepIndex,
 			agent: typeof event.agent === "string" ? event.agent : undefined,
 			state: typeof event.state === "string" ? event.state : undefined,
 			resultPath: typeof event.resultPath === "string" ? event.resultPath : undefined,
 			ts: typeof event.ts === "number" ? event.ts : undefined,
-		});
+		};
+		try {
+			deps.events.emit(SUBAGENT_STEP_RESULT_EVENT, payload);
+		} catch (error) {
+			// Emitting through a replaced or reloaded session context throws. A wake
+			// signal that cannot be delivered must not take the extension down with it;
+			// the consumers' own state checks still find the published result.
+			deps.logError?.(`Failed to emit ${SUBAGENT_STEP_RESULT_EVENT} for run ${payload.runId}`, error);
+		}
 	};
 
 	const tick = () => {
 		if (disposed) return;
 		const seen = new Set<string>();
 		for (const run of deps.runs()) {
-			if (run.status !== "queued" && run.status !== "running") continue;
+			// Every run still in the map is read, terminal runs included. The runner
+			// appends the published-result line in the same final flush that carries the
+			// run's completion events, so by the time that line is on disk the run has
+			// already flipped to `complete`: filtering on status here silently dropped
+			// exactly the line this bridge exists to deliver. Measured live - a
+			// 0.9s-granularity debug trace showed the last tick reading four lines
+			// (message_end/turn_end/agent_end/agent_settled) and then stopping, with
+			// `subagent.step.result.completed` in the unread remainder.
 			seen.add(run.asyncId);
 			const file = path.join(run.asyncDir, EVENTS_FILE_NAME);
 			let content: string;

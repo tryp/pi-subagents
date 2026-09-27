@@ -109,14 +109,23 @@ describe("step result event bridge", () => {
 		}
 	});
 
-	it("ignores runs that are no longer active", () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-step-events-inactive-"));
+	it("reads a terminal run's final flush, which is where the result line lands", () => {
+		// Regression: the runner appends the published-result line in the same last burst
+		// as the run's completion events, so the run is already `complete` when that line
+		// hits disk. Filtering on a running status dropped exactly that line, and the
+		// live trace showed the bridge reading four other lines and stopping.
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-step-events-terminal-"));
 		try {
 			const asyncDir = path.join(root, "run-b");
 			fs.mkdirSync(asyncDir, { recursive: true });
 			fs.writeFileSync(
 				path.join(asyncDir, "events.jsonl"),
-				`${JSON.stringify(stepLine(0, { runId: "run-b" }))}\n`,
+				[
+					JSON.stringify({ type: "subagent.step.completed", runId: "run-b", stepIndex: 0 }),
+					JSON.stringify(stepLine(0, { runId: "run-b" })),
+					JSON.stringify({ type: "subagent.run.completed", runId: "run-b" }),
+					"",
+				].join("\n"),
 			);
 			const emitted: unknown[] = [];
 			const bridge = createStepResultEventBridge({
@@ -125,10 +134,66 @@ describe("step result event bridge", () => {
 				timers: { setInterval: () => 1, clearInterval: () => {} },
 			});
 			bridge.tick();
-			assert.equal(emitted.length, 0, "a terminal run notifies through run completion, not this channel");
+			assert.equal(emitted.length, 1, "the terminal flush must still be read");
+			assert.equal((emitted[0] as { stepIndex: number }).stepIndex, 0);
 			bridge.dispose();
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("lets go of a run once it leaves the map", () => {
+		// Cursors are per-run state; a run that is gone is not read again even though its
+		// log still exists on disk.
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-step-events-dropped-"));
+		try {
+			const asyncDir = path.join(root, "run-c");
+			fs.mkdirSync(asyncDir, { recursive: true });
+			const file = path.join(asyncDir, "events.jsonl");
+			fs.writeFileSync(file, `${JSON.stringify(stepLine(0, { runId: "run-c" }))}\n`);
+			let active = true;
+			const emitted: unknown[] = [];
+			const bridge = createStepResultEventBridge({
+				runs: () => (active ? [{ asyncId: "run-c", asyncDir, status: "running" }] : []),
+				events: { emit: (_channel, payload) => emitted.push(payload) },
+				timers: { setInterval: () => 1, clearInterval: () => {} },
+			});
+			bridge.tick();
+			active = false;
+			bridge.tick();
+			// Re-adding it starts from offset 0 again rather than replaying from a stale
+			// cursor, which is what makes a long-lived parent safe.
+			active = true;
+			bridge.tick();
+			assert.deepEqual(
+				emitted.map((entry) => (entry as { stepIndex: number }).stepIndex),
+				[0, 0],
+			);
+			bridge.dispose();
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("survives an emit that throws, since a stale session context does", () => {
+		const f = fixture();
+		try {
+			const bridge = createStepResultEventBridge({
+				runs: () => [{ ...RUN, asyncDir: f.asyncDir }],
+				events: {
+					emit: () => {
+						throw new Error("This extension ctx is stale after session replacement or reload.");
+					},
+				},
+				timers: { setInterval: () => 1, clearInterval: () => {} },
+				logError: () => {},
+			});
+			f.publish(stepLine(0));
+			bridge.tick();
+			bridge.tick();
+			bridge.dispose();
+		} finally {
+			fs.rmSync(f.root, { recursive: true, force: true });
 		}
 	});
 
