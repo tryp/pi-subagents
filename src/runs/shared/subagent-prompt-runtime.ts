@@ -346,6 +346,9 @@ export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
 		watcherRestartTimer: null,
 		resultFileCoalescer: { schedule: () => false, clear: () => {} },
 	} as unknown as SubagentState;
+	// No supervisor checkpoint here: this runtime only ever runs inside a child pi
+	// started with `--mode json -p` (see pi-args.ts), where hasUI is false and the
+	// parent-side gate in wait-tool.ts would drop the budget anyway.
 	if (typeof pi.registerTool === "function") registerWaitTool(pi, waitState, waitToolEnabled);
 	let nativeSupervisorClientRegistered = false;
 	let nativeSupervisorFallbackRegistered = false;

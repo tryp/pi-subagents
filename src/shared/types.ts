@@ -421,15 +421,20 @@ interface ProgressSummary {
 }
 
 export interface SupervisorCheckpoint {
-	/** Canonical root run id used by public status, steer, and wait controls. */
-	runId: string;
+	/**
+	 * Canonical root run id used by public status, steer, and wait controls.
+	 * Absent when an untargeted wait had no single run to name: several active
+	 * runs, or provider work with no async run at all.
+	 */
+	runId?: string;
 	/** Runtime elapsed duration when the foreground detachment was triggered. */
 	elapsedMs: number;
 	/** Active child state captured at the checkpoint. */
 	activeChildSummary: {
 		total: number;
 		children: Array<{
-			agent: string;
+			/** Absent when the run was active but had not reported a working step. */
+			agent?: string;
 			index: number;
 			status: "running" | "detached";
 			currentTool?: string;
@@ -437,9 +442,11 @@ export interface SupervisorCheckpoint {
 	};
 	reason: "supervisor_checkpoint";
 	suggestedActions: {
-		status: { tool: "subagent"; action: "status"; runId: string };
-		steer: { tool: "subagent"; action: "steer"; runId: string; childIndex: number; message: string };
-		wait: { tool: "subagent_wait"; runId: string; barrier: "consume-result" };
+		/** Absent when no single run id could be named. */
+		status?: { tool: "subagent"; action: "status"; runId: string };
+		steer?: { tool: "subagent"; action: "steer"; runId: string; childIndex: number; message: string };
+		/** No runId continues the wait in the same (untargeted) scope. */
+		wait: { tool: "subagent_wait"; runId?: string; barrier: "consume-result" };
 	};
 }
 

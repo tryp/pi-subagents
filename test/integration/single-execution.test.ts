@@ -2495,8 +2495,8 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.ok((result.supervisorCheckpoint?.elapsedMs ?? 0) >= 80);
 		assert.equal(result.supervisorCheckpoint?.reason, "supervisor_checkpoint");
 		assert.deepEqual(result.supervisorCheckpoint?.activeChildSummary.children[0], { agent: "echo", index: 0, status: "detached" });
-		assert.equal(result.supervisorCheckpoint?.suggestedActions.status.runId, "sync-wake-integration");
-		assert.equal(result.supervisorCheckpoint?.suggestedActions.steer.childIndex, 0);
+		assert.equal(result.supervisorCheckpoint?.suggestedActions.status?.runId, "sync-wake-integration");
+		assert.equal(result.supervisorCheckpoint?.suggestedActions.steer?.childIndex, 0);
 		assert.equal(result.supervisorCheckpoint?.suggestedActions.wait.barrier, "consume-result");
 		assert.match(result.finalOutput ?? "", /Sync wake: foreground runtime budget exceeded/);
 		assert.match(result.outputSaveError ?? "", /not finalized/);

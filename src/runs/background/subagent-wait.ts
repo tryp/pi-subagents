@@ -470,20 +470,24 @@ function resultWithSupervisorCheckpoint(
 }
 
 function checkpointActions(
-	runId: string,
+	runId: string | undefined,
 	elapsedMs: number,
 	children: SupervisorCheckpoint["activeChildSummary"]["children"],
 ): SupervisorCheckpoint {
 	return {
-		runId,
+		...(runId === undefined ? {} : { runId }),
 		elapsedMs,
 		activeChildSummary: { total: children.length, children },
 		reason: "supervisor_checkpoint",
-		suggestedActions: {
-			status: { tool: "subagent", action: "status", runId },
-			steer: { tool: "subagent", action: "steer", runId, childIndex: children[0]?.index ?? 0, message: "Provide the smallest next step or ask for a decision." },
-			wait: { tool: "subagent_wait", runId, barrier: "consume-result" },
-		},
+		// Without a run id there is nothing to target: only the wait itself can
+		// continue the same (untargeted) scope.
+		suggestedActions: runId === undefined
+			? { wait: { tool: "subagent_wait", barrier: "consume-result" } }
+			: {
+				status: { tool: "subagent", action: "status", runId },
+				steer: { tool: "subagent", action: "steer", runId, childIndex: children[0]?.index ?? 0, message: "Provide the smallest next step or ask for a decision." },
+				wait: { tool: "subagent_wait", runId, barrier: "consume-result" },
+			},
 	};
 }
 
@@ -734,15 +738,21 @@ export async function waitForSubagents(
 			);
 		}
 		if (deps.checkpointMs !== undefined && deps.checkpointMs > 0 && elapsedMs >= deps.checkpointMs) {
-			const runIdForActions = runId ?? activeInitialRuns[0]?.id ?? "session";
+			// Only name a run the caller can re-target: the requested run, or the single
+			// active one. An untargeted wait over several runs (or over provider work with
+			// no async run at all) has no single id, and inventing one would send the next
+			// status/steer call somewhere this wait was never tracking.
+			const runIdForActions = runId ?? (activeInitialRuns.length === 1 ? activeInitialRuns[0].id : undefined);
 			const activeChildren: SupervisorCheckpoint["activeChildSummary"]["children"] = [];
 			for (const run of activeInitialRuns) {
 				// Step status never includes "queued" (that is a run state); only pending
 				// and running steps are still working.
 				const runningSteps = run.steps.filter((step) => step.status === "running" || step.status === "pending");
 				if (runningSteps.length === 0) {
+					// A run can be active with no working step (between chain steps, or before
+					// the runner writes steps). Its mode is a launch shape, not an agent name,
+					// so report the run without an agent rather than naming the wrong one.
 					activeChildren.push({
-						agent: run.mode,
 						index: activeChildren.length,
 						status: "running",
 						...(run.currentTool ? { currentTool: run.currentTool } : {}),
@@ -767,8 +777,11 @@ export async function waitForSubagents(
 			}
 			const checkpoint = checkpointActions(runIdForActions, elapsedMs, activeChildren);
 			const views = resultsForTerminalReturn(earlyResults);
+			const actionHint = runIdForActions === undefined
+				? " Continue waiting with subagent_wait({ barrier: \"consume-result\" }) or inspect the active runs with subagent status."
+				: ` Check with subagent({ action: "status", runId: "${runIdForActions}" }) or continue waiting with subagent_wait({ runId: "${runIdForActions}", barrier: "consume-result" }).`;
 			return resultWithSupervisorCheckpoint(
-				`Supervisor checkpoint after ${formatDuration(elapsedMs)}: this wait is NOT a completion; the work continues. Still active: ${stillActive}. Check with subagent({ action: "status", runId: "${runIdForActions}" }) or continue waiting with subagent_wait({ runId: "${runIdForActions}", barrier: "consume-result" }).${formatStepResultViews(views, "\n")}`,
+				`Supervisor checkpoint after ${formatDuration(elapsedMs)}: this wait is NOT a completion; the work continues. Still active: ${stillActive}.${actionHint}${formatStepResultViews(views, "\n")}`,
 				views,
 				checkpoint,
 			);

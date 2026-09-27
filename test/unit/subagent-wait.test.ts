@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 import { WAIT_TOOL_ENABLED_ENV, resolveWaitToolConfig, waitForSubagents, type SubagentWaitDeps } from "../../src/runs/background/subagent-wait.ts";
 import { SUBAGENT_STEP_RESULT_EVENT, type SubagentState } from "../../src/shared/types.ts";
-import { interactiveCheckpointMs } from "../../src/runs/background/wait-tool.ts";
+import { interactiveCheckpointMs, registerWaitTool } from "../../src/runs/background/wait-tool.ts";
 
 function writeStatus(asyncRoot: string, runId: string, state: string, extra: object = {}): void {
 	const dir = path.join(asyncRoot, runId);
@@ -595,6 +595,161 @@ describe("subagent_wait tool", () => {
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
+	});
+
+	it("names a run for the follow-up actions only when the wait can target one", async () => {
+		const scenarios = [
+			{ name: "one active run", runs: ["run-a"], expectedRunId: "run-a" },
+			{ name: "two active runs", runs: ["run-a", "run-b"], expectedRunId: undefined },
+		] as const;
+		for (const scenario of scenarios) {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-checkpoint-target-"));
+			try {
+				const asyncRoot = path.join(root, "runs");
+				const state = makeState("sess-1");
+				for (const [index, runId] of scenario.runs.entries()) {
+					writeStatus(asyncRoot, runId, "running", {
+						sessionId: "sess-1",
+						pid: 999_999 - index,
+						steps: [{ agent: "worker", index: 0, status: "running" }],
+					});
+				}
+				let clock = 0;
+				const result = await waitForSubagents({ until: "all-terminal", timeoutMs: 5_000 }, undefined, baseDeps(root, state, {
+					now: () => clock,
+					checkpointMs: 500,
+					sleep: async (ms) => { clock += ms; },
+				}));
+
+				const checkpoint = result.details?.supervisorCheckpoint;
+				assert.equal(checkpoint?.reason, "supervisor_checkpoint", scenario.name);
+				assert.equal(checkpoint?.runId, scenario.expectedRunId, scenario.name);
+				const text = textOf(result);
+				assert.match(text, /NOT a completion/, scenario.name);
+				assert.match(text, /barrier: "consume-result"/, scenario.name);
+				// An untargeted wait must not point status/steer at one of several runs.
+				assert.deepEqual(checkpoint?.suggestedActions.status, scenario.expectedRunId === undefined ? undefined : { tool: "subagent", action: "status", runId: scenario.expectedRunId });
+				assert.equal(checkpoint?.suggestedActions.steer?.runId, scenario.expectedRunId);
+				assert.equal(checkpoint?.suggestedActions.wait.runId, scenario.expectedRunId);
+				if (scenario.expectedRunId === undefined) {
+					assert.doesNotMatch(text, /action: "status", runId/, scenario.name);
+					assert.match(text, /Still active: run-a \(running\), run-b \(running\)/, scenario.name);
+				} else {
+					assert.match(text, /action: "status", runId: "run-a"/, scenario.name);
+				}
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		}
+	});
+
+	it("checkpoints provider-only work without inventing a run id", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-checkpoint-provider-"));
+		try {
+			const state = makeState("sess-1");
+			let clock = 0;
+			const result = await waitForSubagents({ until: "all-terminal", timeoutMs: 5_000 }, undefined, baseDeps(root, state, {
+				now: () => clock,
+				checkpointMs: 500,
+				sleep: async (ms) => { clock += ms; },
+				backgroundWork: {
+					snapshot: () => ({ providers: ["jobs"], items: [{ id: "job-7", sessionId: "sess-1", provider: "jobs" }] }),
+					wakeChannels: () => ["jobs"],
+				},
+			}));
+
+			const checkpoint = result.details?.supervisorCheckpoint;
+			assert.equal(checkpoint?.reason, "supervisor_checkpoint");
+			assert.equal(checkpoint?.runId, undefined, "provider work has no async run id to name");
+			assert.equal(checkpoint?.suggestedActions.status, undefined);
+			assert.equal(checkpoint?.suggestedActions.steer, undefined);
+			assert.deepEqual(checkpoint?.suggestedActions.wait, { tool: "subagent_wait", barrier: "consume-result" });
+			assert.deepEqual(checkpoint?.activeChildSummary.children, [{ agent: "jobs", index: 0, status: "running" }]);
+			const text = textOf(result);
+			assert.match(text, /Still active: jobs\/job-7/);
+			assert.doesNotMatch(text, /action: "status"/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not report a launch mode as a child agent when a run has no working step", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-checkpoint-nostep-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			// A parallel run that is still active but has not reported a running step yet.
+			writeStatus(asyncRoot, "run-between-steps", "running", { sessionId: "sess-1", pid: 999_999, mode: "parallel", steps: [] });
+			let clock = 0;
+			const result = await waitForSubagents({ runId: "run-between-steps", until: "all-terminal", timeoutMs: 5_000 }, undefined, baseDeps(root, state, {
+				now: () => clock,
+				checkpointMs: 500,
+				sleep: async (ms) => { clock += ms; },
+			}));
+
+			assert.deepEqual(result.details?.supervisorCheckpoint?.activeChildSummary.children, [{ index: 0, status: "running" }]);
+			assert.doesNotMatch(textOf(result), /parallel/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("returns a run that needs attention instead of a checkpoint", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-checkpoint-attention-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-blocked", "running", { sessionId: "sess-1", pid: 999_999, activityState: "needs_attention" });
+			let clock = 0;
+			const result = await waitForSubagents({ runId: "run-blocked", until: "all-terminal", timeoutMs: 5_000 }, undefined, baseDeps(root, state, {
+				now: () => clock,
+				checkpointMs: 100,
+				sleep: async (ms) => { clock += ms; },
+			}));
+
+			assert.match(textOf(result), /need attention/i);
+			assert.equal(result.details?.supervisorCheckpoint, undefined);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("returns an abort instead of a checkpoint", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-checkpoint-abort-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-abort", "running", { sessionId: "sess-1", pid: 999_999 });
+			const controller = new AbortController();
+			let clock = 0;
+			const result = await waitForSubagents({ runId: "run-abort", until: "all-terminal", timeoutMs: 5_000 }, controller.signal, baseDeps(root, state, {
+				now: () => clock,
+				checkpointMs: 100,
+				sleep: async (ms) => { clock += ms; controller.abort(); },
+			}));
+
+			assert.equal(result.isError, true);
+			assert.match(textOf(result), /aborted/i);
+			assert.equal(result.details?.supervisorCheckpoint, undefined);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("advertises the checkpoint budget in the tool description only when one is configured", () => {
+		const tools: Array<{ description: string; execute: (...args: unknown[]) => unknown }> = [];
+		const pi = {
+			registerTool: (tool: unknown) => { tools.push(tool as typeof tools[number]); },
+			events: {},
+		} as unknown as Parameters<typeof registerWaitTool>[0];
+
+		registerWaitTool(pi, makeState("sess-1"), true, 240_000);
+		assert.match(tools[0]!.description, /In an interactive session a blocking wait returns a non-error supervisor checkpoint/);
+		assert.match(tools[0]!.description, /single-shot runs have no later turn to land in/);
+		assert.match(tools[0]!.description, /same budget and the same 0-means-off switch/);
+
+		registerWaitTool(pi, makeState("sess-1"), true);
+		assert.doesNotMatch(tools[1]!.description, /supervisor checkpoint/);
 	});
 
 	it("does not checkpoint when the caller omitted the interactive checkpoint budget", async () => {
