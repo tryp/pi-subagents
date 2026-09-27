@@ -35,6 +35,33 @@ The deployed directory is runtime-only and has no Git history. Never edit it
 directly. Make changes in `~/src/pi-subagents`, commit them, deploy, then
 restart or reload Pi.
 
+### Deploying safely (shared runtime, multiple sessions)
+
+The deployed mirror is shared by every running Pi session; more than one
+session may be mid-run against it. The guard makes unsafe deploys impossible;
+these habits make them unnecessary:
+
+- **Never edit the runtime in place.** Deploys refuse drift and preserve it
+  (`tmp/deploy-drift-*`: patch, hashes, listing), and extras always refuse —
+  an in-place edit will survive until someone lands it properly, but the
+  editing session will be debugging a binary that stops matching its code at
+  the next deploy.
+- **Check `make drift` before relying on deployed behavior** (long-running
+  batches, benchmarks). It reads the stamp's tree hash, so it detects
+  post-deploy edits with no checkout involved.
+- **Deploy in a quiet window.** `npm ci` briefly replaces `node_modules`; a
+  child spawned mid-deploy fails. Check that no process is executing from the
+  runtime (`pgrep -f 'agent/local/pi-subagents'`) before deploying when other
+  sessions are active, and re-check after a refusal — a refused deploy means
+  someone's work is in the runtime: read the preserved patch, coordinate,
+  land it through review, then deploy.
+- **`ALLOW_DRIFT=1` is for moving main forward, not for skipping review.** It
+  tolerates modified files only after preserving them; use it when the
+  checkout is clean and main simply advanced past the deployed commit.
+- **Read the stamp.** `make deployed-commit` shows what is deployed, from
+  where, by whom, and the content tree hash — the answer to "what is live
+  right now" that does not require trusting anyone's memory.
+
 ## Try this first
 
 You do not need to create agents, write config, or learn slash commands. After installing, ask Pi for delegation in plain language:
