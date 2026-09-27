@@ -616,8 +616,16 @@ export async function waitForSubagents(
 		if (!selected) {
 			// The requested run may have completed before this wait took its initial
 			// active-run snapshot. Its unconsumed child artifacts are still the
-			// requested outcome, regardless of the selected completion mode.
-			const [terminal] = allRunsForSession({ ...params, id: runId }, deps).filter((run) => run.id === runId);
+			// requested outcome, regardless of the selected completion mode. Ids are
+			// resolved with the same prefix rule the active selection uses.
+			const terminalMatches = allRunsForSession({ ...params, id: runId }, deps)
+				.filter((run) => !ACTIVE_STATES.includes(run.state));
+			const exactTerminal = terminalMatches.filter((run) => run.id === runId);
+			const terminalCandidates = exactTerminal.length > 0 ? exactTerminal : terminalMatches;
+			if (terminalCandidates.length > 1) {
+				return result(`Ambiguous subagent run id prefix "${runId}" matched ${terminalCandidates.length} terminal runs: ${terminalCandidates.map((run) => run.id).join(", ")}. Pass a longer runId.`, true);
+			}
+			const terminal = terminalCandidates[0];
 			const recovered = terminal ? consumeStepResultViews([terminal], deps) : [];
 			if (recovered.length > 0) {
 				return resultWithStepResults(

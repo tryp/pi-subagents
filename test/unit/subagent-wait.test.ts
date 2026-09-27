@@ -1517,7 +1517,46 @@ describe("subagent_wait tool", () => {
 				fs.rmSync(root, { recursive: true, force: true });
 			}
 		});
+
+		it(`until:${until} recovers a terminal run addressed by id prefix`, async () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-terminal-prefix-"));
+			try {
+				const asyncRoot = path.join(root, "runs");
+				const state = makeState("sess-1");
+				writeStatus(asyncRoot, "run-abcdef", "complete", { sessionId: "sess-1" });
+				writeStepResult(asyncRoot, "run-abcdef", 0, "ALPHA");
+
+				const result = await waitForSubagents({ runId: "run-abc", until }, undefined, baseDeps(root, state));
+
+				assert.equal(result.isError, undefined);
+				assert.doesNotMatch(textOf(result), /No active run matched/);
+				assert.match(textOf(result), /ALPHA/);
+				assert.deepEqual(stepResultsOf(result).map((view) => view.stepIndex), [0]);
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		});
 	}
+
+	it("reports an ambiguous terminal id prefix instead of picking one", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-terminal-ambiguous-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			for (const runId of ["run-aaa", "run-aab"]) {
+				writeStatus(asyncRoot, runId, "complete", { sessionId: "sess-1" });
+				writeStepResult(asyncRoot, runId, 0, "ALPHA");
+			}
+
+			const result = await waitForSubagents({ runId: "run-aa", until: "all-terminal" }, undefined, baseDeps(root, state));
+
+			assert.equal(result.isError, true);
+			assert.match(textOf(result), /Ambiguous subagent run id prefix "run-aa" matched 2 terminal runs/);
+			assert.deepEqual(stepResultsOf(result), []);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
 
 	it("reports failed children as failures rather than successes", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-failed-"));
