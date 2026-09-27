@@ -1461,6 +1461,64 @@ describe("subagent_wait tool", () => {
 		}
 	});
 
+	for (const until of ["all-terminal", "first-result"] as const) {
+		it(`until:${until} returns unconsumed results from a run already terminal`, async () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-terminal-results-"));
+			try {
+				const asyncRoot = path.join(root, "runs");
+				const state = makeState("sess-1");
+				writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1" });
+				writeStepResult(asyncRoot, "run-a", 0, "ALPHA");
+				writeStepResult(asyncRoot, "run-a", 1, "BETA");
+
+				const result = await waitForSubagents({ runId: "run-a", until }, undefined, baseDeps(root, state));
+
+				assert.equal(result.isError, undefined);
+				assert.doesNotMatch(textOf(result), /No active run matched/);
+				assert.match(textOf(result), /ALPHA/);
+				assert.match(textOf(result), /BETA/);
+				assert.deepEqual(stepResultsOf(result).map((view) => view.stepIndex), [0, 1]);
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		});
+
+		it(`until:${until} explains when a terminal run has no unconsumed results`, async () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-terminal-consumed-"));
+			try {
+				const asyncRoot = path.join(root, "runs");
+				const state = makeState("sess-1");
+				writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1" });
+				writeStepResult(asyncRoot, "run-a", 0, "ALPHA");
+				const deps = baseDeps(root, state);
+				const first = await waitForSubagents({ runId: "run-a", until: "first-result" }, undefined, deps);
+				assert.match(textOf(first), /ALPHA/);
+
+				const result = await waitForSubagents({ runId: "run-a", until }, undefined, deps);
+
+				assert.equal(result.isError, undefined);
+				assert.match(textOf(result), /Run "run-a" is complete and has no unconsumed per-child results/);
+				assert.doesNotMatch(textOf(result), /No active run matched/);
+				assert.deepEqual(stepResultsOf(result), []);
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		});
+
+		it(`until:${until} keeps the no-match response for an unknown run`, async () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-unknown-"));
+			try {
+				const state = makeState("sess-1");
+				const result = await waitForSubagents({ runId: "missing", until }, undefined, baseDeps(root, state));
+
+				assert.equal(result.isError, undefined);
+				assert.match(textOf(result), /No active run matched "missing"\. Nothing to wait for\./);
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		});
+	}
+
 	it("reports failed children as failures rather than successes", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-failed-"));
 		try {

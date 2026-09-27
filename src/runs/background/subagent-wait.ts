@@ -614,22 +614,19 @@ export async function waitForSubagents(
 		}
 		active = selected?.kind === "async" ? [selected.run] : [];
 		if (!selected) {
-			// A batch can finish before the parent gets to wait for it. With
-			// `until: "first-result"` the finished children's results are still the
-			// thing the caller asked for, so deliver them instead of "nothing to
-			// wait for".
-			if (firstResultMode) {
-				const [terminal] = allRunsForSession({ ...params, id: runId }, deps).filter((run) => run.id === runId);
-				const recovered = terminal ? consumeStepResultViews([terminal], deps) : [];
-				if (recovered.length > 0) {
-					return resultWithStepResults(
-						`Run "${runId}" is no longer active, but ${recovered.length} finished child result(s) had not been consumed yet.\n${formatStepResultViews(recovered, "")}`,
-						recovered,
-					);
-				}
-				if (terminal) {
-					return result(`Run "${runId}" is ${terminal.state} and has no unconsumed per-child results. Use subagent({ action: "status", runId: "${runId}" }) for its joined output.`);
-				}
+			// The requested run may have completed before this wait took its initial
+			// active-run snapshot. Its unconsumed child artifacts are still the
+			// requested outcome, regardless of the selected completion mode.
+			const [terminal] = allRunsForSession({ ...params, id: runId }, deps).filter((run) => run.id === runId);
+			const recovered = terminal ? consumeStepResultViews([terminal], deps) : [];
+			if (recovered.length > 0) {
+				return resultWithStepResults(
+					`Run "${runId}" is no longer active, but ${recovered.length} finished child result(s) had not been consumed yet.\n${formatStepResultViews(recovered, "")}`,
+					recovered,
+				);
+			}
+			if (terminal) {
+				return result(`Run "${runId}" is ${terminal.state} and has no unconsumed per-child results. Use subagent({ action: "status", runId: "${runId}" }) for its joined output.`);
 			}
 			return result(`No active run matched "${runId}". Nothing to wait for.`);
 		}
