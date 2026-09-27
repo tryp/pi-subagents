@@ -82,9 +82,10 @@ describe("launch async decision", () => {
 		);
 	});
 
-	it("still detaches a single-shot run when the user configured asyncByDefault", () => {
-		// An explicit setting is intent, so it overrides the delivery guard; the user
-		// asked for detaching everywhere and may be reading the artifacts themselves.
+	it("keeps a single-shot run inline even when asyncByDefault is configured", () => {
+		// A config flag picks between safe defaults; it cannot authorize a detach that
+		// loses the output. Measured live: an explicit `asyncByDefault: true` in the
+		// user config made every headless launch detach, and the result was gone.
 		assert.deepEqual(
 			resolveLaunchAsync({
 				requested: undefined,
@@ -93,7 +94,7 @@ describe("launch async decision", () => {
 				asyncByDefaultExplicit: true,
 				canDeliverResult: false,
 			}),
-			{ async: true, fallbackToForeground: false },
+			{ async: false, fallbackToForeground: false },
 		);
 	});
 

@@ -7,8 +7,8 @@ export interface ResolvedAsyncDefaultConfig {
 	asyncByDefault: boolean;
 	/**
 	 * True when the user set this themselves (`asyncByDefault` in config or the env
-	 * var) rather than inheriting the built-in default. An explicit setting is
-	 * intent, so it also applies where the built-in default declines to detach.
+	 * var) rather than inheriting the built-in default. Informational: it is not a
+	 * per-call request, so it never authorizes a detach that would lose the result.
 	 */
 	asyncByDefaultExplicit: boolean;
 }
@@ -59,14 +59,18 @@ export interface LaunchAsyncInput {
 	/** Whether an omitted `async` means detach. */
 	asyncByDefault: boolean;
 	/** Whether the user set `asyncByDefault` themselves (see `ResolvedAsyncDefaultConfig`). */
-	asyncByDefaultExplicit?: boolean;
-	/**
+	asyncByDefaultExplicit?: boolean;	/**
 	 * Whether a later turn can still deliver a detached child's result.
 	 *
 	 * True for interactive and RPC sessions, which have a live session after the turn
 	 * ends, and false for `print`/`json` single-shot runs, where `agent_end` is the end
 	 * of the process. Omitted means "assume yes" so callers that never had this
 	 * information keep the previous behavior.
+	 *
+	 * This guards every *defaulted* detach, including one configured through
+	 * `asyncByDefault`. A config flag chooses between the two safe defaults; it is not
+	 * a per-call request, so it cannot turn a launch into one that loses its output.
+	 * Use `async: true` to detach in a single-shot run.
 	 */
 	canDeliverResult?: boolean;
 }
@@ -96,8 +100,10 @@ export interface LaunchAsyncDecision {
  * live, not assumed: a headless run that launched detached ended with the
  * acknowledgement as the last parent message and no child result in the transcript.
  * Blocking cannot lose a result, and in that mode it also cannot overlap anything, so
- * an omitted `async` stays inline there. Setting `asyncByDefault` explicitly opts back
- * into detaching anywhere, and `async: true` always detaches.
+ * an omitted `async` stays inline there. This holds for every defaulted detach,
+ * including one enabled by `asyncByDefault` - a config flag picks between safe
+ * defaults rather than authorizing output loss. An explicit `async: true` always
+ * detaches, which is the way to ask for it in a single-shot run.
  */
 export function resolveLaunchAsync(input: LaunchAsyncInput): LaunchAsyncDecision {
 	const explicit = input.explicit === true;
@@ -107,8 +113,7 @@ export function resolveLaunchAsync(input: LaunchAsyncInput): LaunchAsyncDecision
 	} else if (input.requested === false) {
 		wanted = false;
 	} else {
-		const deliveryPossible = input.asyncByDefaultExplicit === true || input.canDeliverResult !== false;
-		wanted = input.asyncByDefault && deliveryPossible;
+		wanted = input.asyncByDefault && input.canDeliverResult !== false;
 	}
 	if (!wanted) return { async: false, fallbackToForeground: false };
 	if (input.asyncAvailable) return { async: true, fallbackToForeground: false };
