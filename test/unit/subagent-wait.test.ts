@@ -572,6 +572,9 @@ describe("subagent_wait tool", () => {
 			assert.match(text, /barrier: "consume-result"/);
 			assert.equal(result.details?.supervisorCheckpoint?.reason, "supervisor_checkpoint");
 			assert.equal(result.details?.supervisorCheckpoint?.elapsedMs, 500);
+			assert.deepEqual(result.details?.supervisorCheckpoint?.activeChildSummary.children, [
+				{ agent: "worker", index: 0, status: "running" },
+			]);
 			assert.deepEqual(stepResultsOf(result).map((view) => view.output), ["finished child output"]);
 
 			clock = 0;

@@ -737,7 +737,9 @@ export async function waitForSubagents(
 			const runIdForActions = runId ?? activeInitialRuns[0]?.id ?? "session";
 			const activeChildren: SupervisorCheckpoint["activeChildSummary"]["children"] = [];
 			for (const run of activeInitialRuns) {
-				const runningSteps = run.steps.filter((step) => step.status === "running" || step.status === "queued" || step.status === "pending");
+				// Step status never includes "queued" (that is a run state); only pending
+				// and running steps are still working.
+				const runningSteps = run.steps.filter((step) => step.status === "running" || step.status === "pending");
 				if (runningSteps.length === 0) {
 					activeChildren.push({
 						agent: run.mode,
