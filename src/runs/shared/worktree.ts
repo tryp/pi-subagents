@@ -668,8 +668,9 @@ export function cleanupWorktrees(setup: WorktreeSetup): WorktreeCleanupSummary {
 
 export function formatWorktreeSalvageNotice(summary: WorktreeCleanupSummary): string {
 	const pinned = summary.outcomes.filter((outcome) => outcome.salvageRef && outcome.commits.length > 0);
+	const patchOnly = summary.outcomes.filter((outcome) => !outcome.salvageRef && outcome.commits.length === 0 && outcome.workingTreePatch);
 	const warnings = summary.outcomes.filter((outcome) => outcome.inspectionError);
-	if (pinned.length === 0 && warnings.length === 0) return "";
+	if (pinned.length === 0 && patchOnly.length === 0 && warnings.length === 0) return "";
 
 	const lines: string[] = [];
 	if (pinned.length > 0) {
@@ -679,6 +680,10 @@ export function formatWorktreeSalvageNotice(summary: WorktreeCleanupSummary): st
 			const artifact = outcome.artifactDir ? ` (artifacts: ${outcome.artifactDir})` : "";
 			lines.push(`- ${outcome.commits.length} commit(s) pinned from branch ${outcome.branch} as ${outcome.salvageRef}${artifact}. Review before dropping the refs.`);
 		}
+	}
+	for (const outcome of patchOnly) {
+		const artifact = outcome.artifactDir ? ` (artifacts: ${outcome.artifactDir})` : "";
+		lines.push(`Worktree salvage: uncommitted work captured from branch ${outcome.branch}; no commits, so no ref was created${artifact}. Apply the working-tree patch from the artifacts before removing them.`);
 	}
 	for (const outcome of warnings) {
 		const error = outcome.inspectionError!.replace(/[\r\n]+/g, " ").slice(0, 120);

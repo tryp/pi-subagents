@@ -286,6 +286,31 @@ describe("worktree", () => {
 		}
 	});
 
+	it("surfaces a patch-only salvage (uncommitted work, no commits) in the notice", () => {
+		const repoDir = createRepo("pi-worktree-patch-only-");
+		const artifactDir = path.join(repoDir, "artifacts", "step-0");
+		let setup: WorktreeSetup | undefined;
+		try {
+			setup = createWorktrees(repoDir, "patch-only", 1, { artifactDir });
+			const worktree = setup.worktrees[0]!;
+			fs.writeFileSync(path.join(worktree.path, "uncommitted.txt"), "dirty\n");
+			const branch = worktree.branch;
+			const cleanupSummary = cleanupWorktrees(setup);
+			assert.equal(cleanupSummary.outcomes.length, 1);
+			const outcome = cleanupSummary.outcomes[0]!;
+			assert.equal(outcome.commits.length, 0);
+			assert.equal(outcome.salvageRef, undefined);
+			assert.ok(outcome.workingTreePatch, "expected a working-tree patch for dirty work");
+			const notice = formatWorktreeSalvageNotice(cleanupSummary);
+			assert.match(notice, /uncommitted work captured from branch/);
+			assert.match(notice, new RegExp(branch));
+			setup = undefined;
+		} finally {
+			if (setup) cleanupWorktrees(setup);
+			cleanupRepo(repoDir);
+		}
+	});
+
 	it("cleanupWorktrees removes worktrees and branches", () => {
 		const repoDir = createRepo("pi-worktree-cleanup-");
 		let setup: WorktreeSetup | undefined;
