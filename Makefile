@@ -36,7 +36,7 @@ deploy:  ## Mirror this checkout, verify it, and smoke-test the deployed extensi
 	@test -d "$(RUNTIME_DIR)" || mkdir -p "$(RUNTIME_DIR)"
 	@flock -n -E 75 "$(RUNTIME_DIR)/.deploy.lock" $(MAKE) --no-print-directory deploy-locked || { \
 		status=$$?; \
-		if [ $$status -eq 75 ]; then echo "ERROR: another deploy holds $(RUNTIME_DIR)/.deploy.lock" >&2; fi; \
+		if [ $$status -eq 75 ]; then echo "ERROR: another deploy holds $(RUNTIME_DIR)/.deploy.lock" >&2; status=1; fi; \
 		exit $$status; \
 	}
 
