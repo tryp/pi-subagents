@@ -41,6 +41,7 @@ import { inspectSubagentStatus } from "../runs/background/run-status.ts";
 import { resolveWaitToolConfig } from "../runs/background/subagent-wait.ts";
 import { resolveStepNotifyConfig } from "../runs/background/step-notify-config.ts";
 import { registerStepNotifications } from "../runs/background/step-notify.ts";
+import { resolveAsyncByDefault } from "../runs/background/async-default-config.ts";
 import { registerWaitTool } from "../runs/background/wait-tool.ts";
 import { drainOutstandingWork } from "../runs/background/auto-drain.ts";
 import { registerBackgroundWorkProvider } from "../api/background-work.ts";
@@ -214,7 +215,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	const config = loadConfig();
 	const waitToolConfig = resolveWaitToolConfig(config.waitTool);
 	const stepNotifyConfig = resolveStepNotifyConfig(config.stepNotify);
-	const asyncByDefault = config.asyncByDefault === true;
+	const asyncByDefault = resolveAsyncByDefault(config).asyncByDefault;
 	const tempArtifactsDir = getArtifactsDir(null);
 	cleanupAllArtifactDirs(DEFAULT_ARTIFACT_CONFIG.cleanupDays);
 

@@ -270,7 +270,7 @@ const SubagentParamsSchema = Type.Object({
 		description: "'fresh' or 'fork' to branch from parent session. Explicit context overrides every child in the invocation. If omitted, each requested agent uses its own defaultContext; agents without defaultContext: 'fork' run fresh.",
 	})),
 	chainDir: Type.Optional(Type.String({ description: "Persistent chain artifact directory; defaults to user-scoped temp storage." })),
-	async: Type.Optional(Type.Boolean({ description: "Run in background (default: false, or per config)" })),
+	async: Type.Optional(Type.Boolean({ description: "Run in background. Default true: the call returns as soon as the run is detached, and child results arrive on their own. Pass false only when you need the result inline before the next step (a blocking launch cannot overlap anything)." })),
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional run-level timeout in ms for foreground and async/background runs." })),
 	turnBudget: Type.Optional(TurnBudgetOverride),
 	toolBudget: Type.Optional(ToolBudgetOverride),
@@ -305,7 +305,7 @@ const SubagentWaitParamsSchema = Type.Object({
 	runId: Type.Optional(Type.String({ description: "Preferred root run ID or prefix to wait for one specific run." })),
 	id: Type.Optional(Type.String({ description: "Compatibility alias for runId." })),
 	barrier: Type.Optional(Type.String({ enum: ["consume-result", "integration"], description: "Why this explicit blocking barrier is needed. 'integration' means the batch must be finished before you proceed, so it requires all-terminal and any other until value is rejected as contradictory; 'consume-result' keeps the default first-result condition." })),
-	until: Type.Optional(Type.String({ enum: ["any-change", "all-terminal", "first-result"], description: "Completion condition. Default first-result: return as soon as one finished child publishes a result, without waiting for the rest of its batch, and consume it so repeated calls drain the batch one report at a time. all-terminal waits for every selected run. any-change returns when the first tracked run finishes (fleet-manager style, where you spawn a replacement and wait again)." })),
+	until: Type.Optional(Type.String({ enum: ["any-change", "all-terminal", "first-result", "next-event"], description: "Completion condition. next-event is the sleep: return on the first thing that happens - a child publishes a result, a run reaches a terminal state, or a run needs attention - bounded only by timeoutMs. Default first-result: return as soon as one finished child publishes a result, without waiting for the rest of its batch, and consume it so repeated calls drain the batch one report at a time. all-terminal waits for every selected run. any-change returns when the first tracked run finishes (fleet-manager style, where you spawn a replacement and wait again)." })),
 	all: Type.Optional(Type.Boolean({
 		description: "Wait for ALL active runs to finish. Default false, which now means the first-result condition: return as soon as one finished child publishes a result. Use until: \"any-change\" to return at the first tracked run's completion instead, for a fleet manager that spawns a replacement and waits again. Ignored when id targets a single run.",
 	})),

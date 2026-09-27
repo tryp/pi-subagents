@@ -36,6 +36,7 @@ import {
 } from "../../shared/settings.ts";
 import { discoverAvailableSkills, normalizeSkillInput } from "../../agents/skills.ts";
 import { buildAsyncRunnerSteps, executeAsyncChain, executeAsyncSingle, formatAsyncStartedMessage, isAsyncAvailable } from "../background/async-execution.ts";
+import { resolveLaunchAsync } from "../background/async-default-config.ts";
 import type { ScheduledRunAction } from "../background/scheduled-runs.ts";
 import { enqueueChainAppendRequest, readPendingChainAppendRequests, runnerStepOutputNames } from "../background/chain-append.ts";
 import { ChainOutputValidationError, validateChainOutputBindingsWithContext } from "../shared/chain-outputs.ts";
@@ -3662,6 +3663,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		if (normalizedTimeouts.error) return normalizedTimeouts.error;
 		const normalizedParams = normalizedTimeouts.params!;
 
+		const explicitAsyncRequest = normalizedParams.async === true;
 		let effectiveParams = applyForceTopLevelAsyncOverride(
 			normalizedParams,
 			depth,
@@ -3764,7 +3766,22 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		} catch (error) {
 			return toExecutionErrorResult(effectiveParams, error);
 		}
-		const requestedAsync = effectiveParams.async ?? deps.asyncByDefault;
+		// Async is the default, so an unavailable runner must degrade rather than fail:
+		// a parent that never asked for async should still get its result, just inline.
+		// An explicit `async: true` is a request we cannot satisfy and stays an error.
+		const asyncDecision = resolveLaunchAsync({
+			requested: effectiveParams.async,
+			explicit: explicitAsyncRequest,
+			asyncAvailable: isAsyncAvailable(),
+			asyncByDefault: deps.asyncByDefault,
+		});
+		if (asyncDecision.fallbackToForeground) {
+			console.info(
+				"pi-subagents: async is the default but the background runner is unavailable (jiti not found); " +
+				"running this launch in the foreground. Install dependencies or pass async: false to silence this.",
+			);
+		}
+		const requestedAsync = asyncDecision.async;
 		const backgroundRequestedWhileClarifying = (hasChain || hasTasks) && requestedAsync && effectiveParams.clarify === true;
 		const effectiveAsync = requestedAsync && effectiveParams.clarify !== true;
 		const controlConfig = resolveControlConfig(deps.config.control, effectiveParams.control);

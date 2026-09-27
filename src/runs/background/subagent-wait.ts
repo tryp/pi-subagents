@@ -98,7 +98,14 @@ export interface SubagentWaitParams {
 	/** Why this blocking barrier is required. */
 	barrier?: "consume-result" | "integration";
 	/** Preferred completion condition. */
-	until?: "any-change" | "all-terminal" | "first-result";
+	/**
+	 * Preferred completion condition. `"next-event"` is the sleep spelling: return on
+	 * the first thing that happens - a child publishes a result, a tracked run reaches
+	 * a terminal state, or a run needs attention - bounded only by `timeoutMs`. It uses
+	 * the same consumption and dedupe mechanics as `"first-result"`, so repeated calls
+	 * report each child once instead of re-reporting the same one.
+	 */
+	until?: "any-change" | "all-terminal" | "first-result" | "next-event";
 	/**
 	 * When true, block until EVERY active run in this session (or matching `id`)
 	 * is terminal. Default false, which now means the first-result condition: return
@@ -514,7 +521,10 @@ export async function waitForSubagents(
 	}
 	const runId = params.runId ?? params.id;
 	const untilMode = params.until ?? (params.all === true || params.barrier === "integration" ? "all-terminal" : "first-result");
-	const firstResultMode = untilMode === "first-result";
+	// `next-event` shares the first-change machinery: consume published results as they
+	// are reported (that consumption is what stops a second sleep from re-reporting the
+	// same child), return on the first of result/terminal/attention.
+	const firstResultMode = untilMode === "first-result" || untilMode === "next-event";
 	const now = deps.now ?? Date.now;
 	const pollIntervalMs = Math.max(MIN_POLL_INTERVAL_MS, deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS);
 	const timeoutMs = params.timeoutMs !== undefined && params.timeoutMs > 0 ? params.timeoutMs : DEFAULT_TIMEOUT_MS;

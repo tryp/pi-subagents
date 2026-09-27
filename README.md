@@ -1335,10 +1335,12 @@ Controls the parent-facing `subagent` tool description registered at startup. `f
 ### `asyncByDefault`
 
 ```json
-{ "asyncByDefault": true }
+{ "asyncByDefault": false }
 ```
 
-Makes top-level calls use background execution when the request does not explicitly set `async`. Callers can still force foreground with `async: false` unless `forceTopLevelAsync` is enabled.
+**Async is the default.** An omitted `async` detaches the run and returns immediately, for single tasks, batches, and chains alike, because a detached launch is the only shape that can overlap a child's wall clock with the parent's next step. Blocking is the opt-in: pass `async: false` when the result is needed inline before the next step, or set `{ "asyncByDefault": false }` (or `PI_SUBAGENT_ASYNC_DEFAULT=false`) to make blocking the default again for every launch. `clarify: true` keeps a run foreground because the preview UI needs the turn; `forceTopLevelAsync` still forces detaching at depth 0 and clears `clarify`.
+
+When the background runner is unavailable (jiti not installed), a launch that only *defaulted* to async runs in the foreground instead of failing, and says so. An explicit `async: true` is a request that cannot be satisfied and still returns an error.
 
 ### `asyncWidget`
 
