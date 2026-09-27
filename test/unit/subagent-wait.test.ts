@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 import { WAIT_TOOL_ENABLED_ENV, resolveWaitToolConfig, waitForSubagents, type SubagentWaitDeps } from "../../src/runs/background/subagent-wait.ts";
 import { SUBAGENT_STEP_RESULT_EVENT, type SubagentState } from "../../src/shared/types.ts";
+import { interactiveCheckpointMs } from "../../src/runs/background/wait-tool.ts";
 
 function writeStatus(asyncRoot: string, runId: string, state: string, extra: object = {}): void {
 	const dir = path.join(asyncRoot, runId);
@@ -102,6 +103,16 @@ describe("subagent_wait tool", () => {
 		assert.throws(() => resolveWaitToolConfig("false" as never, {}), /config\.waitTool/);
 		assert.throws(() => resolveWaitToolConfig({ enabled: "false" } as never, {}), /config\.waitTool\.enabled/);
 		assert.throws(() => resolveWaitToolConfig(undefined, { [WAIT_TOOL_ENABLED_ENV]: "maybe" }), /PI_SUBAGENT_WAIT_TOOL_ENABLED/);
+	});
+
+	it("keeps the supervisor checkpoint only where a later turn can receive it", () => {
+		// ExtensionContext.hasUI is true for tui and rpc, false for the single-shot
+		// json/print modes that have no later turn to land in.
+		assert.equal(interactiveCheckpointMs(240_000, { hasUI: true }), 240_000);
+		assert.equal(interactiveCheckpointMs(0, { hasUI: true }), 0);
+		assert.equal(interactiveCheckpointMs(240_000, { hasUI: false }), undefined);
+		assert.equal(interactiveCheckpointMs(240_000, undefined), undefined);
+		assert.equal(interactiveCheckpointMs(undefined, { hasUI: true }), undefined);
 	});
 
 	it("returns immediately without polling when waitTool is disabled", async () => {
