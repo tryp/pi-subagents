@@ -383,6 +383,36 @@ describe("subagent_wait tool", () => {
 		}
 	});
 
+	it("checkpoints while waiting for a remembered detached foreground run", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-foreground-checkpoint-"));
+		try {
+			const state = makeState("sess-1");
+			state.foregroundRuns = new Map([["foreground-stuck", {
+				runId: "foreground-stuck",
+				mode: "single",
+				cwd: root,
+				sessionId: "sess-1",
+				updatedAt: 1,
+				children: [{ agent: "reviewer", index: 0, status: "detached", updatedAt: 1 }],
+			}]]);
+			let clock = 0;
+			const result = await waitForSubagents({ id: "foreground-stuck", timeoutMs: 5_000 }, undefined, baseDeps(root, state, {
+				now: () => clock,
+				checkpointMs: 500,
+				sleep: async (ms) => { clock += ms; },
+			}));
+			assert.equal(result.isError, undefined);
+			assert.match(textOf(result), /supervisor checkpoint/i);
+			assert.match(textOf(result), /foreground-stuck.*NOT complete/i);
+			assert.equal(result.details?.supervisorCheckpoint?.reason, "supervisor_checkpoint");
+			assert.deepEqual(result.details?.supervisorCheckpoint?.activeChildSummary.children, [
+				{ agent: "reviewer", index: 0, status: "detached" },
+			]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("does not claim completion when a detached foreground run disappears or the active session changes", async () => {
 		for (const scenario of ["missing", "session-change"] as const) {
 			const root = fs.mkdtempSync(path.join(os.tmpdir(), `pi-wait-foreground-${scenario}-`));
@@ -513,6 +543,103 @@ describe("subagent_wait tool", () => {
 			const text = textOf(result);
 			assert.match(text, /timed out/i);
 			assert.match(text, /run-stuck \(running\)/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("returns a non-error supervisor checkpoint with and consumes published results", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-checkpoint-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-stuck", "running", { sessionId: "sess-1", pid: 999999 });
+			writeStepResult(asyncRoot, "run-stuck", 0, "finished child output");
+			let clock = 0;
+			const deps = baseDeps(root, state, {
+				now: () => clock,
+				checkpointMs: 500,
+				sleep: async (ms) => { clock += ms; },
+			});
+
+			const result = await waitForSubagents({ runId: "run-stuck", until: "all-terminal", timeoutMs: 5_000 }, undefined, deps);
+			assert.equal(result.isError, undefined);
+			const text = textOf(result);
+			assert.match(text, /supervisor checkpoint/i);
+			assert.match(text, /NOT a completion/i);
+			assert.match(text, /run-stuck \(running\)/);
+			assert.match(text, /subagent\(\{ action: "status"/);
+			assert.match(text, /barrier: "consume-result"/);
+			assert.equal(result.details?.supervisorCheckpoint?.reason, "supervisor_checkpoint");
+			assert.equal(result.details?.supervisorCheckpoint?.elapsedMs, 500);
+			assert.deepEqual(stepResultsOf(result).map((view) => view.output), ["finished child output"]);
+
+			clock = 0;
+			const second = await waitForSubagents({ runId: "run-stuck", until: "all-terminal", timeoutMs: 5_000 }, undefined, deps);
+			assert.match(textOf(second), /supervisor checkpoint/i);
+			assert.deepEqual(stepResultsOf(second), [], "a consumed result must not be reported again");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not checkpoint when the caller omitted the interactive checkpoint budget", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-no-checkpoint-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-stuck", "running", { sessionId: "sess-1", pid: 999999 });
+			let clock = 0;
+			const result = await waitForSubagents({ runId: "run-stuck", until: "all-terminal", timeoutMs: 500 }, undefined, baseDeps(root, state, {
+				now: () => clock,
+				sleep: async (ms) => { clock += ms; },
+			}));
+			assert.equal(result.isError, true);
+			assert.match(textOf(result), /timed out/i);
+			assert.doesNotMatch(textOf(result), /supervisor checkpoint/i);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("lets a shorter explicit timeout win over the supervisor checkpoint", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-short-timeout-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-stuck", "running", { sessionId: "sess-1", pid: 999999 });
+			let clock = 0;
+			const result = await waitForSubagents({ runId: "run-stuck", until: "all-terminal", timeoutMs: 500 }, undefined, baseDeps(root, state, {
+				now: () => clock,
+				checkpointMs: 1_000,
+				sleep: async (ms) => { clock += ms; },
+			}));
+			assert.equal(result.isError, true);
+			assert.match(textOf(result), /timed out/i);
+			assert.doesNotMatch(textOf(result), /supervisor checkpoint/i);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("returns a completed batch normally when it finishes before the checkpoint", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-before-checkpoint-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-finished", "running", { sessionId: "sess-1", pid: 999999 });
+			let clock = 0;
+			const result = await waitForSubagents({ runId: "run-finished", until: "all-terminal", timeoutMs: 5_000 }, undefined, baseDeps(root, state, {
+				now: () => clock,
+				checkpointMs: 1_000,
+				sleep: async (ms) => {
+					clock += ms;
+					writeStatus(asyncRoot, "run-finished", "complete", { sessionId: "sess-1" });
+				},
+			}));
+			assert.equal(result.isError, undefined);
+			assert.match(textOf(result), /; done\./i);
+			assert.doesNotMatch(textOf(result), /supervisor checkpoint/i);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

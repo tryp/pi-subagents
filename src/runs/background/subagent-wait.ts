@@ -10,9 +10,9 @@
  *
  * `subagent_wait` closes that gap. It keeps the turn alive until a tracked async
  * run for this session reaches a terminal state (complete / failed / paused),
- * the caller-supplied timeout elapses, or the turn is aborted. Because it awaits
- * inside the turn, the completion the model was told to wait for is actually
- * observed before the tool returns.
+ * the caller-supplied timeout elapses, a supervisor checkpoint returns control,
+ * or the turn is aborted. A checkpoint leaves work running and gives the caller
+ * handles to inspect or continue waiting.
  *
  * By default `subagent_wait` returns as soon as ONE child of a parallel batch has
  * published a result, so a parent can act on a partial batch instead of blocking
@@ -80,6 +80,7 @@ import {
 	type Details,
 	type ForegroundResumeRun,
 	type SubagentState,
+	type SupervisorCheckpoint,
 } from "../../shared/types.ts";
 import { formatDuration } from "../../shared/formatters.ts";
 export { WAIT_TOOL_ENABLED_ENV, resolveWaitToolConfig, type ResolvedWaitToolConfig } from "./wait-config.ts";
@@ -102,7 +103,8 @@ export interface SubagentWaitParams {
 	/**
 	 * Preferred completion condition. `"next-event"` is the sleep spelling: return on
 	 * the first thing that happens - a child publishes a result, a tracked run reaches
-	 * a terminal state, or a run needs attention - bounded only by `timeoutMs`. It uses
+	 * a terminal state, a run needs attention, or the configured checkpoint is reached.
+	 * It uses
 	 * the same consumption and dedupe mechanics as `"first-result"`, so repeated calls
 	 * report each child once instead of re-reporting the same one.
 	 */
@@ -115,7 +117,7 @@ export interface SubagentWaitParams {
 	 * rolling-replacement loop over several runs).
 	 */
 	all?: boolean;
-	/** Give up after this many milliseconds. Defaults to 30 minutes. */
+	/** Upper bound for this call. Defaults to 30 minutes; an interactive supervisor checkpoint may return earlier. */
 	timeoutMs?: number;
 }
 
@@ -133,6 +135,8 @@ export interface SubagentWaitDeps {
 	pollIntervalMs?: number;
 	/** False makes the tool return immediately without blocking active async runs. */
 	enabled?: boolean;
+	/** Interactive supervisor checkpoint budget; omitted for headless auto-drain. */
+	checkpointMs?: number;
 	/** Injectable sleep for tests. */
 	sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 	/** Internal auto-drain mode waits through needs-attention states. */
@@ -453,6 +457,36 @@ function resultWithStepResults(
 	};
 }
 
+function resultWithSupervisorCheckpoint(
+	text: string,
+	views: WaitStepResultView[],
+	checkpoint: SupervisorCheckpoint,
+): AgentToolResult<Details> {
+	const value = resultWithStepResults(text, views);
+	return {
+		...value,
+		details: { ...value.details!, supervisorCheckpoint: checkpoint },
+	};
+}
+
+function checkpointActions(
+	runId: string,
+	elapsedMs: number,
+	children: SupervisorCheckpoint["activeChildSummary"]["children"],
+): SupervisorCheckpoint {
+	return {
+		runId,
+		elapsedMs,
+		activeChildSummary: { total: children.length, children },
+		reason: "supervisor_checkpoint",
+		suggestedActions: {
+			status: { tool: "subagent", action: "status", runId },
+			steer: { tool: "subagent", action: "steer", runId, childIndex: children[0]?.index ?? 0, message: "Provide the smallest next step or ask for a decision." },
+			wait: { tool: "subagent_wait", runId, barrier: "consume-result" },
+		},
+	};
+}
+
 async function waitForDetachedForegroundRun(
 	run: ForegroundResumeRun,
 	signal: AbortSignal | undefined,
@@ -461,6 +495,7 @@ async function waitForDetachedForegroundRun(
 	now: () => number,
 	pollIntervalMs: number,
 	timeoutMs: number,
+	checkpointMs?: number,
 ): Promise<AgentToolResult<Details>> {
 	const initialDetachedIndices = new Set(run.children.filter((child) => child.status === "detached").map((child) => child.index));
 	while (true) {
@@ -481,7 +516,8 @@ async function waitForDetachedForegroundRun(
 		if (signal?.aborted) {
 			return result(`Wait aborted after ${formatDuration(now() - startedAt)}. Remembered foreground run "${run.runId}" remains detached.`, true);
 		}
-		if (now() - startedAt >= timeoutMs) {
+		const elapsedMs = now() - startedAt;
+		if (elapsedMs >= timeoutMs) {
 			const syncWakeDetached = current.children.some((child) => initialDetachedIndices.has(child.index) && child.status === "detached" && child.detachedReason === "sync runtime wake");
 			const guidance = syncWakeDetached
 				? `The child is still running after the sync wake supervisor checkpoint; call subagent_wait({ runId: "${run.runId}", barrier: "consume-result" }) only when its result is needed, or inspect status.`
@@ -489,6 +525,17 @@ async function waitForDetachedForegroundRun(
 			return result(
 				`Wait timed out after ${formatDuration(timeoutMs)} with remembered foreground run "${run.runId}" still detached. ${guidance} Do not resume or launch a replacement while it remains detached.`,
 				true,
+			);
+		}
+		if (checkpointMs !== undefined && checkpointMs > 0 && elapsedMs >= checkpointMs) {
+			const children = current.children
+				.filter((child) => initialDetachedIndices.has(child.index) && child.status === "detached")
+				.map((child) => ({ agent: child.agent, index: child.index, status: "detached" as const }));
+			const checkpoint = checkpointActions(run.runId, elapsedMs, children);
+			return resultWithSupervisorCheckpoint(
+				`Supervisor checkpoint after ${formatDuration(elapsedMs)}: remembered foreground run "${run.runId}" is NOT complete and continues in the background; ${children.length} child(ren) remain detached. Check with subagent({ action: "status", runId: "${run.runId}" }) or continue waiting with subagent_wait({ runId: "${run.runId}", barrier: "consume-result" }).`,
+				[],
+				checkpoint,
 			);
 		}
 		await waitForWake(pollIntervalMs, signal, deps);
@@ -559,7 +606,7 @@ export async function waitForSubagents(
 		}
 		const selected = matches[0];
 		if (selected?.kind === "foreground") {
-			return waitForDetachedForegroundRun(selected.run, signal, deps, startedAt, now, pollIntervalMs, timeoutMs);
+			return waitForDetachedForegroundRun(selected.run, signal, deps, startedAt, now, pollIntervalMs, timeoutMs, deps.checkpointMs);
 		}
 		active = selected?.kind === "async" ? [selected.run] : [];
 		if (!selected) {
@@ -677,12 +724,51 @@ export async function waitForSubagents(
 				true,
 			);
 		}
-		if (now() - startedAt >= timeoutMs) {
+		const elapsedMs = now() - startedAt;
+		if (elapsedMs >= timeoutMs) {
 			const views = resultsForTerminalReturn(earlyResults);
 			return resultWithStepResults(
 				`Wait timed out after ${formatDuration(timeoutMs)} with ${activeInitialRuns.length} async run(s) and ${activeInitialProviderItems.length} provider item(s) still active: ${stillActive}. The work keeps going; call subagent_wait again or inspect subagent status.${formatStepResultViews(views, "\n")}`,
 				views,
 				true,
+			);
+		}
+		if (deps.checkpointMs !== undefined && deps.checkpointMs > 0 && elapsedMs >= deps.checkpointMs) {
+			const runIdForActions = runId ?? activeInitialRuns[0]?.id ?? "session";
+			const activeChildren: SupervisorCheckpoint["activeChildSummary"]["children"] = [];
+			for (const run of activeInitialRuns) {
+				const runningSteps = run.steps.filter((step) => step.status === "running" || step.status === "queued" || step.status === "pending");
+				if (runningSteps.length === 0) {
+					activeChildren.push({
+						agent: run.mode,
+						index: activeChildren.length,
+						status: "running",
+						...(run.currentTool ? { currentTool: run.currentTool } : {}),
+					});
+					continue;
+				}
+				for (const step of runningSteps) {
+					activeChildren.push({
+						agent: step.agent,
+						index: step.index,
+						status: "running",
+						...(step.currentTool ? { currentTool: step.currentTool } : {}),
+					});
+				}
+			}
+			for (const item of activeInitialProviderItems) {
+				activeChildren.push({
+					agent: item.provider,
+					index: activeChildren.length,
+					status: "running",
+				});
+			}
+			const checkpoint = checkpointActions(runIdForActions, elapsedMs, activeChildren);
+			const views = resultsForTerminalReturn(earlyResults);
+			return resultWithSupervisorCheckpoint(
+				`Supervisor checkpoint after ${formatDuration(elapsedMs)}: this wait is NOT a completion; the work continues. Still active: ${stillActive}. Check with subagent({ action: "status", runId: "${runIdForActions}" }) or continue waiting with subagent_wait({ runId: "${runIdForActions}", barrier: "consume-result" }).${formatStepResultViews(views, "\n")}`,
+				views,
+				checkpoint,
 			);
 		}
 		try {

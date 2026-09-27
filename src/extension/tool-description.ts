@@ -24,7 +24,7 @@ EXECUTION (use exactly ONE mode):
 • Optional context: { context: "fresh" | "fork" } (explicit value overrides every child; when omitted, each requested agent uses its own defaultContext, otherwise "fresh"; inspect agent defaults via { action: "list" })
 • Fork thinking: model strings accept a thinking suffix (provider/model:off|minimal|low|medium|high|xhigh|max). Forking over a parent transcript that carries signed Anthropic thinking blocks forces thinking off only when a child's effective primary or fallback model resolves to the Anthropic provider or anthropic-messages API; unresolved models are treated conservatively. The result notes affected children, including on failures. Use fresh context when an Anthropic child needs thinking.
 • Optional timeout: { timeoutMs } sets a run-level max runtime for foreground and async/background runs
-• Sync wake: a single foreground run without an explicit timeout that exceeds the sync-wake budget (default 4 min, config syncWakeMs) returns a wake notice to you while the child keeps running in the background — check it with status/subagent_wait instead of launching a replacement
+• Sync wake/checkpoint: foreground sync runs without an explicit timeout, and blocking subagent_wait calls in an interactive parent session return control after the shared budget (default 4 min, config syncWakeMs; 0 disables) while work continues — use the returned status/results and handles to continue instead of launching a replacement; headless auto-drain runs to completion
 • If { action: "list" } shows proactive skill subagent suggestions, consider a small fresh-context fanout for broad tasks where one of those skills would materially help
 
 CHAIN TEMPLATE VARIABLES (use in task strings):

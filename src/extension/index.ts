@@ -44,6 +44,7 @@ import { registerStepNotifications } from "../runs/background/step-notify.ts";
 import { registerStepResultEvents } from "../runs/background/step-result-events.ts";
 import { resolveAsyncByDefault } from "../runs/background/async-default-config.ts";
 import { registerWaitTool } from "../runs/background/wait-tool.ts";
+import { resolveSupervisorCheckpointMs } from "../runs/shared/sync-wake.ts";
 import { drainOutstandingWork } from "../runs/background/auto-drain.ts";
 import { registerBackgroundWorkProvider } from "../api/background-work.ts";
 import { createSubagentBackgroundWorkProvider } from "../runs/background/background-work-provider.ts";
@@ -485,7 +486,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		"Discover models via subagent({action: \"list\"}) or subagent({action: \"models\"}).",
 	]);
 
-	registerWaitTool(pi, state, waitToolConfig.enabled);
+	registerWaitTool(pi, state, waitToolConfig.enabled, resolveSupervisorCheckpointMs(config));
 
 	pi.on("agent_end", async (_event, ctx) => {
 		if (ctx.hasUI) return;

@@ -24,3 +24,16 @@ export function resolveSyncWakeMs(
 	if (config.syncWakeMs > 0) return config.syncWakeMs;
 	return DEFAULT_SYNC_WAKE_MS;
 }
+
+/**
+ * Resolve the checkpoint budget for an explicit blocking wait.
+ *
+ * This shares the `syncWakeMs` configuration and default with foreground sync
+ * wakes, but a wait's `timeoutMs` is only an upper bound: it must not disable
+ * the checkpoint the way an explicit foreground-run timeout disables sync wake.
+ */
+export function resolveSupervisorCheckpointMs(
+	config: Pick<ExtensionConfig, "syncWakeMs">,
+): number | undefined {
+	return resolveSyncWakeMs(config);
+}

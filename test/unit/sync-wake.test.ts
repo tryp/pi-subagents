@@ -1,7 +1,20 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { DEFAULT_SYNC_WAKE_MS } from "../../src/shared/types.ts";
-import { resolveSyncWakeMs } from "../../src/runs/shared/sync-wake.ts";
+import { resolveSupervisorCheckpointMs, resolveSyncWakeMs } from "../../src/runs/shared/sync-wake.ts";
+
+void describe("resolveSupervisorCheckpointMs", () => {
+	it("uses the shared 4-minute default and configured budget", () => {
+		assert.equal(resolveSupervisorCheckpointMs({}), 240_000);
+		assert.equal(resolveSupervisorCheckpointMs({ syncWakeMs: 60_000 }), 60_000);
+	});
+
+	it("can be disabled with syncWakeMs = 0 and ignores a wait timeout", () => {
+		assert.equal(resolveSupervisorCheckpointMs({ syncWakeMs: 0 }), undefined);
+		// A wait timeout is an upper bound, unlike an explicit foreground-run timeout.
+		assert.equal(resolveSupervisorCheckpointMs({ syncWakeMs: 60_000 }), 60_000);
+	});
+});
 
 void describe("resolveSyncWakeMs", () => {
 	it("defaults to 4 minutes when config is unset", () => {

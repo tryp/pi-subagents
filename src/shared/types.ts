@@ -1269,9 +1269,13 @@ export interface ExtensionConfig {
 	scheduledRuns?: ScheduledRunsConfig;
 	/** Sync single subagent runs detach and return a wake result to the outer
 	 *  agent after this much runtime; the child keeps running in the background
-	 *  and can be checked via subagent status/steer/subagent_wait. Defaults to
+	 *  and can be checked via subagent status/steer/subagent_wait. The same
+	 *  budget bounds one blocking subagent_wait call, which returns published
+	 *  results plus handles to continue waiting. Defaults to
 	 *  DEFAULT_SYNC_WAKE_MS (4 min). Set 0 to disable. Explicit timeoutMs on a
-	 *  call takes precedence and disables the wake. */
+	 *  foreground subagent call takes precedence and disables its sync wake; a
+	 *  subagent_wait timeout is only an upper bound and does not disable its
+	 *  checkpoint. */
 	syncWakeMs?: number;
 }
 
@@ -1284,10 +1288,9 @@ export const DEFAULT_MAX_OUTPUT: Required<MaxOutputConfig> = {
 	lines: 5000,
 };
 
-/** Default sync-runtime wake budget for single foreground subagent runs
- *  (4 minutes). The outer agent is woken with a notice while the child keeps
- *  running in the background — prevents silent 14h stalls on sync calls whose
- *  child never completes. */
+/** Default supervisor checkpoint budget for foreground sync runs and blocking
+ *  subagent_wait calls (4 minutes). A checkpoint returns control while the
+ *  work keeps running, preventing silent stalls on a child that never completes. */
 export const DEFAULT_SYNC_WAKE_MS = 240_000;
 
 export const DEFAULT_ARTIFACT_CONFIG: ArtifactConfig = {

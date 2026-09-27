@@ -49,6 +49,8 @@ export async function drainOutstandingWork(deps: AutoDrainDeps): Promise<void> {
 		if (remainingMs <= 0) {
 			throw new Error(`Auto-drain timed out after ${timeoutMs}ms with background work still active in session '${sessionId}'.`);
 		}
+		// Headless auto-drain has no next interactive turn to receive a checkpoint;
+		// omit checkpointMs so this wait drains the work before agent_end returns.
 		const waitResult = await wait(
 			{ all: true, timeoutMs: remainingMs },
 			undefined,
