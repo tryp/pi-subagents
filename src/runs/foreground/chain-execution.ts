@@ -40,10 +40,10 @@ import { recordRun } from "../shared/run-history.ts";
 import {
 	cleanupWorktrees,
 	createWorktrees,
-	diffWorktrees,
 	findWorktreeTaskCwdConflict,
-	formatWorktreeDiffSummary,
+	formatWorktreeSalvageNotice,
 	formatWorktreeTaskCwdConflict,
+	type WorktreeSalvageOutcome,
 	type WorktreeSetup,
 } from "../shared/worktree.ts";
 import {
@@ -199,19 +199,6 @@ function ensureParallelProgressFile(
 	}
 	writeInitialProgressFile(chainDir);
 	return true;
-}
-
-function appendParallelWorktreeSummary(
-	output: string,
-	worktreeSetup: WorktreeSetup | undefined,
-	diffsDir: string,
-	agents: string[],
-): string {
-	if (!worktreeSetup) return output;
-	const diffs = diffWorktrees(worktreeSetup, agents, diffsDir);
-	const diffSummary = formatWorktreeDiffSummary(diffs);
-	if (!diffSummary) return output;
-	return `${output}\n\n${diffSummary}`;
 }
 
 function resolveChainToolBudget(input: { stepBudget?: ToolBudgetConfig; runBudget?: ResolvedToolBudget; agentBudget?: ToolBudgetConfig; configBudget?: ToolBudgetConfig }): { toolBudget?: ResolvedToolBudget; error?: string } {
@@ -660,6 +647,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 	const deadlineAt = params.deadlineAt ?? (params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined);
 	const globalSemaphore = new Semaphore(params.globalConcurrencyLimit ?? DEFAULT_GLOBAL_CONCURRENCY_LIMIT);
 	let prev = "";
+	const worktreeSalvageOutcomes: WorktreeSalvageOutcome[] = [];
 	let globalTaskIndex = 0;
 	let progressCreated = false;
 
@@ -686,12 +674,25 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 							? { hookPath: params.worktreeSetupHook, timeoutMs: params.worktreeSetupHookTimeoutMs }
 							: undefined,
 						baseDir: params.worktreeBaseDir,
+						artifactDir: path.join(chainDir, "worktree-salvage", `step-${stepIndex}`),
 					});
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					return buildChainExecutionErrorResult(message, makeDetailsInput({ currentStepIndex: stepIndex, currentFlatIndex: globalTaskIndex }));
 				}
 			}
+
+			let cleanupCompleted = false;
+			const cleanupAndCollect = (): void => {
+				if (cleanupCompleted) return;
+				cleanupCompleted = true;
+				if (worktreeSetup) worktreeSalvageOutcomes.push(...cleanupWorktrees(worktreeSetup).outcomes);
+			};
+			const finalizeParallelResult = (result: ChainExecutionResult): ChainExecutionResult => {
+				cleanupAndCollect();
+				const notice = formatWorktreeSalvageNotice({ outcomes: worktreeSalvageOutcomes });
+				return notice ? { ...result, content: [...result.content, { type: "text", text: notice }] } : result;
+			};
 
 			try {
 				const agentNames = step.parallel.map((task) => task.agent);
@@ -703,7 +704,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 						? (path.isAbsolute(behavior.output) ? behavior.output : path.join(chainDir, behavior.output))
 						: undefined;
 					const validationError = validateFileOnlyOutputMode(behavior.outputMode, outputPath, `Parallel chain step ${stepIndex + 1} task ${taskIndex + 1} (${step.parallel[taskIndex]!.agent})`);
-					if (validationError) return buildChainExecutionErrorResult(validationError, makeDetailsInput({ currentStepIndex: stepIndex, currentFlatIndex: globalTaskIndex + taskIndex }));
+					if (validationError) return finalizeParallelResult(buildChainExecutionErrorResult(validationError, makeDetailsInput({ currentStepIndex: stepIndex, currentFlatIndex: globalTaskIndex + taskIndex })));
 				}
 				progressCreated = ensureParallelProgressFile(chainDir, progressCreated, parallelBehaviors);
 				createParallelDirs(chainDir, stepIndex, step.parallel.length, agentNames);
@@ -767,24 +768,24 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				const interruptedIndexInStep = parallelResults.findIndex((result) => result.interrupted);
 				const interrupted = interruptedIndexInStep >= 0 ? parallelResults[interruptedIndexInStep] : undefined;
 				if (interrupted) {
-					return {
+					return finalizeParallelResult({
 						content: [{ type: "text", text: `Chain paused after interrupt at step ${stepIndex + 1} (${interrupted.agent}). Waiting for explicit next action.` }],
 						details: buildChainExecutionDetails(makeDetailsInput({
 							currentStepIndex: stepIndex,
 							currentFlatIndex: globalTaskIndex - step.parallel.length + interruptedIndexInStep,
 						})),
-					};
+					});
 				}
 				const detachedIndexInStep = parallelResults.findIndex((result) => result.detached);
 				const detached = detachedIndexInStep >= 0 ? parallelResults[detachedIndexInStep] : undefined;
 				if (detached) {
-					return {
+					return finalizeParallelResult({
 						content: [{ type: "text", text: `Chain detached for intercom coordination at step ${stepIndex + 1} (${detached.agent}). Reply to the supervisor request first, then wait with subagent_wait({ id: "${runId}" }). Use subagent({ action: "status", id: "${runId}" }) to recover the result; do not resume or launch a replacement while it remains detached.` }],
 						details: buildChainExecutionDetails(makeDetailsInput({
 							currentStepIndex: stepIndex,
 							currentFlatIndex: globalTaskIndex - step.parallel.length + detachedIndexInStep,
 						})),
-					};
+					});
 				}
 
 				const failures = parallelResults
@@ -799,14 +800,14 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 						index: stepIndex,
 						error: errorMsg,
 					});
-					return {
+					return finalizeParallelResult({
 						content: [{ type: "text", text: summary }],
 						isError: true,
 						details: buildChainExecutionDetails(makeDetailsInput({
 							currentStepIndex: stepIndex,
 							currentFlatIndex: globalTaskIndex - step.parallel.length + failures[0]!.originalIndex,
 						})),
-					};
+					});
 				}
 
 				for (let taskIndex = 0; taskIndex < parallelResults.length; taskIndex++) {
@@ -831,14 +832,12 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					};
 				});
 				prev = aggregateParallelOutputs(taskResults);
-				prev = appendParallelWorktreeSummary(
-					prev,
-					worktreeSetup,
-					path.join(chainDir, "worktree-diffs", `step-${stepIndex}`),
-					agentNames,
-				);
 			} finally {
-				if (worktreeSetup) cleanupWorktrees(worktreeSetup);
+				if (!cleanupCompleted) {
+					cleanupAndCollect();
+					const notice = formatWorktreeSalvageNotice({ outcomes: worktreeSalvageOutcomes });
+					if (notice) prev = `${prev}${prev ? "\n\n" : ""}${notice}`;
+				}
 			}
 		} else if (isDynamicParallelStep(step)) {
 			const dynamicStartIndex = globalTaskIndex;
@@ -1322,9 +1321,10 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 	}
 
 	const summary = buildChainSummary(chainSteps, results, chainDir, "completed");
+	const salvageNotice = formatWorktreeSalvageNotice({ outcomes: worktreeSalvageOutcomes });
 
 	return {
-		content: [{ type: "text", text: summary }],
+		content: [{ type: "text", text: salvageNotice ? `${summary}\n\n${salvageNotice}` : summary }],
 		details: buildChainExecutionDetails(makeDetailsInput()),
 	};
 }

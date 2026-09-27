@@ -74,10 +74,10 @@ import { applyForceTopLevelAsyncOverride } from "../background/top-level-async.t
 import {
 	cleanupWorktrees,
 	createWorktrees,
-	diffWorktrees,
 	findWorktreeTaskCwdConflict,
-	formatWorktreeDiffSummary,
+	formatWorktreeSalvageNotice,
 	formatWorktreeTaskCwdConflict,
+	type WorktreeCleanupSummary,
 	type WorktreeSetup,
 } from "../shared/worktree.ts";
 import { resolveSyncWakeMs } from "../shared/sync-wake.ts";
@@ -2371,6 +2371,7 @@ function createParallelWorktreeSetup(
 	setupHook: ExtensionConfig["worktreeSetupHook"],
 	setupHookTimeoutMs: ExtensionConfig["worktreeSetupHookTimeoutMs"],
 	baseDir: ExtensionConfig["worktreeBaseDir"],
+	artifactDir: string,
 ): { setup?: WorktreeSetup; errorResult?: AgentToolResult<Details> } {
 	if (!enabled) return {};
 	try {
@@ -2381,6 +2382,7 @@ function createParallelWorktreeSetup(
 					? { hookPath: setupHook, timeoutMs: setupHookTimeoutMs }
 					: undefined,
 				baseDir,
+				artifactDir,
 			}),
 		};
 	} catch (error) {
@@ -2425,17 +2427,6 @@ function resolveParallelTaskCwd(
 ): string {
 	if (worktreeSetup) return worktreeSetup.worktrees[index]!.agentCwd;
 	return resolveChildCwd(paramsCwd, task.cwd);
-}
-
-function buildParallelWorktreeSuffix(
-	worktreeSetup: WorktreeSetup | undefined,
-	artifactsDir: string,
-	tasks: TaskParam[],
-): string {
-	if (!worktreeSetup) return "";
-	const diffsDir = path.join(artifactsDir, "worktree-diffs");
-	const diffs = diffWorktrees(worktreeSetup, tasks.map((task) => task.agent), diffsDir);
-	return formatWorktreeDiffSummary(diffs);
 }
 
 function findDuplicateParallelOutputPath(input: {
@@ -2787,8 +2778,22 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		deps.config.worktreeSetupHook,
 		deps.config.worktreeSetupHookTimeoutMs,
 		deps.config.worktreeBaseDir,
+		path.join(artifactsDir, "worktree-salvage", "parallel"),
 	);
 	if (errorResult) return errorResult;
+
+	let cleanupCompleted = false;
+	let cleanupSummary: WorktreeCleanupSummary | undefined;
+	const cleanupParallelWorktrees = (): WorktreeCleanupSummary | undefined => {
+		if (cleanupCompleted) return cleanupSummary;
+		cleanupCompleted = true;
+		if (worktreeSetup) cleanupSummary = cleanupWorktrees(worktreeSetup);
+		return cleanupSummary;
+	};
+	const finalizeParallelResult = <T extends { content: Array<{ type: string; text?: string }> }>(result: T): T => {
+		const notice = cleanupParallelWorktrees() ? formatWorktreeSalvageNotice(cleanupSummary!) : "";
+		return notice ? { ...result, content: [...result.content, { type: "text", text: notice }] } as T : result;
+	};
 
 	try {
 		const outputBaseDir = path.join(artifactsDir, "outputs", runId);
@@ -2800,12 +2805,12 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			outputBaseDir,
 			worktreeSetup,
 		});
-		if (duplicateOutputError) return buildParallelModeError(duplicateOutputError);
+		if (duplicateOutputError) return finalizeParallelResult(buildParallelModeError(duplicateOutputError));
 		for (let index = 0; index < tasks.length; index++) {
 			const taskCwd = resolveParallelTaskCwd(tasks[index]!, effectiveCwd, worktreeSetup, index);
 			const outputPath = resolveSingleOutputPath(behaviors[index]?.output, ctx.cwd, taskCwd, outputBaseDir);
 			const validationError = validateFileOnlyOutputMode(behaviors[index]?.outputMode, outputPath, `Parallel task ${index + 1} (${tasks[index]!.agent})`);
-			if (validationError) return buildParallelModeError(validationError);
+			if (validationError) return finalizeParallelResult(buildParallelModeError(validationError));
 		}
 
 		const parallelProgressPrecreated = firstProgressIndex !== -1;
@@ -2887,18 +2892,18 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		});
 		rememberForegroundRun(deps.state, { runId, mode: "parallel", cwd: effectiveCwd, sessionId: data.parentSessionId, results: details.results });
 		if (interrupted) {
-			return {
+			return finalizeParallelResult({
 				content: [{ type: "text", text: `Parallel run paused after interrupt (${interrupted.agent}). Waiting for explicit next action.` }],
 				details,
-			};
+			});
 		}
 		const detachedIndex = results.findIndex((result) => result.detached);
 		const detached = detachedIndex >= 0 ? results[detachedIndex] : undefined;
 		if (detached) {
-			return {
+			return finalizeParallelResult({
 				content: [{ type: "text", text: `Parallel run detached for intercom coordination (${detached.agent}). Reply to the supervisor request first, then wait with subagent_wait({ id: "${runId}" }). Use subagent({ action: "status", id: "${runId}" }) to recover the result; do not resume or launch a replacement while it remains detached.` }],
 				details,
-			};
+			});
 		}
 
 		if (foregroundControl) updateForegroundNestedProjection(foregroundControl);
@@ -2911,13 +2916,12 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			...(foregroundControl?.nestedChildren?.length ? { nestedChildren: foregroundControl.nestedChildren } : {}),
 		});
 		if (intercomReceipt) {
-			return {
+			return finalizeParallelResult({
 				content: [{ type: "text", text: intercomReceipt.text }],
 				details: intercomReceipt.details,
-			};
+			});
 		}
 
-		const worktreeSuffix = buildParallelWorktreeSuffix(worktreeSetup, artifactsDir, tasks);
 		const ok = results.filter((result) => result.exitCode === 0).length;
 		const downgradeNote = backgroundRequestedWhileClarifying ? " (background requested, but clarify kept this run foreground)" : "";
 		const aggregatedOutput = aggregateParallelOutputs(
@@ -2932,16 +2936,14 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		);
 
 		const summary = `${ok}/${results.length} succeeded${downgradeNote}`;
-		const fullContent = worktreeSuffix
-			? `${summary}\n\n${aggregatedOutput}\n\n${worktreeSuffix}`
-			: `${summary}\n\n${aggregatedOutput}`;
+		const fullContent = `${summary}\n\n${aggregatedOutput}`;
 
-		return {
+		return finalizeParallelResult({
 			content: [{ type: "text", text: fullContent }],
 			details,
-		};
+		});
 	} finally {
-		if (worktreeSetup) cleanupWorktrees(worktreeSetup);
+		if (worktreeSetup && !cleanupCompleted) cleanupParallelWorktrees();
 	}
 }
 
@@ -3070,6 +3072,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 				thinkingOverride: thinkingOverrideForTask(params.agent!, 0, modelOverride),
 				maxSubagentDepth,
 				waitToolEnabled: deps.waitToolEnabled,
+				worktree: params.worktree,
 				worktreeSetupHook: deps.config.worktreeSetupHook,
 				worktreeSetupHookTimeoutMs: deps.config.worktreeSetupHookTimeoutMs,
 				worktreeBaseDir: deps.config.worktreeBaseDir,

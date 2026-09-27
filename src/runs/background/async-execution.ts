@@ -180,6 +180,8 @@ interface AsyncSingleParams {
 	availableModels?: AvailableModelInfo[];
 	maxSubagentDepth: number;
 	waitToolEnabled?: boolean;
+	/** Isolate the run in a dedicated git worktree; creation failure fails the run (no silent fallback to the parent cwd). */
+	worktree?: boolean;
 	worktreeSetupHook?: string;
 	worktreeSetupHookTimeoutMs?: number;
 	worktreeBaseDir?: string;

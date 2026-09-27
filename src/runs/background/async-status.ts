@@ -77,6 +77,7 @@ export interface AsyncRunSummary {
 	currentStep?: number;
 	chainStepCount?: number;
 	pendingAppends?: number;
+	salvageRefs?: number;
 	parallelGroups?: AsyncParallelGroupStatus[];
 	steps: AsyncRunStepSummary[];
 	sessionDir?: string;
@@ -233,6 +234,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		currentStep: status.currentStep,
 		...(status.chainStepCount !== undefined ? { chainStepCount: status.chainStepCount } : {}),
 		...(status.pendingAppends !== undefined ? { pendingAppends: status.pendingAppends } : {}),
+		...(status.salvageRefs !== undefined ? { salvageRefs: status.salvageRefs } : {}),
 		...(parallelGroups.length ? { parallelGroups } : {}),
 		steps: summarizedSteps,
 		...(nestedChildren.length ? { nestedChildren } : {}),
@@ -383,7 +385,8 @@ function formatRunHeader(run: AsyncRunSummary): string {
 	const cwd = run.cwd ? shortenPath(run.cwd) : shortenPath(run.asyncDir);
 	const activity = formatActivityFacts(run);
 	const pending = run.pendingAppends ? ` | ${run.pendingAppends} pending append${run.pendingAppends === 1 ? "" : "s"}` : "";
-	return `${run.id} | ${run.state}${activity ? ` | ${activity}` : ""} | ${run.mode} | ${stepLabel}${pending} | ${cwd}`;
+	const salvage = run.salvageRefs && run.salvageRefs > 0 ? ` | salvage: ${run.salvageRefs} ref(s)` : "";
+	return `${run.id} | ${run.state}${activity ? ` | ${activity}` : ""} | ${run.mode} | ${stepLabel}${pending}${salvage} | ${cwd}`;
 }
 
 export function formatAsyncRunList(runs: AsyncRunSummary[], heading = "Active async runs"): string {

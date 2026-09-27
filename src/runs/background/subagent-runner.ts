@@ -85,10 +85,10 @@ import type { TokenUsage } from "../../shared/types.ts";
 import {
 	cleanupWorktrees,
 	createWorktrees,
-	diffWorktrees,
 	findWorktreeTaskCwdConflict,
-	formatWorktreeDiffSummary,
+	formatWorktreeSalvageNotice,
 	formatWorktreeTaskCwdConflict,
+	type WorktreeSalvageOutcome,
 	type WorktreeSetup,
 } from "../shared/worktree.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
@@ -1567,21 +1567,6 @@ function prepareParallelTaskRun(
 	};
 }
 
-function appendParallelWorktreeSummary(
-	previousOutput: string,
-	worktreeSetup: WorktreeSetup | undefined,
-	asyncDir: string,
-	stepIndex: number,
-	group: Extract<RunnerStep, { parallel: SubagentStep[] }>,
-): string {
-	if (!worktreeSetup) return previousOutput;
-	const diffsDir = path.join(asyncDir, "worktree-diffs", `step-${stepIndex}`);
-	const diffs = diffWorktrees(worktreeSetup, group.parallel.map((task) => task.agent), diffsDir);
-	const diffSummary = formatWorktreeDiffSummary(diffs);
-	if (!diffSummary) return previousOutput;
-	return `${previousOutput}\n\n${diffSummary}`;
-}
-
 function ensureParallelProgressFile(cwd: string, group: Extract<RunnerStep, { parallel: SubagentStep[] }>): void {
 	const progressPath = path.join(cwd, "progress.md");
 	if (!group.parallel.some((task) => task.task.includes(`Update progress at: ${progressPath}`))) return;
@@ -1633,6 +1618,8 @@ async function runSubagent(
 	let previousOutput = "";
 	const outputs: ChainOutputMap = {};
 	const results: StepResult[] = [];
+	const worktreeSalvageOutcomes: WorktreeSalvageOutcome[] = [];
+	const seenSalvageRefs = new Set<string>();
 	const overallStartTime = Date.now();
 	const shareEnabled = config.share === true;
 	const asyncDir = config.asyncDir;
@@ -3136,6 +3123,7 @@ async function runSubagent(
 							? { hookPath: config.worktreeSetupHook, timeoutMs: config.worktreeSetupHookTimeoutMs }
 							: undefined,
 						baseDir: config.worktreeBaseDir,
+						artifactDir: path.join(asyncDir, "worktree-salvage", `step-${stepIndex}`),
 					});
 				} catch (error) {
 					const setupError = error instanceof Error ? error.message : String(error);
@@ -3413,7 +3401,6 @@ async function runSubagent(
 						attemptedModels: r.attemptedModels,
 					})),
 				);
-				previousOutput = appendParallelWorktreeSummary(previousOutput, worktreeSetup, asyncDir, stepIndex, group);
 
 				appendJsonl(eventsPath, JSON.stringify({
 					type: "subagent.parallel.completed",
@@ -3427,10 +3414,38 @@ async function runSubagent(
 					break;
 				}
 			} finally {
-				if (worktreeSetup) cleanupWorktrees(worktreeSetup);
+				if (worktreeSetup) {
+					const cleanupSummary = cleanupWorktrees(worktreeSetup);
+					worktreeSalvageOutcomes.push(...cleanupSummary.outcomes);
+					for (const outcome of cleanupSummary.outcomes) {
+						if (outcome.salvageRef && outcome.commits.length > 0) seenSalvageRefs.add(outcome.salvageRef);
+					}
+					if (seenSalvageRefs.size > 0) statusPayload.salvageRefs = seenSalvageRefs.size;
+					statusPayload.lastUpdate = Date.now();
+					writeStatusPayload();
+				}
 			}
 		} else {
 			const seqStep = step as SubagentStep;
+			let seqWorktreeSetup: WorktreeSetup | undefined;
+			let seqStepWorktreeFailed = false;
+			let seqStepWorktreeError: string | undefined;
+			if (seqStep.worktree) {
+				try {
+					seqWorktreeSetup = createWorktrees(cwd, id, 1, {
+						agents: [seqStep.agent],
+						setupHook: config.worktreeSetupHook
+							? { hookPath: config.worktreeSetupHook, timeoutMs: config.worktreeSetupHookTimeoutMs }
+							: undefined,
+						baseDir: config.worktreeBaseDir,
+						artifactDir: path.join(asyncDir, "worktree-salvage"),
+					});
+				} catch (error) {
+					seqStepWorktreeFailed = true;
+					seqStepWorktreeError = error instanceof Error ? error.message : String(error);
+				}
+			}
+			const seqTaskCwd = seqWorktreeSetup ? seqWorktreeSetup.worktrees[0]!.agentCwd : cwd;
 			const stepStartTime = Date.now();
 			statusPayload.currentStep = flatIndex;
 			statusPayload.steps[flatIndex].status = "running";
@@ -3454,8 +3469,20 @@ async function runSubagent(
 			}));
 
 			flushPendingStepSteers(flatIndex);
-			const singleResult = await runSingleStep(seqStep, {
-				previousOutput, placeholder, cwd, sessionEnabled,
+			let singleResult: StepResult;
+			let seqSalvageNotice: string | undefined;
+			if (seqStepWorktreeFailed) {
+				singleResult = {
+					agent: seqStep.agent,
+					output: "",
+					error: `worktree isolation failed: ${seqStepWorktreeError ?? "unknown error"}`,
+					success: false,
+					exitCode: 1,
+				};
+			} else {
+			try {
+				singleResult = await runSingleStep(seqStep, {
+					previousOutput, placeholder, cwd: seqTaskCwd, sessionEnabled,
 				outputs: statusPayload.mode === "single" ? undefined : outputs,
 				sessionDir: config.sessionDir,
 				artifactsDir, artifactConfig, id,
@@ -3481,8 +3508,25 @@ async function runSubagent(
 				onAttemptStart: (attempt) => updateStepModel(flatIndex, attempt.model, attempt.thinking),
 				onChildEvent: (event) => updateStepFromChildEvent(flatIndex, event),
 				onWriterProcess,
-				skipAcceptance: () => timedOut || stopped,
-			});
+					skipAcceptance: () => timedOut || stopped,
+				});
+			} finally {
+				if (seqWorktreeSetup) {
+					const seqCleanup = cleanupWorktrees(seqWorktreeSetup);
+					worktreeSalvageOutcomes.push(...seqCleanup.outcomes);
+					for (const outcome of seqCleanup.outcomes) {
+						if (outcome.salvageRef && outcome.commits.length > 0) seenSalvageRefs.add(outcome.salvageRef);
+					}
+					if (seenSalvageRefs.size > 0) statusPayload.salvageRefs = seenSalvageRefs.size;
+					seqSalvageNotice = formatWorktreeSalvageNotice({ outcomes: seqCleanup.outcomes }) || undefined;
+					statusPayload.lastUpdate = Date.now();
+					writeStatusPayload();
+				}
+			}
+			}
+			if (seqSalvageNotice) {
+				singleResult.output = singleResult.output ? `${singleResult.output}\n\n${seqSalvageNotice}` : seqSalvageNotice;
+			}
 			if (seqStep.sessionFile) {
 				latestSessionFile = seqStep.sessionFile;
 			}
@@ -3647,6 +3691,8 @@ async function runSubagent(
 			truncated = true;
 		}
 	}
+	const worktreeSalvageNotice = formatWorktreeSalvageNotice({ outcomes: worktreeSalvageOutcomes });
+	if (worktreeSalvageNotice) summary = `${summary}${summary ? "\n\n" : ""}${worktreeSalvageNotice}`;
 
 	const resultMode = config.resultMode ?? statusPayload.mode;
 	const totalCost = results.reduce<CostSummary>((sum, result) => ({
@@ -3784,7 +3830,7 @@ async function runSubagent(
 			mode: resultMode,
 			success: !stopped && !timedOut && !turnBudgetExceeded && !interrupted && results.every((r) => r.success),
 			state: stopped ? "stopped" : timedOut || turnBudgetExceeded ? "failed" : interrupted ? "paused" : results.every((r) => r.success) ? "complete" : "failed",
-			summary: stopped ? stopMessage : timedOut ? (timeoutMessage ?? "Subagent timed out.") : turnBudgetExceeded ? (statusPayload.error ?? "Subagent exceeded turn budget.") : interrupted ? "Paused after interrupt. Waiting for explicit next action." : summary,
+			summary: stopped ? `${stopMessage}${worktreeSalvageNotice ? `\n\n${worktreeSalvageNotice}` : ""}` : timedOut ? `${timeoutMessage ?? "Subagent timed out."}${worktreeSalvageNotice ? `\n\n${worktreeSalvageNotice}` : ""}` : turnBudgetExceeded ? `${statusPayload.error ?? "Subagent exceeded turn budget."}${worktreeSalvageNotice ? `\n\n${worktreeSalvageNotice}` : ""}` : interrupted ? `Paused after interrupt. Waiting for explicit next action.${worktreeSalvageNotice ? `\n\n${worktreeSalvageNotice}` : ""}` : summary,
 			...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
 			...(config.deadlineAt !== undefined ? { deadlineAt: config.deadlineAt } : {}),
 			...(statusPayload.turnBudget ? { turnBudget: statusPayload.turnBudget } : {}),
@@ -3826,6 +3872,7 @@ async function runSubagent(
 				watchdog: r.watchdog,
 			})),
 			outputs,
+			...(worktreeSalvageOutcomes.length ? { worktreeSalvage: { outcomes: worktreeSalvageOutcomes } } : {}),
 			workflowGraph: statusPayload.workflowGraph,
 			exitCode: stopped || timedOut || turnBudgetExceeded ? 1 : interrupted || results.every((r) => r.success) ? 0 : 1,
 			timestamp: runEndedAt,

@@ -7,9 +7,9 @@ import { describe, it } from "node:test";
 import {
 	cleanupWorktrees,
 	createWorktrees,
-	diffWorktrees,
 	findWorktreeTaskCwdConflict,
-	formatWorktreeDiffSummary,
+	formatWorktreeSalvageNotice,
+	pruneExpiredSalvageRefs,
 	resolveExpectedWorktreeAgentCwd,
 	type WorktreeSetup,
 } from "../../src/runs/shared/worktree.ts";
@@ -200,39 +200,86 @@ describe("worktree", () => {
 		});
 	});
 
-	it("diffWorktrees captures committed, modified, and new files without staging the node_modules symlink", () => {
-		const repoDir = createRepo("pi-worktree-diff-");
-		const nodeModulesDir = path.join(repoDir, "node_modules");
-		fs.mkdirSync(nodeModulesDir, { recursive: true });
-		fs.writeFileSync(path.join(nodeModulesDir, "fixture.txt"), "fixture\n", "utf-8");
-
+	it("cleanupWorktrees captures uncommitted changes as a working-tree patch", () => {
+		const repoDir = createRepo("pi-worktree-dirty-");
+		const artifactDir = path.join(repoDir, "artifacts", "dirty");
 		let setup: WorktreeSetup | undefined;
 		try {
-			setup = createWorktrees(repoDir, "diff", 1);
+			setup = createWorktrees(repoDir, "dirty", 1, { artifactDir });
+			const worktree = setup.worktrees[0]!;
+			fs.writeFileSync(path.join(worktree.path, "tracked.txt"), "modified\n", "utf-8");
+			fs.writeFileSync(path.join(worktree.path, "new-file.ts"), "export const added = true;\n", "utf-8");
+			const branch = worktree.branch;
+			cleanupWorktrees(setup);
+			setup = undefined;
+
+			assert.equal(fs.existsSync(worktree.path), false);
+			assert.equal(git(repoDir, ["branch", "--list", branch]), "");
+			assert.equal(git(repoDir, ["for-each-ref", "--format=%(refname)", "refs/pi-salvage"]), "");
+			const recordPath = path.join(artifactDir, "run-dirty", "worktree-0.json");
+			const record = JSON.parse(fs.readFileSync(recordPath, "utf-8")) as {
+				uniqueCommits: unknown[];
+				salvageRef?: string;
+				formatPatch?: string;
+				workingTreePatch?: string;
+			};
+			assert.deepEqual(record.uniqueCommits, []);
+			assert.equal(record.salvageRef, undefined);
+			assert.equal(record.formatPatch, undefined);
+			assert.equal(record.workingTreePatch, "worktree-0-working-tree.patch");
+			const patch = fs.readFileSync(path.join(artifactDir, "run-dirty", record.workingTreePatch!), "utf-8");
+			assert.match(patch, /tracked\.txt/);
+			assert.match(patch, /new-file\.ts/);
+		} finally {
+			if (setup) cleanupWorktrees(setup);
+			cleanupRepo(repoDir);
+		}
+	});
+
+	it("cleanupWorktrees separates committed work from uncommitted changes", () => {
+		const repoDir = createRepo("pi-worktree-mixed-");
+		const artifactDir = path.join(repoDir, "artifacts", "mixed");
+		let setup: WorktreeSetup | undefined;
+		try {
+			setup = createWorktrees(repoDir, "mixed", 1, { artifactDir });
 			const worktree = setup.worktrees[0]!;
 			fs.writeFileSync(path.join(worktree.path, "committed.ts"), "export const committed = true;\n", "utf-8");
 			git(worktree.path, ["add", "committed.ts"]);
-			git(worktree.path, ["commit", "-m", "committed change"]);
+			git(worktree.path, ["commit", "-m", "committed worker change"]);
 			fs.writeFileSync(path.join(worktree.path, "tracked.txt"), "modified\n", "utf-8");
-			fs.writeFileSync(path.join(worktree.path, "new-file.ts"), "export const added = true;\n", "utf-8");
+			cleanupWorktrees(setup);
+			setup = undefined;
 
-			const diffsDir = path.join(repoDir, "artifacts", "worktree-diffs");
-			const diffs = diffWorktrees(setup, ["agent-a"], diffsDir);
-			assert.equal(diffs.length, 1);
-			assert.equal(diffs[0]!.agent, "agent-a");
-			assert.equal(diffs[0]!.filesChanged, 3, `expected 3 files, got ${diffs[0]!.filesChanged}`);
-			assert.ok(diffs[0]!.insertions > 0, "expected insertions > 0");
-			assert.ok(fs.existsSync(diffs[0]!.patchPath), "expected patch file to exist");
+			const salvageRefs = git(repoDir, ["for-each-ref", "--format=%(refname)", "refs/pi-salvage"]).split("\n").filter(Boolean);
+			assert.equal(salvageRefs.length, 1);
+			assert.match(salvageRefs[0]!, /^refs\/pi-salvage\/managed\/v1\/\d{13}-mixed-0$/);
+			const commitPatch = fs.readFileSync(path.join(artifactDir, "run-mixed", "worktree-0.patch"), "utf-8");
+			assert.match(commitPatch, /committed worker change/);
+			const recordPath = path.join(artifactDir, "run-mixed", "worktree-0.json");
+			const record = JSON.parse(fs.readFileSync(recordPath, "utf-8")) as { workingTreePatch?: string };
+			assert.equal(record.workingTreePatch, "worktree-0-working-tree.patch");
+			const dirtyPatch = fs.readFileSync(path.join(artifactDir, "run-mixed", record.workingTreePatch!), "utf-8");
+			assert.match(dirtyPatch, /tracked\.txt/);
+			assert.doesNotMatch(dirtyPatch, /committed\.ts/);
+		} finally {
+			if (setup) cleanupWorktrees(setup);
+			cleanupRepo(repoDir);
+		}
+	});
 
-			const patch = fs.readFileSync(diffs[0]!.patchPath, "utf-8");
-			assert.match(patch, /committed\.ts/);
-			assert.match(patch, /tracked\.txt/);
-			assert.match(patch, /new-file\.ts/);
-			assert.doesNotMatch(patch, /diff --git a\/node_modules b\/node_modules/);
+	it("cleanupWorktrees writes no working-tree patch when the worktree is clean", () => {
+		const repoDir = createRepo("pi-worktree-clean-");
+		const artifactDir = path.join(repoDir, "artifacts", "clean");
+		let setup: WorktreeSetup | undefined;
+		try {
+			setup = createWorktrees(repoDir, "clean", 1, { artifactDir });
+			git(setup.worktrees[0]!.path, ["commit", "--allow-empty", "-m", "empty commit"]);
+			cleanupWorktrees(setup);
+			setup = undefined;
 
-			const summary = formatWorktreeDiffSummary(diffs);
-			assert.match(summary, /=== Worktree Changes ===/);
-			assert.match(summary, /Full patches:/);
+			assert.equal(fs.existsSync(path.join(artifactDir, "run-clean", "worktree-0-working-tree.patch")), false);
+			const record = JSON.parse(fs.readFileSync(path.join(artifactDir, "run-clean", "worktree-0.json"), "utf-8")) as { workingTreePatch?: string };
+			assert.equal(record.workingTreePatch, undefined);
 		} finally {
 			if (setup) cleanupWorktrees(setup);
 			cleanupRepo(repoDir);
@@ -246,7 +293,10 @@ describe("worktree", () => {
 			setup = createWorktrees(repoDir, "cleanup", 2);
 			const worktreePaths = setup.worktrees.map((worktree) => worktree.path);
 			const branches = setup.worktrees.map((worktree) => worktree.branch);
-			cleanupWorktrees(setup);
+			const cleanupSummary = cleanupWorktrees(setup);
+			assert.equal(cleanupSummary.outcomes.length, 2);
+			assert.ok(cleanupSummary.outcomes.every((outcome) => outcome.commits.length === 0 && !outcome.salvageRef));
+			assert.equal(formatWorktreeSalvageNotice(cleanupSummary), "");
 			setup = undefined;
 
 			for (const worktreePath of worktreePaths) {
@@ -256,6 +306,120 @@ describe("worktree", () => {
 				const branchResult = git(repoDir, ["branch", "--list", branch]);
 				assert.equal(branchResult.trim(), "", `branch still exists: ${branch}`);
 			}
+			assert.equal(git(repoDir, ["for-each-ref", "--format=%(refname)", "refs/pi-salvage"]), "");
+		} finally {
+			if (setup) cleanupWorktrees(setup);
+			cleanupRepo(repoDir);
+		}
+	});
+
+	it("salvages unique commits before removing the worktree and branch", () => {
+		const repoDir = createRepo("pi-worktree-salvage-");
+		const artifactDir = path.join(repoDir, "artifacts", "step-0");
+		let setup: WorktreeSetup | undefined;
+		try {
+			setup = createWorktrees(repoDir, "salvage", 1, { artifactDir });
+			const worktree = setup.worktrees[0]!;
+			git(worktree.path, ["commit", "--allow-empty", "-m", "recoverable worker change"]);
+			const commit = git(worktree.path, ["rev-parse", "HEAD"]);
+			const branch = worktree.branch;
+			const cleanupSummary = cleanupWorktrees(setup);
+			assert.equal(cleanupSummary.outcomes.length, 1);
+			assert.equal(cleanupSummary.outcomes[0]!.branch, branch);
+			assert.deepEqual(cleanupSummary.outcomes[0]!.commits.map((entry) => entry.sha), [commit]);
+			assert.equal(cleanupSummary.outcomes[0]!.salvageRef, `refs/pi-salvage/managed/v1/${setup.salvageStartedAtMs}-salvage-0`);
+			assert.equal(cleanupSummary.outcomes[0]!.artifactDir, setup.salvageDir);
+			assert.match(formatWorktreeSalvageNotice(cleanupSummary), /1 commit\(s\) pinned from branch/);
+			setup = undefined;
+
+			assert.equal(fs.existsSync(worktree.path), false);
+			assert.equal(git(repoDir, ["branch", "--list", branch]), "");
+			const salvageRefs = git(repoDir, ["for-each-ref", "--format=%(refname)", "refs/pi-salvage"]).split("\n").filter(Boolean);
+			assert.equal(salvageRefs.length, 1);
+			assert.match(salvageRefs[0]!, /^refs\/pi-salvage\/managed\/v1\/\d{13}-salvage-0$/);
+			assert.equal(git(repoDir, ["rev-parse", salvageRefs[0]!]), commit);
+			const recordPath = path.join(artifactDir, "run-salvage", "worktree-0.json");
+			const record = JSON.parse(fs.readFileSync(recordPath, "utf-8")) as { uniqueCommits: Array<{ sha: string; subject: string; authorDate: string }>; salvageRef?: string; workingTreePatch?: string };
+			assert.equal(record.salvageRef, salvageRefs[0]);
+			assert.equal(record.workingTreePatch, undefined);
+			assert.deepEqual(record.uniqueCommits[0], {
+				sha: commit,
+				subject: "recoverable worker change",
+				authorDate: record.uniqueCommits[0]!.authorDate,
+			});
+			assert.match(record.uniqueCommits[0]!.authorDate, /^\d{4}-\d{2}-\d{2}T/);
+			const patch = fs.readFileSync(path.join(artifactDir, "run-salvage", "worktree-0.patch"), "utf-8");
+			assert.match(patch, /recoverable worker change/);
+		} finally {
+			if (setup) cleanupWorktrees(setup);
+			cleanupRepo(repoDir);
+		}
+	});
+
+	it("cleanupWorktrees reports inspection failures and retains the original branch", () => {
+		const repoDir = createRepo("pi-worktree-inspection-error-");
+		const artifactDir = path.join(repoDir, "artifacts");
+		let setup: WorktreeSetup | undefined;
+		try {
+			setup = createWorktrees(repoDir, "inspection-error", 1, { artifactDir });
+			const worktree = setup.worktrees[0]!;
+			const originalBranch = worktree.branch;
+			worktree.branch = "missing-worker-branch";
+			const cleanupSummary = cleanupWorktrees(setup);
+			setup = undefined;
+
+			assert.equal(cleanupSummary.outcomes.length, 1);
+			assert.equal(cleanupSummary.outcomes[0]!.branch, "missing-worker-branch");
+			assert.deepEqual(cleanupSummary.outcomes[0]!.commits, []);
+			assert.ok(cleanupSummary.outcomes[0]!.inspectionError);
+			assert.match(formatWorktreeSalvageNotice(cleanupSummary), /Worktree salvage warning: could not inspect missing-worker-branch/);
+			assert.equal(git(repoDir, ["branch", "--list", originalBranch]), originalBranch);
+			assert.equal(fs.existsSync(worktree.path), false);
+		} finally {
+			if (setup) cleanupWorktrees(setup);
+			cleanupRepo(repoDir);
+		}
+	});
+
+	it("pruneExpiredSalvageRefs drops only expired managed salvage refs", () => {
+		const repoDir = createRepo("pi-worktree-prune-");
+		try {
+			const head = git(repoDir, ["rev-parse", "HEAD"]);
+			const now = Date.now();
+			const day = 24 * 60 * 60 * 1000;
+			const make = (ref: string) => git(repoDir, ["update-ref", ref, head]);
+			make(`refs/pi-salvage/managed/v1/${now - 31 * day}-oldrun-0`);
+			make(`refs/pi-salvage/managed/v1/${now - 30 * day}-boundary-0`);
+			make(`refs/pi-salvage/managed/v1/${now}-fresh-0`);
+			make(`refs/pi-salvage/manual-round4-0`);
+			make(`refs/pi-salvage/legacy-0`);
+			make(`refs/pi-salvage/managed/v1/notanumber-run-0`);
+
+			pruneExpiredSalvageRefs(repoDir, now);
+
+			const remaining = git(repoDir, ["for-each-ref", "--format=%(refname)", "refs/pi-salvage"]).split("\n").filter(Boolean);
+			assert.deepEqual(remaining.sort(), [
+				"refs/pi-salvage/legacy-0",
+				`refs/pi-salvage/managed/v1/${now - 30 * day}-boundary-0`,
+				`refs/pi-salvage/managed/v1/${now}-fresh-0`,
+				"refs/pi-salvage/managed/v1/notanumber-run-0",
+				"refs/pi-salvage/manual-round4-0",
+			]);
+		} finally {
+			cleanupRepo(repoDir);
+		}
+	});
+
+	it("createWorktrees prunes expired managed salvage refs at setup", () => {
+		const repoDir = createRepo("pi-worktree-prune-setup-");
+		let setup: WorktreeSetup | undefined;
+		try {
+			const head = git(repoDir, ["rev-parse", "HEAD"]);
+			const staleEpoch = Date.now() - 31 * 24 * 60 * 60 * 1000;
+			git(repoDir, ["update-ref", `refs/pi-salvage/managed/v1/${staleEpoch}-oldrun-0`, head]);
+			setup = createWorktrees(repoDir, "prune-setup", 1);
+			const remaining = git(repoDir, ["for-each-ref", "--format=%(refname)", "refs/pi-salvage"]).split("\n").filter(Boolean);
+			assert.deepEqual(remaining, []);
 		} finally {
 			if (setup) cleanupWorktrees(setup);
 			cleanupRepo(repoDir);
@@ -285,7 +449,7 @@ describe("worktree", () => {
 		}
 	});
 
-	it("diffWorktrees preserves a tracked node_modules symlink", {
+	it("working-tree capture preserves a tracked node_modules symlink", {
 		skip: process.platform === "win32" ? "Symlink behavior differs on Windows CI environments." : undefined,
 	}, () => {
 		const repoDir = createRepo("pi-worktree-tracked-node-modules-");
@@ -298,16 +462,17 @@ describe("worktree", () => {
 
 		let setup: WorktreeSetup | undefined;
 		try {
-			setup = createWorktrees(repoDir, "tracked-node-modules", 1);
+			setup = createWorktrees(repoDir, "tracked-node-modules", 1, { artifactDir: path.join(repoDir, "artifacts") });
 			assert.equal(setup.worktrees[0]!.nodeModulesLinked, false);
 			assert.deepEqual(setup.worktrees[0]!.syntheticPaths, []);
 			fs.writeFileSync(path.join(setup.worktrees[0]!.path, "tracked.txt"), "modified\n", "utf-8");
-
-			const diffsDir = path.join(repoDir, "artifacts", "tracked-node-modules-diffs");
-			const diffs = diffWorktrees(setup, ["agent-a"], diffsDir);
-			const patch = fs.readFileSync(diffs[0]!.patchPath, "utf-8");
-			assert.doesNotMatch(patch, /diff --git a\/node_modules b\/node_modules/);
 			assert.equal(fs.lstatSync(path.join(setup.worktrees[0]!.path, "node_modules")).isSymbolicLink(), true);
+
+			cleanupWorktrees(setup);
+			setup = undefined;
+			const patch = fs.readFileSync(path.join(repoDir, "artifacts", "run-tracked-node-modules", "worktree-0-working-tree.patch"), "utf-8");
+			assert.match(patch, /tracked\.txt/);
+			assert.doesNotMatch(patch, /diff --git a\/node_modules b\/node_modules/);
 		} finally {
 			if (setup) cleanupWorktrees(setup);
 			cleanupRepo(repoDir);
@@ -419,10 +584,12 @@ process.stdout.write(JSON.stringify({ syntheticPaths: [".env.local"] }));
 		try {
 			setup = createWorktrees(repoDir, "hook-diff", 1, {
 				setupHook: { hookPath: path.relative(repoDir, hookPath) },
+				artifactDir: path.join(repoDir, "artifacts"),
 			});
 			fs.writeFileSync(path.join(setup.worktrees[0]!.path, "tracked.txt"), "modified-by-agent\n", "utf-8");
-			const diffs = diffWorktrees(setup, ["agent-a"], path.join(repoDir, "artifacts", "hook-diff"));
-			const patch = fs.readFileSync(diffs[0]!.patchPath, "utf-8");
+			cleanupWorktrees(setup);
+			setup = undefined;
+			const patch = fs.readFileSync(path.join(repoDir, "artifacts", "run-hook-diff", "worktree-0-working-tree.patch"), "utf-8");
 			assert.match(patch, /tracked\.txt/);
 			assert.doesNotMatch(patch, /\.env\.local/);
 		} finally {

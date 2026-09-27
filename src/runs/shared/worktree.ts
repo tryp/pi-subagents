@@ -7,6 +7,9 @@ export interface WorktreeSetup {
 	cwd: string;
 	worktrees: WorktreeInfo[];
 	baseCommit: string;
+	runId: string;
+	salvageStartedAtMs: number;
+	salvageDir?: string;
 }
 
 interface WorktreeInfo {
@@ -16,17 +19,6 @@ interface WorktreeInfo {
 	index: number;
 	nodeModulesLinked: boolean;
 	syntheticPaths: string[];
-}
-
-interface WorktreeDiff {
-	index: number;
-	agent: string;
-	branch: string;
-	diffStat: string;
-	filesChanged: number;
-	insertions: number;
-	deletions: number;
-	patchPath: string;
 }
 
 interface WorktreeTaskCwdConflict {
@@ -44,6 +36,7 @@ interface CreateWorktreesOptions {
 	agents?: string[];
 	setupHook?: WorktreeSetupHookConfig;
 	baseDir?: string;
+	artifactDir?: string;
 }
 
 interface ResolvedWorktreeSetupHook {
@@ -81,8 +74,11 @@ interface RepoState {
 
 const DEFAULT_WORKTREE_SETUP_HOOK_TIMEOUT_MS = 30000;
 
-function runGit(cwd: string, args: string[]): GitResult {
-	const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf-8" });
+function runGit(cwd: string, args: string[], env?: Record<string, string>): GitResult {
+	const result = spawnSync("git", ["-C", cwd, ...args], {
+		encoding: "utf-8",
+		...(env ? { env: { ...process.env, ...env } } : {}),
+	});
 	return {
 		stdout: result.stdout ?? "",
 		stderr: result.stderr ?? "",
@@ -90,8 +86,8 @@ function runGit(cwd: string, args: string[]): GitResult {
 	};
 }
 
-function runGitChecked(cwd: string, args: string[]): string {
-	const result = runGit(cwd, args);
+function runGitChecked(cwd: string, args: string[], env?: Record<string, string>): string {
+	const result = runGit(cwd, args, env);
 	if (result.status !== 0) {
 		const command = `git -C ${cwd} ${args.join(" ")}`;
 		const message = result.stderr.trim() || result.stdout.trim() || `${command} failed`;
@@ -145,8 +141,8 @@ export function formatWorktreeTaskCwdConflict(
 	return `worktree isolation uses the shared cwd (${sharedCwd}); task ${conflict.index + 1} (${conflict.agent}) sets cwd to ${conflict.cwd}. Remove task-level cwd overrides or disable worktree.`;
 }
 
-function safePatchAgentName(agent: string): string {
-	return agent.replace(/[^\w.-]/g, "_");
+function safeArtifactName(value: string): string {
+	return value.replace(/[^\w.-]/g, "_");
 }
 
 function buildWorktreeBranch(runId: string, index: number): string {
@@ -426,92 +422,187 @@ function removeSyntheticPathsBeforeDiff(worktree: WorktreeInfo): void {
 	}
 }
 
-function emptyDiff(index: number, agent: string, branch: string, patchPath: string): WorktreeDiff {
+function captureWorkingTreePatch(setup: WorktreeSetup, worktree: WorktreeInfo): string | undefined {
+	const artifactPaths = salvageArtifactPaths(setup, worktree);
+	if (!artifactPaths) return undefined;
+
+	const tempIndex = path.join(os.tmpdir(), `pi-salvage-index-${process.pid}-${Date.now()}-${worktree.index}`);
+	try {
+		// Capture uncommitted (staged, unstaged, untracked) changes against the
+		// worktree branch HEAD using a throwaway index, so the agent's real
+		// index is never mutated. Committed work is covered by format-patch.
+		removeSyntheticPathsBeforeDiff(worktree);
+		const env = { GIT_INDEX_FILE: tempIndex };
+		runGitChecked(worktree.path, ["read-tree", "HEAD"], env);
+		runGitChecked(worktree.path, ["add", "-A"], env);
+		const patch = runGitChecked(worktree.path, ["diff", "--binary", "--cached", "HEAD"], env);
+		if (!patch.trim()) return undefined;
+		fs.mkdirSync(setup.salvageDir!, { recursive: true });
+		fs.writeFileSync(artifactPaths.workingTreePatchPath, patch, "utf-8");
+		return path.basename(artifactPaths.workingTreePatchPath);
+	} catch {
+		// Best-effort; committed-work salvage is unaffected.
+		return undefined;
+	} finally {
+		try { fs.rmSync(tempIndex, { force: true }); } catch {
+			// Best-effort temp cleanup.
+		}
+	}
+}
+
+export interface SalvagedCommit {
+	sha: string;
+	subject: string;
+	authorDate: string;
+}
+
+export interface WorktreeSalvageOutcome {
+	index: number;
+	branch: string;
+	commits: SalvagedCommit[];
+	salvageRef?: string;
+	artifactDir?: string;
+	inspectionError?: string;
+	workingTreePatch?: string;
+}
+
+export interface WorktreeCleanupSummary {
+	outcomes: WorktreeSalvageOutcome[];
+}
+
+function collectUniqueCommits(repoCwd: string, baseCommit: string, branch: string): SalvagedCommit[] {
+	const range = `${baseCommit}..${branch}`;
+	const count = Number.parseInt(runGitChecked(repoCwd, ["rev-list", "--count", range]).trim(), 10);
+	if (!Number.isFinite(count) || count === 0) return [];
+	const shas = runGitChecked(repoCwd, ["rev-list", range]).trim().split("\n").filter(Boolean);
+	return shas.map((sha) => {
+		const fields = runGitChecked(repoCwd, ["show", "-s", "--format=%H%x00%s%x00%aI", sha]).split("\0");
+		return {
+			sha: fields[0]?.trim() || sha,
+			subject: fields[1] ?? "",
+			authorDate: fields[2]?.trim() ?? "",
+		};
+	});
+}
+
+function salvageArtifactPaths(setup: WorktreeSetup, worktree: WorktreeInfo): { recordPath: string; patchPath: string; workingTreePatchPath: string } | undefined {
+	if (!setup.salvageDir) return undefined;
 	return {
-		index,
-		agent,
-		branch,
-		diffStat: "",
-		filesChanged: 0,
-		insertions: 0,
-		deletions: 0,
-		patchPath,
+		recordPath: path.join(setup.salvageDir, `worktree-${worktree.index}.json`),
+		patchPath: path.join(setup.salvageDir, `worktree-${worktree.index}.patch`),
+		workingTreePatchPath: path.join(setup.salvageDir, `worktree-${worktree.index}-working-tree.patch`),
 	};
 }
 
-function parseNumstat(numstat: string): { filesChanged: number; insertions: number; deletions: number } {
-	const lines = numstat
-		.split("\n")
-		.map((line) => line.trim())
-		.filter(Boolean);
-	let filesChanged = 0;
-	let insertions = 0;
-	let deletions = 0;
-
-	for (const line of lines) {
-		const [rawInsertions, rawDeletions] = line.split("\t");
-		if (rawInsertions === undefined || rawDeletions === undefined) continue;
-		filesChanged++;
-		if (/^\d+$/.test(rawInsertions)) insertions += parseInt(rawInsertions, 10);
-		if (/^\d+$/.test(rawDeletions)) deletions += parseInt(rawDeletions, 10);
-	}
-
-	return { filesChanged, insertions, deletions };
-}
-
-function captureWorktreeDiff(
+function writeSalvageRecord(
 	setup: WorktreeSetup,
 	worktree: WorktreeInfo,
-	agent: string,
-	patchPath: string,
-): WorktreeDiff {
-	removeSyntheticPathsBeforeDiff(worktree);
-	runGitChecked(worktree.path, ["add", "-A"]);
-	const diffStat = runGitChecked(worktree.path, ["diff", "--cached", "--stat", setup.baseCommit]).trim();
-	const patch = runGitChecked(worktree.path, ["diff", "--cached", setup.baseCommit]);
-	const numstat = runGitChecked(worktree.path, ["diff", "--cached", "--numstat", setup.baseCommit]);
-	fs.writeFileSync(patchPath, patch, "utf-8");
-
-	if (!patch.trim()) {
-		return emptyDiff(worktree.index, agent, worktree.branch, patchPath);
-	}
-
-	const parsed = parseNumstat(numstat);
-	return {
-		index: worktree.index,
-		agent,
-		branch: worktree.branch,
-		diffStat,
-		filesChanged: parsed.filesChanged,
-		insertions: parsed.insertions,
-		deletions: parsed.deletions,
-		patchPath,
-	};
-}
-
-function writeEmptyPatch(patchPath: string): void {
+	uniqueCommits: SalvagedCommit[],
+	salvageRef: string | undefined,
+	inspectionError?: string,
+	workingTreePatch?: string,
+): void {
+	const artifactPaths = salvageArtifactPaths(setup, worktree);
+	if (!artifactPaths) return;
 	try {
-		fs.writeFileSync(patchPath, "", "utf-8");
+		fs.mkdirSync(setup.salvageDir!, { recursive: true });
+		const record: {
+			index: number;
+			branch: string;
+			path: string;
+			baseCommit: string;
+			uniqueCommits: SalvagedCommit[];
+			salvageRef?: string;
+			formatPatch?: string;
+			workingTreePatch?: string;
+			inspectionError?: string;
+		} = {
+			index: worktree.index,
+			branch: worktree.branch,
+			path: worktree.path,
+			baseCommit: setup.baseCommit,
+			uniqueCommits,
+		};
+		if (salvageRef) record.salvageRef = salvageRef;
+		if (uniqueCommits.length > 0) record.formatPatch = path.basename(artifactPaths.patchPath);
+		if (workingTreePatch) record.workingTreePatch = workingTreePatch;
+		if (inspectionError) record.inspectionError = inspectionError;
+		fs.writeFileSync(artifactPaths.recordPath, `${JSON.stringify(record, null, 2)}\n`, "utf-8");
 	} catch {
-		// Diff artifact writing is best-effort in error paths.
+		// Salvage metadata is best-effort; the ref remains the recovery guarantee.
 	}
 }
 
-function cleanupSingleWorktree(repoCwd: string, worktree: WorktreeInfo): void {
-	try { runGitChecked(repoCwd, ["worktree", "remove", "--force", worktree.path]); } catch {
-		// Cleanup is best-effort to avoid masking caller errors.
-	}
-	try { runGitChecked(repoCwd, ["branch", "-D", worktree.branch]); } catch {
-		// Cleanup is best-effort to avoid masking caller errors.
+function writeSalvagePatch(setup: WorktreeSetup, worktree: WorktreeInfo): void {
+	const artifactPaths = salvageArtifactPaths(setup, worktree);
+	if (!artifactPaths) return;
+	try {
+		const patch = runGitChecked(setup.cwd, ["format-patch", "--stdout", `${setup.baseCommit}..${worktree.branch}`]);
+		fs.mkdirSync(setup.salvageDir!, { recursive: true });
+		fs.writeFileSync(artifactPaths.patchPath, patch, "utf-8");
+	} catch {
+		// The salvage ref and JSON metadata are retained even if patch writing fails.
 	}
 }
 
-function hasWorktreeChanges(diff: WorktreeDiff): boolean {
-	return diff.filesChanged > 0 || diff.insertions > 0 || diff.deletions > 0 || diff.diffStat.trim().length > 0;
+function cleanupSingleWorktree(setup: WorktreeSetup, worktree: WorktreeInfo): WorktreeSalvageOutcome {
+	const outcome: WorktreeSalvageOutcome = {
+		index: worktree.index,
+		branch: worktree.branch,
+		commits: [],
+		...(setup.salvageDir ? { artifactDir: setup.salvageDir } : {}),
+	};
+	const salvageRef = managedSalvageRef(setup.salvageStartedAtMs, setup.runId, worktree.index);
+	const workingTreePatch = captureWorkingTreePatch(setup, worktree);
+	if (workingTreePatch) outcome.workingTreePatch = workingTreePatch;
+	let uniqueCommits: SalvagedCommit[];
+	try {
+		uniqueCommits = collectUniqueCommits(setup.cwd, setup.baseCommit, worktree.branch);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		outcome.inspectionError = message;
+		writeSalvageRecord(setup, worktree, [], undefined, message, workingTreePatch);
+		try { runGitChecked(setup.cwd, ["worktree", "remove", "--force", worktree.path]); } catch {
+			// Cleanup is best-effort to avoid masking caller errors.
+		}
+		return outcome;
+	}
+
+	outcome.commits = uniqueCommits;
+	if (uniqueCommits.length > 0) {
+		try {
+			runGitChecked(setup.cwd, ["update-ref", salvageRef, worktree.branch]);
+		} catch {
+			outcome.inspectionError = "failed to create salvage ref";
+			writeSalvageRecord(setup, worktree, uniqueCommits, undefined, outcome.inspectionError, workingTreePatch);
+			try { runGitChecked(setup.cwd, ["worktree", "remove", "--force", worktree.path]); } catch {
+				// Cleanup is best-effort to avoid masking caller errors.
+			}
+			return outcome;
+		}
+		outcome.salvageRef = salvageRef;
+		writeSalvageRecord(setup, worktree, uniqueCommits, salvageRef, undefined, workingTreePatch);
+		writeSalvagePatch(setup, worktree);
+	} else {
+		writeSalvageRecord(setup, worktree, [], undefined, undefined, workingTreePatch);
+	}
+
+	try { runGitChecked(setup.cwd, ["worktree", "remove", "--force", worktree.path]); } catch {
+		// Cleanup is best-effort to avoid masking caller errors.
+	}
+	try { runGitChecked(setup.cwd, ["branch", "-D", worktree.branch]); } catch {
+		// Cleanup is best-effort to avoid masking caller errors.
+	}
+	return outcome;
 }
 
 export function createWorktrees(cwd: string, runId: string, count: number, options?: CreateWorktreesOptions): WorktreeSetup {
 	const repo = resolveRepoState(cwd);
+	pruneExpiredSalvageRefs(repo.toplevel);
+	const salvageStartedAtMs = Date.now();
+	const salvageDir = options?.artifactDir
+		? path.join(options.artifactDir, `run-${safeArtifactName(runId)}`)
+		: undefined;
 	const setupHook = resolveWorktreeSetupHook(repo.toplevel, options?.setupHook);
 	const baseDir = resolveWorktreeBaseDir(options?.baseDir, repo.toplevel);
 	const worktrees: WorktreeInfo[] = [];
@@ -534,6 +625,9 @@ export function createWorktrees(cwd: string, runId: string, count: number, optio
 			cwd: repo.toplevel,
 			worktrees,
 			baseCommit: repo.baseCommit,
+			runId,
+			salvageStartedAtMs,
+			salvageDir,
 		});
 		throw error;
 	}
@@ -542,59 +636,101 @@ export function createWorktrees(cwd: string, runId: string, count: number, optio
 		cwd: repo.toplevel,
 		worktrees,
 		baseCommit: repo.baseCommit,
+		runId,
+		salvageStartedAtMs,
+		salvageDir,
 	};
 }
 
-export function diffWorktrees(setup: WorktreeSetup, agents: string[], diffsDir: string): WorktreeDiff[] {
-	try {
-		fs.mkdirSync(diffsDir, { recursive: true });
-	} catch {
-		// Returning no diffs is safer than failing the whole command on artifact-dir issues.
-		return [];
-	}
-
-	const diffs: WorktreeDiff[] = [];
-	for (let index = 0; index < setup.worktrees.length; index++) {
-		const worktree = setup.worktrees[index]!;
-		const agent = agents[index] ?? `task-${index + 1}`;
-		const patchPath = path.join(diffsDir, `task-${index}-${safePatchAgentName(agent)}.patch`);
-		try {
-			diffs.push(captureWorktreeDiff(setup, worktree, agent, patchPath));
-		} catch {
-			// Preserve execution flow; failed diff capture maps to an empty per-task patch.
-			writeEmptyPatch(patchPath);
-			diffs.push(emptyDiff(index, agent, worktree.branch, patchPath));
-		}
-	}
-
-	return diffs;
-}
-
-export function cleanupWorktrees(setup: WorktreeSetup): void {
+export function cleanupWorktrees(setup: WorktreeSetup): WorktreeCleanupSummary {
+	const outcomes: WorktreeSalvageOutcome[] = [];
 	for (let index = setup.worktrees.length - 1; index >= 0; index--) {
-		cleanupSingleWorktree(setup.cwd, setup.worktrees[index]!);
+		try {
+			outcomes.push(cleanupSingleWorktree(setup, setup.worktrees[index]!));
+		} catch (error) {
+			// Preserve the cleanup API's best-effort contract even if unexpected
+			// local inspection/artifact code throws.
+			const worktree = setup.worktrees[index]!;
+			outcomes.push({
+				index: worktree.index,
+				branch: worktree.branch,
+				commits: [],
+				...(setup.salvageDir ? { artifactDir: setup.salvageDir } : {}),
+				inspectionError: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 	try { runGitChecked(setup.cwd, ["worktree", "prune"]); } catch {
 		// Pruning is best-effort cleanup.
 	}
+	return { outcomes };
 }
 
-export function formatWorktreeDiffSummary(diffs: WorktreeDiff[]): string {
-	const changed = diffs.filter(hasWorktreeChanges);
-	if (changed.length === 0) return "";
+export function formatWorktreeSalvageNotice(summary: WorktreeCleanupSummary): string {
+	const pinned = summary.outcomes.filter((outcome) => outcome.salvageRef && outcome.commits.length > 0);
+	const warnings = summary.outcomes.filter((outcome) => outcome.inspectionError);
+	if (pinned.length === 0 && warnings.length === 0) return "";
 
-	const lines: string[] = ["=== Worktree Changes ===", ""];
-	for (const diff of changed) {
-		lines.push(
-			`--- Task ${diff.index + 1} (${diff.agent}): ${diff.filesChanged} files changed, +${diff.insertions} -${diff.deletions} ---`,
-		);
-		if (diff.diffStat.trim().length > 0) {
-			lines.push(diff.diffStat);
+	const lines: string[] = [];
+	if (pinned.length > 0) {
+		const commitCount = pinned.reduce((sum, outcome) => sum + outcome.commits.length, 0);
+		lines.push(`Worktree salvage: ${commitCount} commit(s) pinned across ${pinned.length} branch(es).`);
+		for (const outcome of pinned) {
+			const artifact = outcome.artifactDir ? ` (artifacts: ${outcome.artifactDir})` : "";
+			lines.push(`- ${outcome.commits.length} commit(s) pinned from branch ${outcome.branch} as ${outcome.salvageRef}${artifact}. Review before dropping the refs.`);
 		}
-		lines.push("");
+	}
+	for (const outcome of warnings) {
+		const error = outcome.inspectionError!.replace(/[\r\n]+/g, " ").slice(0, 120);
+		lines.push(`Worktree salvage warning: could not inspect ${outcome.branch} (${error}); branch retained for recovery.`);
+	}
+	return lines.join("\n");
+}
+
+const SALVAGE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const MANAGED_SALVAGE_PREFIX = "refs/pi-salvage/managed/v1/";
+const MANAGED_SALVAGE_REF_PATTERN = /^refs\/pi-salvage\/managed\/v1\/(\d{13})-[\w.-]+-\d+$/;
+
+function managedSalvageRef(runStartedAtMs: number, runId: string, index: number): string {
+	return `${MANAGED_SALVAGE_PREFIX}${runStartedAtMs}-${safeArtifactName(runId)}-${index}`;
+}
+
+export function pruneExpiredSalvageRefs(repoCwd: string, nowMs: number = Date.now()): void {
+	let output: string;
+	try {
+		output = runGitChecked(repoCwd, ["for-each-ref", "--format=%(refname)", MANAGED_SALVAGE_PREFIX]);
+	} catch {
+		// Best-effort maintenance must never block worktree creation.
+		return;
 	}
 
-	const patchesDir = path.dirname(changed[0]!.patchPath);
-	lines.push(`Full patches: ${patchesDir}`);
-	return lines.join("\n").trimEnd();
+	const cutoff = nowMs - SALVAGE_RETENTION_MS;
+	const expired = output
+		.split("\n")
+		.map((ref) => ref.trim())
+		.filter((ref) => {
+			const match = MANAGED_SALVAGE_REF_PATTERN.exec(ref);
+			return match !== null && Number(match[1]) < cutoff;
+		});
+	if (expired.length > 0) dropSalvageRefs(repoCwd, expired);
+}
+
+export function listSalvageRefs(repoCwd: string): string[] {
+	try {
+		return runGitChecked(repoCwd, ["for-each-ref", "--format=%(refname)", "refs/pi-salvage"])
+			.split("\n")
+			.map((ref) => ref.trim())
+			.filter(Boolean);
+	} catch {
+		return [];
+	}
+}
+
+export function dropSalvageRefs(repoCwd: string, refs?: string[]): void {
+	const refsToDrop = refs ?? listSalvageRefs(repoCwd);
+	for (const ref of refsToDrop) {
+		try { runGitChecked(repoCwd, ["update-ref", "-d", ref]); } catch {
+			// Dropping salvage refs is best-effort, like worktree cleanup.
+		}
+	}
 }

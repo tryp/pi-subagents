@@ -277,7 +277,8 @@ function formatAsyncFleetLines(runs: AsyncRunSummary[]): string[] {
 		const activity = formatActivityFacts(run);
 		const cwd = run.cwd ? shortenPath(run.cwd) : shortenPath(run.asyncDir);
 		const pending = run.pendingAppends ? ` | ${run.pendingAppends} pending append${run.pendingAppends === 1 ? "" : "s"}` : "";
-		lines.push(`- ${run.id} | ${run.state}${activity ? ` | ${activity}` : ""} | ${run.mode} | ${progress}${pending} | ${cwd}`);
+		const salvage = run.salvageRefs && run.salvageRefs > 0 ? ` | salvage: ${run.salvageRefs} ref(s)` : "";
+		lines.push(`- ${run.id} | ${run.state}${activity ? ` | ${activity}` : ""} | ${run.mode} | ${progress}${pending}${salvage} | ${cwd}`);
 		lines.push(`  status: subagent({ action: "status", id: "${run.id}" })`);
 		lines.push(`  transcript: subagent({ action: "status", id: "${run.id}", view: "transcript" })`);
 		for (const step of run.steps) {

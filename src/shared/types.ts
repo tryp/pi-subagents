@@ -907,6 +907,7 @@ export interface AsyncStatus {
 	currentStep?: number;
 	chainStepCount?: number;
 	pendingAppends?: number;
+	salvageRefs?: number;
 	parallelGroups?: AsyncParallelGroupStatus[];
 	workflowGraph?: WorkflowGraphSnapshot;
 	steps?: Array<{

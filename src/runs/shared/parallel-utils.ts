@@ -14,6 +14,8 @@ export interface RunnerSubagentStep {
 	outputName?: string;
 	structured?: boolean;
 	cwd?: string;
+	/** Isolate this single step in a dedicated git worktree, created and cleaned up by the runner. */
+	worktree?: boolean;
 	model?: string;
 	thinking?: string;
 	modelCandidates?: string[];

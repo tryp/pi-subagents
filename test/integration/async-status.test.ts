@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { formatAsyncRunList, listAsyncRuns } from "../../src/runs/background/async-status.ts";
+import { inspectSubagentFleet } from "../../src/runs/background/fleet-view.ts";
 
 function createAsyncDir(root: string, id: string, status: Record<string, unknown>): string {
 	const dir = path.join(root, id);
@@ -48,6 +49,45 @@ describe("async status helpers", () => {
 			assert.equal(runs[0]?.steps[1]?.agent, "worker");
 			assert.equal(runs[0]?.steps[1]?.status, "running");
 			assert.match(formatAsyncRunList(runs), /output: .*output-1\.log/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves salvage ref counts and only surfaces positive counts", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-status-salvage-"));
+		try {
+			createAsyncDir(root, "run-salvage", {
+				runId: "run-salvage",
+				mode: "parallel",
+				state: "running",
+				startedAt: 100,
+				lastUpdate: 200,
+				salvageRefs: 2,
+				steps: [{ agent: "worker", status: "running" }],
+			});
+			createAsyncDir(root, "run-clean", {
+				runId: "run-clean",
+				mode: "parallel",
+				state: "running",
+				startedAt: 100,
+				lastUpdate: 200,
+				salvageRefs: 0,
+				steps: [{ agent: "worker", status: "running" }],
+			});
+
+			const runs = listAsyncRuns(root, { states: ["running"] });
+			const salvaged = runs.find((run) => run.id === "run-salvage");
+			const clean = runs.find((run) => run.id === "run-clean");
+			assert.equal(salvaged?.salvageRefs, 2);
+			assert.equal(clean?.salvageRefs, 0);
+			const text = formatAsyncRunList(runs);
+			assert.match(text, /run-salvage[^\n]*salvage: 2 ref\(s\)/);
+			assert.doesNotMatch(text, /run-clean[^\n]*salvage:/);
+			const fleetResult = inspectSubagentFleet({}, { asyncDirRoot: root, resultsDir: path.join(root, "results") });
+			const fleetText = fleetResult.content[0]?.type === "text" ? fleetResult.content[0].text : "";
+			assert.match(fleetText, /run-salvage[^\n]*salvage: 2 ref\(s\)/);
+			assert.doesNotMatch(fleetText, /run-clean[^\n]*salvage:/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

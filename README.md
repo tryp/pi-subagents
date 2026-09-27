@@ -1316,7 +1316,13 @@ Requirements:
 
 By default, worktrees are created under the system temp directory. Set `worktreeBaseDir` in config, or `PI_SUBAGENTS_WORKTREE_DIR` when config is unset, to put them under a stable trusted directory. Missing base directories are created automatically.
 
-After a worktree parallel step completes, per-agent diff stats are appended to the output and full patch files are written to artifacts. Worktrees and temp branches are cleaned up in `finally` blocks.
+After a worktree parallel step completes, worktrees and temp branches are cleaned up in `finally` blocks. Before reclaiming a worktree, cleanup preserves any unlanded work:
+
+- Unique commits on the worktree branch are pinned as `refs/pi-salvage/managed/v1/<run-start-epoch-ms>-<run>-<index>` and written to per-worktree JSON and `git format-patch` artifacts (commit messages and authorship preserved) under the run's artifact directory (`<artifactDir>/run-<runId>/worktree-<index>.{json,patch}`).
+- Uncommitted changes (staged, unstaged, untracked) are captured as a separate `worktree-<index>-working-tree.patch` beside the JSON record, using a throwaway index so the agent's own index is never mutated.
+- If commit inspection or pin creation fails, the worktree is removed but the branch is deliberately left intact: recoverability beats tidiness.
+
+Salvage refs accumulate by design until reviewed; expired pins are pruned automatically — the next worktree-enabled run drops managed refs older than 30 days. Manually created pins (any name outside `managed/v1/`, e.g. `refs/pi-salvage/manual-*`) and legacy-format refs are never auto-dropped. List pins with `git for-each-ref --format='%(refname)' refs/pi-salvage`. Review the JSON/patch artifacts first, then drop pins you no longer need — all at once with `git for-each-ref --format='%(refname)' refs/pi-salvage | while read ref; do git update-ref -d "$ref"; done`, or programmatically with the exported `dropSalvageRefs(repoCwd, refs?)` and `pruneExpiredSalvageRefs(repoCwd, nowMs?)` from `src/runs/shared/worktree.ts`. Runs also surface newly pinned commits in their result output and status/fleet views (`salvage: N ref(s)`); inspect the associated artifacts before dropping those pins.
 
 ## Configuration
 
