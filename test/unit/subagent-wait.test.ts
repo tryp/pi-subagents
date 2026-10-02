@@ -665,6 +665,38 @@ describe("subagent_wait tool", () => {
 		}
 	});
 
+	it("keeps the deferred-run trailer within the message cap for high fanout", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-high-fanout-deltas-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			const runCount = 32;
+			for (let index = 1; index <= runCount; index += 1) {
+				const runId = `run-${String(index).padStart(2, "0")}`;
+				writeStatus(asyncRoot, runId, "running", {
+					sessionId: "sess-1", pid: 999_999 - index, outputFile: "output.log", turnCount: 1, toolCount: 1,
+				});
+				fs.writeFileSync(path.join(asyncRoot, runId, "output.log"), "", "utf-8");
+			}
+			let clock = 0;
+			const deps = baseDeps(root, state, {
+				now: () => clock,
+				checkpointMs: 500,
+				sleep: async (ms) => { clock += ms; },
+			});
+
+			const message = textOf(await waitForSubagents({ until: "all-terminal", timeoutMs: 5_000 }, undefined, deps));
+			assert.ok(message.length <= 2000, `wait message must fit the 2000-character cap; got ${message.length}`);
+			const progress = message.split("Progress:\n")[1]?.split(/ Check with subagent| Continue waiting/)[0] ?? "";
+			const trailer = progress.match(/… (\d+) more active run\(s\) not summarized this checkpoint/);
+			assert.ok(trailer, "deferral trailer must survive the overall wait-message cap");
+			const summarized = new Set([...progress.matchAll(/(run-\d{2}) \(/g)].map((match) => match[1]));
+			assert.equal(summarized.size + Number(trailer[1]), runCount, "summarized and deferred runs must account for the full active set");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("names a run for the follow-up actions only when the wait can target one", async () => {
 		const scenarios = [
 			{ name: "one active run", runs: ["run-a"], expectedRunId: "run-a" },
