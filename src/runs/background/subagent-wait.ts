@@ -495,6 +495,7 @@ function checkpointActions(
 
 const MAX_RUN_PROGRESS_LINE = 200;
 const MAX_PROGRESS_BLOCK = 1600;
+const MIN_PROGRESS_BLOCK = 240;
 const MAX_DEFERRED_RUNS_TRAILER = 80;
 const MAX_WAIT_MESSAGE = 2000;
 
@@ -583,6 +584,7 @@ async function formatRunProgressBlock(
 	store: CheckpointDeltaStore,
 	elapsedMs: number,
 	nowMs: number,
+	maxBlockLength = MAX_PROGRESS_BLOCK,
 ): Promise<string> {
 	// Start at a deferred run next time so the same tail runs are not starved at every checkpoint.
 	const preferredRunId = store.getNextRunId();
@@ -595,7 +597,7 @@ async function formatRunProgressBlock(
 		const separator = lines.length > 0 ? 1 : 0;
 		const remainingAfterThis = orderedRuns.length - index - 1;
 		const trailerReserve = remainingAfterThis > 0 ? MAX_DEFERRED_RUNS_TRAILER : 0;
-		if (used + separator + MAX_RUN_PROGRESS_LINE + trailerReserve > MAX_PROGRESS_BLOCK) {
+		if (used + separator + MAX_RUN_PROGRESS_LINE + trailerReserve > maxBlockLength) {
 			deferred = orderedRuns.length - index;
 			break;
 		}
@@ -875,33 +877,35 @@ export async function waitForSubagents(
 
 		const activeInitialRuns = active.filter((run) => initialAsyncIds.has(run.id));
 		const activeInitialProviderItems = providerActive.filter((item) => initialProviderIds.has(backgroundWorkIdentity(item)));
-		const stillActive = [
+		const stillActiveEntries = [
 			...activeInitialRuns.map((run) => `${oneLine(run.id, 64)} (${oneLine(run.state, 16)})`),
 			...activeInitialProviderItems.map((item) => `${oneLine(item.provider, 40)}/${oneLine(item.id, 64)}`),
-		].join(", ");
+		];
+		// Keep the message head bounded so the progress block and its deferral trailer retain space.
+		const stillActive = stillActiveEntries.length > 8
+			? `${stillActiveEntries.slice(0, 8).join(", ")}, … ${stillActiveEntries.length - 8} more`
+			: stillActiveEntries.join(", ");
 		if (signal?.aborted) {
 			retainActiveRuns(checkpointDeltas, deps);
 			const elapsedMs = now() - startedAt;
-			const progress = await formatRunProgressBlock(activeInitialRuns, checkpointDeltas, elapsedMs, now());
 			const views = resultsForTerminalReturn(earlyResults);
+			const head = `Wait aborted after ${formatDuration(elapsedMs)}. Still active: ${stillActive}.`;
+			const tail = formatStepResultViews(views, "\n");
+			const progressBudget = Math.min(MAX_PROGRESS_BLOCK, Math.max(MIN_PROGRESS_BLOCK, MAX_WAIT_MESSAGE - head.length - tail.length - 1));
+			const progress = await formatRunProgressBlock(activeInitialRuns, checkpointDeltas, elapsedMs, now(), progressBudget);
 			retainActiveRuns(checkpointDeltas, deps);
-			return resultWithStepResults(
-				capWaitMessage(`Wait aborted after ${formatDuration(elapsedMs)}. Still active: ${stillActive}.${progress}${formatStepResultViews(views, "\n")}`),
-				views,
-				true,
-			);
+			return resultWithStepResults(capWaitMessage(`${head}${progress}${tail}`), views, true);
 		}
 		const elapsedMs = now() - startedAt;
 		if (elapsedMs >= timeoutMs) {
 			retainActiveRuns(checkpointDeltas, deps);
-			const progress = await formatRunProgressBlock(activeInitialRuns, checkpointDeltas, elapsedMs, now());
 			const views = resultsForTerminalReturn(earlyResults);
+			const head = `Wait timed out after ${formatDuration(timeoutMs)} with ${activeInitialRuns.length} async run(s) and ${activeInitialProviderItems.length} provider item(s) still active: ${stillActive}.`;
+			const tail = ` The work keeps going; call subagent_wait again or inspect subagent status.${formatStepResultViews(views, "\n")}`;
+			const progressBudget = Math.min(MAX_PROGRESS_BLOCK, Math.max(MIN_PROGRESS_BLOCK, MAX_WAIT_MESSAGE - head.length - tail.length - 1));
+			const progress = await formatRunProgressBlock(activeInitialRuns, checkpointDeltas, elapsedMs, now(), progressBudget);
 			retainActiveRuns(checkpointDeltas, deps);
-			return resultWithStepResults(
-				capWaitMessage(`Wait timed out after ${formatDuration(timeoutMs)} with ${activeInitialRuns.length} async run(s) and ${activeInitialProviderItems.length} provider item(s) still active: ${stillActive}.${progress} The work keeps going; call subagent_wait again or inspect subagent status.${formatStepResultViews(views, "\n")}`),
-				views,
-				true,
-			);
+			return resultWithStepResults(capWaitMessage(`${head}${progress}${tail}`), views, true);
 		}
 		if (deps.checkpointMs !== undefined && deps.checkpointMs > 0 && elapsedMs >= deps.checkpointMs) {
 			retainActiveRuns(checkpointDeltas, deps);
@@ -947,12 +951,11 @@ export async function waitForSubagents(
 			const actionHint = runIdForActions === undefined
 				? " Continue waiting with subagent_wait({ barrier: \"consume-result\" }) or inspect the active runs with subagent status."
 				: ` Check with subagent({ action: "status", runId: "${runIdForActions}" }) or continue waiting with subagent_wait({ runId: "${runIdForActions}", barrier: "consume-result" }).`;
-			const progress = await formatRunProgressBlock(activeInitialRuns, checkpointDeltas, elapsedMs, now());
-			return resultWithSupervisorCheckpoint(
-				capWaitMessage(`Supervisor checkpoint after ${formatDuration(elapsedMs)}: this wait is NOT a completion; the work continues. Still active: ${stillActive}.${progress}${actionHint}${formatStepResultViews(views, "\n")}`),
-				views,
-				checkpoint,
-			);
+			const head = `Supervisor checkpoint after ${formatDuration(elapsedMs)}: this wait is NOT a completion; the work continues. Still active: ${stillActive}.`;
+			const tail = `${actionHint}${formatStepResultViews(views, "\n")}`;
+			const progressBudget = Math.min(MAX_PROGRESS_BLOCK, Math.max(MIN_PROGRESS_BLOCK, MAX_WAIT_MESSAGE - head.length - tail.length - 1));
+			const progress = await formatRunProgressBlock(activeInitialRuns, checkpointDeltas, elapsedMs, now(), progressBudget);
+			return resultWithSupervisorCheckpoint(capWaitMessage(`${head}${progress}${tail}`), views, checkpoint);
 		}
 		try {
 			await waitForWake(pollIntervalMs, signal, deps);
