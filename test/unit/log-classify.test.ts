@@ -14,13 +14,15 @@ void describe("classifyLine", () => {
 			"ReferenceError: name is not defined",
 			"AssertionError: expected true",
 			"ERROR: request failed",
+			"Error: quoted tool output",
+			"error: cannot open file",
 			"[ERROR] request failed",
 			"Uncaught exception in worker",
 		]) assert.equal(classifyLine(line), "err", line);
 	});
 
 	it("classifies warnings and weak error-shaped lines as warn", () => {
-		for (const line of ["WARN: retrying", "[WARNING] slow response", "deprecated API", "build failed", "error fetching package", "Error: quoted tool output"]) {
+		for (const line of ["WARN: retrying", "[WARNING] slow response", "deprecated API", "build failed", "error fetching package"]) {
 			assert.equal(classifyLine(line), "warn", line);
 		}
 	});

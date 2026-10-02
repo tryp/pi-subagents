@@ -8,7 +8,7 @@ export interface LogCounts {
 
 const STRONG_ERROR_PATTERNS: readonly RegExp[] = [
 	/^\s*Traceback\s*\((?:most recent call last|innermost last)\):/i,
-	/^\s*(?:\[(?:ERROR|ERR|FATAL)\]|(?:ERROR|ERR|FATAL)\s*:)/,
+	/^\s*(?:\[(?:ERROR|ERR|FATAL)\]|(?:ERROR|ERR|FATAL)\s*:)/i,
 	/^\s*(?:TypeError|ReferenceError|AssertionError|RangeError|SyntaxError|URIError|EvalError|RuntimeError|ImportError|ModuleNotFoundError|KeyError|ValueError|IndexError|NameError|AttributeError|OSError|IOError|ConnectionError|TimeoutError|Exception|UncaughtException)\s*:/,
 	/\bpanic\s*:/i,
 	/\b(?:segmentation fault|segfault)\b/i,
@@ -20,7 +20,7 @@ const WARNING_PATTERNS: readonly RegExp[] = [
 	/\bdeprecat(?:ed|ion|ions)\b/i,
 ];
 
-// Bare "Error: ..." is intentionally warn-level; tool output commonly quotes errors without signaling child failure.
+// Strong error markers are case-insensitive by design; weak/benign patterns filter quoted noise.
 const WEAK_ERROR_PATTERN = /\b(?:failed|failure|failures|error|errors)\b/i;
 const BENIGN_ERROR_PATTERNS: readonly RegExp[] = [
 	/\b0\s+errors?\b/i,

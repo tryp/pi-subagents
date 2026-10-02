@@ -584,6 +584,7 @@ async function formatRunProgressBlock(
 	elapsedMs: number,
 	nowMs: number,
 ): Promise<string> {
+	// Start at a deferred run next time so the same tail runs are not starved at every checkpoint.
 	const preferredRunId = store.getNextRunId();
 	const preferredIndex = preferredRunId ? runs.findIndex((run) => run.id === preferredRunId) : -1;
 	const orderedRuns = preferredIndex > 0 ? [...runs.slice(preferredIndex), ...runs.slice(0, preferredIndex)] : runs;
@@ -604,7 +605,8 @@ async function formatRunProgressBlock(
 			used += separator + line.length;
 		}
 	}
-	store.setNextRunId(deferred > 0 ? orderedRuns[orderedRuns.length - deferred]!.id : undefined);
+	if (deferred > 0) store.setNextRunId(orderedRuns[orderedRuns.length - deferred]!.id);
+	else if (preferredIndex >= 0) store.setNextRunId(undefined);
 	if (deferred > 0) lines.push(`… ${deferred} more active run(s) not summarized this checkpoint`);
 	const block = lines.join("\n");
 	return block ? `\nProgress:\n${block}` : "";
@@ -745,6 +747,7 @@ export async function waitForSubagents(
 	const sessionActiveRuns = active;
 	const checkpointDeltas = deps.state.checkpointDeltas ??= new CheckpointDeltaStore();
 	checkpointDeltas.retain(new Set(sessionActiveRuns.map((run) => run.id)));
+	if (runId) active = activeRunsForSession({ ...params, id: runId }, deps);
 
 	if (runId) {
 		const candidates = [
