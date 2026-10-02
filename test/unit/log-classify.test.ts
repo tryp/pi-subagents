@@ -20,7 +20,7 @@ void describe("classifyLine", () => {
 	});
 
 	it("classifies warnings and weak error-shaped lines as warn", () => {
-		for (const line of ["WARN: retrying", "[WARNING] slow response", "deprecated API", "build failed", "error fetching package"]) {
+		for (const line of ["WARN: retrying", "[WARNING] slow response", "deprecated API", "build failed", "error fetching package", "Error: quoted tool output"]) {
 			assert.equal(classifyLine(line), "warn", line);
 		}
 	});
