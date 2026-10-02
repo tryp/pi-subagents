@@ -613,6 +613,58 @@ describe("subagent_wait tool", () => {
 		}
 	});
 
+	it("defers over-budget run deltas and reports them on the next wait invocation", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-deferred-deltas-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			const outputFiles: string[] = [];
+			for (let index = 1; index <= 24; index += 1) {
+				const runId = `run-${String(index).padStart(2, "0")}`;
+				writeStatus(asyncRoot, runId, "running", {
+					sessionId: "sess-1", pid: 999_999 - index, outputFile: "output.log", turnCount: 1, toolCount: 1,
+				});
+				const outputFile = path.join(asyncRoot, runId, "output.log");
+				fs.writeFileSync(outputFile, "", "utf-8");
+				outputFiles.push(outputFile);
+			}
+			let clock = 0;
+			let appendOutput = true;
+			const deps = baseDeps(root, state, {
+				now: () => clock,
+				checkpointMs: 500,
+				sleep: async (ms) => {
+					clock += ms;
+					if (appendOutput) for (const outputFile of outputFiles) fs.appendFileSync(outputFile, "INFO: tick\n", "utf-8");
+				},
+			});
+
+			const allRunIds = outputFiles.map((_, index) => `run-${String(index + 1).padStart(2, "0")}`);
+			const first = textOf(await waitForSubagents({ until: "all-terminal", timeoutMs: 5_000 }, undefined, deps));
+			assert.match(first, /more active run\(s\) not summarized this checkpoint/);
+			const firstProgress = first.split("Progress:\n")[1]?.split(" Continue waiting")[0] ?? "";
+			const firstSummarized = new Set([...firstProgress.matchAll(/(run-\d{2}) \(/g)].map((match) => match[1]));
+			const deferredRunId = allRunIds.find((id) => !firstSummarized.has(id));
+			assert.ok(deferredRunId, "at least one run should be deferred by the progress-block cap");
+
+			const second = textOf(await waitForSubagents({ until: "all-terminal", timeoutMs: 5_000 }, undefined, deps));
+			assert.match(second, new RegExp(`${deferredRunId} \\([^\\n]*\\+4 log`));
+
+			appendOutput = false;
+			const third = textOf(await waitForSubagents({ until: "all-terminal", timeoutMs: 5_000 }, undefined, deps));
+			const thirdRun = third.match(/Progress:\n(run-\d{2}) \(/)?.[1];
+			assert.ok(thirdRun, "third invocation should summarize a run");
+			assert.match(third, new RegExp(`${thirdRun} \\([^\\n]*\\+2 log`));
+
+			const fourth = textOf(await waitForSubagents({ until: "all-terminal", timeoutMs: 5_000 }, undefined, deps));
+			const fourthRun = fourth.match(/Progress:\n(run-\d{2}) \(/)?.[1];
+			assert.ok(fourthRun, "fourth invocation should summarize a run");
+			assert.match(fourth, new RegExp(`${fourthRun} \\([^\\n]*\\+0 log`));
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("names a run for the follow-up actions only when the wait can target one", async () => {
 		const scenarios = [
 			{ name: "one active run", runs: ["run-a"], expectedRunId: "run-a" },

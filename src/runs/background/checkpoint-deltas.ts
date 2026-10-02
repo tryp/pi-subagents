@@ -1,5 +1,5 @@
 import { open, stat } from "node:fs/promises";
-import { countLogLines, firstErrorLine, type LogCounts } from "../shared/log-classify.ts";
+import { countLogLines, firstErrorLine } from "../shared/log-classify.ts";
 
 export interface RunProgress {
 	turnCount?: number;
@@ -24,30 +24,36 @@ export const MAX_SCAN_BYTES = 512 * 1024;
 interface Snapshot {
 	progress: RunProgress;
 	logOffsetBytes: number;
-	countsSoFar: LogCounts;
 }
 
 function progressDelta(current: number | undefined, previous: number | undefined): number | undefined {
 	return current === undefined || previous === undefined ? undefined : current - previous;
 }
 
-function emptyCounts(): LogCounts {
-	return { err: 0, warn: 0, total: 0 };
-}
-
-function addCounts(left: LogCounts, right: LogCounts): LogCounts {
-	return { err: left.err + right.err, warn: left.warn + right.warn, total: left.total + right.total };
-}
-
 export class CheckpointDeltaStore {
 	private readonly snapshots = new Map<string, Snapshot>();
+	private nextRunId: string | undefined;
 
-	baseline(runId: string, progress: RunProgress, logOffsetBytes: number, countsSoFar: LogCounts): void {
+	baseline(runId: string, progress: RunProgress, logOffsetBytes: number): void {
+		if (this.snapshots.has(runId)) return;
 		this.snapshots.set(runId, {
 			progress: { ...progress },
 			logOffsetBytes: Math.max(0, Math.floor(logOffsetBytes)),
-			countsSoFar: { ...countsSoFar },
 		});
+	}
+
+	getNextRunId(): string | undefined {
+		return this.nextRunId;
+	}
+
+	setNextRunId(runId: string | undefined): void {
+		this.nextRunId = runId;
+	}
+
+	retain(runIds: ReadonlySet<string>): void {
+		for (const runId of this.snapshots.keys()) {
+			if (!runIds.has(runId)) this.forget(runId);
+		}
 	}
 
 	async delta(runId: string, progress: RunProgress, outputFile: string | undefined): Promise<DeltaScan | undefined> {
@@ -55,7 +61,6 @@ export class CheckpointDeltaStore {
 		if (!previous) return undefined;
 
 		let offset = previous.logOffsetBytes;
-		let countsSoFar = previous.countsSoFar;
 		let rotated = false;
 		let truncated = false;
 		let text = "";
@@ -66,7 +71,6 @@ export class CheckpointDeltaStore {
 			if (fileInfo.size < offset) {
 				rotated = true;
 				offset = 0;
-				countsSoFar = emptyCounts();
 			}
 			const available = Math.max(0, fileInfo.size - offset);
 			const scanLength = Math.min(available, MAX_SCAN_BYTES);
@@ -76,8 +80,13 @@ export class CheckpointDeltaStore {
 				try {
 					const buffer = Buffer.allocUnsafe(scanLength);
 					const { bytesRead } = await handle.read(buffer, 0, scanLength, offset);
-					text = buffer.subarray(0, bytesRead).toString("utf8");
-					nextOffset = offset + bytesRead;
+					const scanned = buffer.subarray(0, bytesRead);
+					const lastNewline = scanned.lastIndexOf(0x0a);
+					// Leave an incomplete trailing line for the next scan so it is counted/classified whole.
+					// A newline-free oversized line must still advance to avoid rescanning it forever.
+					const consumedBytes = lastNewline >= 0 ? lastNewline + 1 : bytesRead >= MAX_SCAN_BYTES ? bytesRead : 0;
+					text = scanned.subarray(0, consumedBytes).toString("utf8");
+					nextOffset = offset + consumedBytes;
 				} finally {
 					await handle.close();
 				}
@@ -102,12 +111,12 @@ export class CheckpointDeltaStore {
 		this.snapshots.set(runId, {
 			progress: { ...progress },
 			logOffsetBytes: nextOffset,
-			countsSoFar: addCounts(countsSoFar, counts),
 		});
 		return result;
 	}
 
 	forget(runId: string): void {
 		this.snapshots.delete(runId);
+		if (this.nextRunId === runId) this.nextRunId = undefined;
 	}
 }

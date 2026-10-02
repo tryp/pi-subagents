@@ -8,6 +8,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import type { FSWatcher } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ModelScopeConfig } from "../runs/shared/model-scope.ts";
+import type { CheckpointDeltaStore } from "../runs/background/checkpoint-deltas.ts";
 
 // ============================================================================
 // Basic Types
@@ -1061,6 +1062,8 @@ export interface SubagentState {
 	/** Current-session active and recent async runs for the native fleet inspector. */
 	fleetJobs?: Map<string, AsyncJobState>;
 	foregroundRuns?: Map<string, ForegroundResumeRun>;
+	/** Per-session log/progress baselines retained across subagent_wait calls. */
+	checkpointDeltas?: CheckpointDeltaStore;
 	foregroundControls: Map<string, {
 		runId: string;
 		mode: SubagentRunMode;

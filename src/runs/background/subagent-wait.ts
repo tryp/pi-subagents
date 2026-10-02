@@ -60,7 +60,6 @@ import {
 } from "../../api/background-work.ts";
 import { formatAsyncRunOutputPath, formatAsyncRunProgressLabel, listAsyncRuns, type AsyncRunSummary } from "./async-status.ts";
 import { CheckpointDeltaStore, type DeltaScan, type RunProgress } from "./checkpoint-deltas.ts";
-import { firstErrorLine } from "../shared/log-classify.ts";
 import {
 	consumedStepResultSet,
 	listStepResultArtifacts,
@@ -496,6 +495,7 @@ function checkpointActions(
 
 const MAX_RUN_PROGRESS_LINE = 200;
 const MAX_PROGRESS_BLOCK = 1600;
+const MAX_DEFERRED_RUNS_TRAILER = 80;
 const MAX_WAIT_MESSAGE = 2000;
 
 function capWaitMessage(text: string): string {
@@ -525,7 +525,7 @@ async function baselineRun(store: CheckpointDeltaStore, run: AsyncRunSummary): P
 			// A missing/rotated log should not block waiting; the next delta scan fails open.
 		}
 	}
-	store.baseline(run.id, progressForRun(run), offset, { err: 0, warn: 0, total: 0 });
+	store.baseline(run.id, progressForRun(run), offset);
 }
 
 function deltaSummary(scan: DeltaScan, elapsedMs: number): string {
@@ -563,14 +563,14 @@ async function formatRunProgressLine(
 		const tokens = run.totalTokens === undefined ? "" : `${compactCount(run.totalTokens.total)} tok`;
 		const core = [run.state, step, tool, turns, tokens, activity].filter(Boolean).join(" | ");
 		const delta = deltaSummary(scan, elapsedMs);
-		const error = scan.firstError ? ` ! err: ${oneLine(firstErrorLine(scan.firstError, 64) ?? scan.firstError, 64)}` : "";
+		const error = scan.firstError ? ` ! err: ${oneLine(scan.firstError, 64)}` : "";
 		const prefix = `${run.id.slice(0, 8)} (${oneLine(core, 76)} | ${oneLine(delta, 60)}`;
 		let line = `${prefix}${error})`;
 		if (line.length > MAX_RUN_PROGRESS_LINE) {
 			const errorBudget = error ? 54 : 0;
 			const deltaBudget = Math.min(58, delta.length);
 			const coreBudget = Math.max(12, MAX_RUN_PROGRESS_LINE - run.id.slice(0, 8).length - deltaBudget - errorBudget - 8);
-			line = `${run.id.slice(0, 8)} (${oneLine(core, coreBudget)} | ${oneLine(delta, deltaBudget)}${error ? ` ! err: ${oneLine(firstErrorLine(scan.firstError!, 42) ?? scan.firstError!, 42)}` : ""})`;
+			line = `${run.id.slice(0, 8)} (${oneLine(core, coreBudget)} | ${oneLine(delta, deltaBudget)}${error ? ` ! err: ${oneLine(scan.firstError!, 42)}` : ""})`;
 		}
 		return oneLine(line, MAX_RUN_PROGRESS_LINE);
 	} catch {
@@ -584,19 +584,38 @@ async function formatRunProgressBlock(
 	elapsedMs: number,
 	nowMs: number,
 ): Promise<string> {
+	const preferredRunId = store.getNextRunId();
+	const preferredIndex = preferredRunId ? runs.findIndex((run) => run.id === preferredRunId) : -1;
+	const orderedRuns = preferredIndex > 0 ? [...runs.slice(preferredIndex), ...runs.slice(0, preferredIndex)] : runs;
 	const lines: string[] = [];
-	for (const run of runs) {
-		const line = await formatRunProgressLine(run, store, elapsedMs, nowMs);
-		if (line) lines.push(line);
+	let used = 0;
+	let deferred = 0;
+	for (let index = 0; index < orderedRuns.length; index += 1) {
+		const separator = lines.length > 0 ? 1 : 0;
+		const remainingAfterThis = orderedRuns.length - index - 1;
+		const trailerReserve = remainingAfterThis > 0 ? MAX_DEFERRED_RUNS_TRAILER : 0;
+		if (used + separator + MAX_RUN_PROGRESS_LINE + trailerReserve > MAX_PROGRESS_BLOCK) {
+			deferred = orderedRuns.length - index;
+			break;
+		}
+		const line = await formatRunProgressLine(orderedRuns[index]!, store, elapsedMs, nowMs);
+		if (line) {
+			lines.push(line);
+			used += separator + line.length;
+		}
 	}
-	let block = lines.join("\n");
-	if (block.length > MAX_PROGRESS_BLOCK) block = `${block.slice(0, MAX_PROGRESS_BLOCK - 24)}\n… progress list capped`;
+	store.setNextRunId(deferred > 0 ? orderedRuns[orderedRuns.length - deferred]!.id : undefined);
+	if (deferred > 0) lines.push(`… ${deferred} more active run(s) not summarized this checkpoint`);
+	const block = lines.join("\n");
 	return block ? `\nProgress:\n${block}` : "";
 }
 
-function forgetInactiveRuns(store: CheckpointDeltaStore, initialIds: Set<string>, activeRuns: AsyncRunSummary[]): void {
-	const activeIds = new Set(activeRuns.map((run) => run.id));
-	for (const id of initialIds) if (!activeIds.has(id)) store.forget(id);
+function retainActiveRuns(store: CheckpointDeltaStore, deps: SubagentWaitDeps): void {
+	try {
+		store.retain(new Set(activeRunsForSession({}, deps).map((run) => run.id)));
+	} catch {
+		// Snapshot cleanup is best-effort and must not block waiting.
+	}
 }
 
 function formatDetachedForegroundChildren(
@@ -716,12 +735,16 @@ export async function waitForSubagents(
 	let foreground: ForegroundResumeRun[];
 	let providerSnapshot: BackgroundWorkSnapshot;
 	try {
-		active = activeRunsForSession({ ...params, id: runId }, deps);
+		active = activeRunsForSession({}, deps);
 		foreground = activeDetachedForegroundRuns({ ...params, id: runId }, deps);
 		providerSnapshot = runId ? { providers: [], items: [] } : backgroundWorkForSession(deps, startedAt);
 	} catch (error) {
 		return result(error instanceof Error ? error.message : String(error), true);
 	}
+
+	const sessionActiveRuns = active;
+	const checkpointDeltas = deps.state.checkpointDeltas ??= new CheckpointDeltaStore();
+	checkpointDeltas.retain(new Set(sessionActiveRuns.map((run) => run.id)));
 
 	if (runId) {
 		const candidates = [
@@ -773,7 +796,6 @@ export async function waitForSubagents(
 	}
 	const waitParams = runId ? { ...params, id: active[0]!.id, runId: active[0]!.id } : params;
 	const initialAsyncIds = new Set(active.map((run) => run.id));
-	const checkpointDeltas = new CheckpointDeltaStore();
 	await Promise.all(active.map((run) => baselineRun(checkpointDeltas, run).catch(() => undefined)));
 	const initialProviderIds = new Set(providerActive.map(backgroundWorkIdentity));
 	const initialProviderNames = new Set(providerActive.map((item) => item.provider));
@@ -823,12 +845,13 @@ export async function waitForSubagents(
 		firstResultMode ? alreadyConsumed : consumeStepResultViews(trackedRuns(), deps);
 
 	while (true) {
-		forgetInactiveRuns(checkpointDeltas, initialAsyncIds, active);
+		retainActiveRuns(checkpointDeltas, deps);
 		// Check for finished children before the completion check: a result is
 		// consumable while the rest of its batch is still running, and a run that
 		// finished with unconsumed results must still report them.
 		const earlyResults = firstResultMode ? consumeStepResultViews(trackedRuns(), deps) : [];
 		if (earlyResults.length > 0) {
+			retainActiveRuns(checkpointDeltas, deps);
 			// An early result must not hide a sibling that needs attention: the
 			// attention check lives in isDone(), which this branch returns before.
 			const earlyAttention = attention.filter((run) => initialAsyncIds.has(run.id));
@@ -854,10 +877,11 @@ export async function waitForSubagents(
 			...activeInitialProviderItems.map((item) => `${oneLine(item.provider, 40)}/${oneLine(item.id, 64)}`),
 		].join(", ");
 		if (signal?.aborted) {
+			retainActiveRuns(checkpointDeltas, deps);
 			const elapsedMs = now() - startedAt;
 			const progress = await formatRunProgressBlock(activeInitialRuns, checkpointDeltas, elapsedMs, now());
 			const views = resultsForTerminalReturn(earlyResults);
-			for (const id of initialAsyncIds) checkpointDeltas.forget(id);
+			retainActiveRuns(checkpointDeltas, deps);
 			return resultWithStepResults(
 				capWaitMessage(`Wait aborted after ${formatDuration(elapsedMs)}. Still active: ${stillActive}.${progress}${formatStepResultViews(views, "\n")}`),
 				views,
@@ -866,9 +890,10 @@ export async function waitForSubagents(
 		}
 		const elapsedMs = now() - startedAt;
 		if (elapsedMs >= timeoutMs) {
+			retainActiveRuns(checkpointDeltas, deps);
 			const progress = await formatRunProgressBlock(activeInitialRuns, checkpointDeltas, elapsedMs, now());
 			const views = resultsForTerminalReturn(earlyResults);
-			for (const id of initialAsyncIds) checkpointDeltas.forget(id);
+			retainActiveRuns(checkpointDeltas, deps);
 			return resultWithStepResults(
 				capWaitMessage(`Wait timed out after ${formatDuration(timeoutMs)} with ${activeInitialRuns.length} async run(s) and ${activeInitialProviderItems.length} provider item(s) still active: ${stillActive}.${progress} The work keeps going; call subagent_wait again or inspect subagent status.${formatStepResultViews(views, "\n")}`),
 				views,
@@ -876,6 +901,7 @@ export async function waitForSubagents(
 			);
 		}
 		if (deps.checkpointMs !== undefined && deps.checkpointMs > 0 && elapsedMs >= deps.checkpointMs) {
+			retainActiveRuns(checkpointDeltas, deps);
 			// Only name a run the caller can re-target: the requested run, or the single
 			// active one. An untargeted wait over several runs (or over provider work with
 			// no async run at all) has no single id, and inventing one would send the next
