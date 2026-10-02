@@ -415,6 +415,7 @@ describe("subagent_wait tool", () => {
 			assert.equal(result.isError, undefined);
 			assert.match(textOf(result), /supervisor checkpoint/i);
 			assert.match(textOf(result), /foreground-stuck.*NOT complete/i);
+			assert.match(textOf(result), /Active children:\s+reviewer #1 \(detached/);
 			assert.equal(result.details?.supervisorCheckpoint?.reason, "supervisor_checkpoint");
 			assert.deepEqual(result.details?.supervisorCheckpoint?.activeChildSummary.children, [
 				{ agent: "reviewer", index: 0, status: "detached" },
@@ -564,13 +565,23 @@ describe("subagent_wait tool", () => {
 		try {
 			const asyncRoot = path.join(root, "runs");
 			const state = makeState("sess-1");
-			writeStatus(asyncRoot, "run-stuck", "running", { sessionId: "sess-1", pid: 999999 });
+			const outputFile = path.join(asyncRoot, "run-stuck", "output.log");
+			writeStatus(asyncRoot, "run-stuck", "running", {
+				sessionId: "sess-1", pid: 999999, outputFile: "output.log", turnCount: 2, toolCount: 3,
+				totalTokens: { input: 10, output: 5, total: 15 },
+			});
+			fs.writeFileSync(outputFile, "", "utf-8");
 			writeStepResult(asyncRoot, "run-stuck", 0, "finished child output");
 			let clock = 0;
+			let sleepCalls = 0;
 			const deps = baseDeps(root, state, {
 				now: () => clock,
 				checkpointMs: 500,
-				sleep: async (ms) => { clock += ms; },
+				sleep: async (ms) => {
+					clock += ms;
+					sleepCalls += 1;
+					fs.appendFileSync(outputFile, "ERROR: child tool failed\nINFO: retrying\n", "utf-8");
+				},
 			});
 
 			const result = await waitForSubagents({ runId: "run-stuck", until: "all-terminal", timeoutMs: 5_000 }, undefined, deps);
@@ -581,6 +592,11 @@ describe("subagent_wait tool", () => {
 			assert.match(text, /run-stuck \(running\)/);
 			assert.match(text, /subagent\(\{ action: "status"/);
 			assert.match(text, /barrier: "consume-result"/);
+			assert.match(text, /Progress:/);
+			// Each sleep appends one error line and one unclassified info line; the 500ms checkpoint
+			// follows however many 250ms poll intervals elapsed.
+			assert.match(text, new RegExp(`D 500ms: \\+0 turns, \\+0 tok, \\+${sleepCalls * 2} log \\(${sleepCalls} err, 0 warn\\)`));
+			assert.match(text, /! err: ERROR: child tool failed/);
 			assert.equal(result.details?.supervisorCheckpoint?.reason, "supervisor_checkpoint");
 			assert.equal(result.details?.supervisorCheckpoint?.elapsedMs, 500);
 			assert.deepEqual(result.details?.supervisorCheckpoint?.activeChildSummary.children, [
