@@ -5,6 +5,9 @@
 ### Fixed
 - Detached async runners no longer fail to boot when `typebox` is absent from the runner's production node_modules: `structured-output.ts` now resolves `typebox/compile` against the pi host package root injected by the runner spawn, instead of relying on a static bare import that only the in-process extension loader aliases could satisfy.
 
+### Added
+- Added optional `rlimits` (`cpuSeconds`, `fileSizeMb`, `openFiles`, `coreSizeMb`) to bound a sub-agent child process through Linux `prlimit(1)`. Accepted on a run, each parallel task, each chain step and chain parallel task, agent frontmatter, builtin-agent overrides, and global config, resolved most-specific-first. Limits are encoded into the child environment so nested agents inherit them and can only lower them. Memory and process-count are deliberately rejected with the measured reason, because RLIMIT_AS and RLIMIT_DATA abort Node at startup, RLIMIT_RSS is a no-op on Linux, and RLIMIT_NPROC is per real user ID rather than per sub-agent tree. A configured limit on macOS or Windows is rejected rather than silently ignored, and any limit that cannot be applied on Linux is reported on the child's stderr.
+
 ## [0.35.1] - 2026-07-17
 
 ### Fixed
