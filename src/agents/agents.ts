@@ -8,7 +8,7 @@ import { parse as parseYaml } from "yaml";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AcceptanceInput, AcceptanceRole, OutputMode, ToolBudgetConfig, TurnBudgetConfig } from "../shared/types.ts";
+import type { AcceptanceInput, AcceptanceRole, OutputMode, RlimitsConfig, ToolBudgetConfig, TurnBudgetConfig } from "../shared/types.ts";
 import { getAgentDir, getProjectConfigDir } from "../shared/utils.ts";
 import { KNOWN_FIELDS } from "./agent-serializer.ts";
 import { parseChain, parseJsonChain } from "./chain-serializer.ts";
@@ -19,6 +19,7 @@ import { parseModelScopeConfig, type ModelScopeConfig } from "../runs/shared/mod
 export { buildRuntimeName, frontmatterNameForConfig, parsePackageName } from "./identity.ts";
 import { parseMemoryFrontmatter } from "./agent-memory.ts";
 import { resolveTurnBudgetConfig } from "../runs/shared/turn-budget.ts";
+import { validateRlimitsConfig } from "../runs/shared/rlimits.ts";
 import { validateAcceptanceInput } from "../runs/shared/acceptance.ts";
 
 export type AgentScope = "user" | "project" | "both";
@@ -75,6 +76,7 @@ export interface BuiltinAgentOverrideBase {
 	subagentOnlyExtensions?: string[];
 	completionGuard?: boolean;
 	toolBudget?: ToolBudgetConfig;
+	rlimits?: RlimitsConfig;
 }
 
 interface BuiltinAgentOverrideConfig {
@@ -93,6 +95,7 @@ interface BuiltinAgentOverrideConfig {
 	subagentOnlyExtensions?: string[] | false;
 	completionGuard?: boolean;
 	toolBudget?: ToolBudgetConfig | false;
+	rlimits?: RlimitsConfig | false;
 }
 
 interface BuiltinAgentOverrideInfo {
@@ -141,6 +144,7 @@ export interface AgentConfig {
 	maxSubagentDepth?: number;
 	completionGuard?: boolean;
 	toolBudget?: ToolBudgetConfig;
+	rlimits?: RlimitsConfig;
 	memory?: AgentMemoryConfig;
 	disabled?: boolean;
 	extraFields?: Record<string, string>;
@@ -180,6 +184,7 @@ export interface ChainStepConfig {
 	worktree?: boolean;
 	acceptance?: AcceptanceInput;
 	toolBudget?: ToolBudgetConfig;
+	rlimits?: RlimitsConfig;
 }
 
 export interface ChainConfig {
@@ -518,6 +523,7 @@ function cloneOverrideBase(agent: AgentConfig): BuiltinAgentOverrideBase {
 		subagentOnlyExtensions: agent.subagentOnlyExtensions ? [...agent.subagentOnlyExtensions] : undefined,
 		completionGuard: agent.completionGuard,
 		toolBudget: agent.toolBudget,
+		rlimits: agent.rlimits,
 	};
 }
 
@@ -540,6 +546,7 @@ function cloneOverrideValue(override: BuiltinAgentOverrideConfig): BuiltinAgentO
 		...(override.subagentOnlyExtensions !== undefined ? { subagentOnlyExtensions: override.subagentOnlyExtensions === false ? false : [...override.subagentOnlyExtensions] } : {}),
 		...(override.completionGuard !== undefined ? { completionGuard: override.completionGuard } : {}),
 		...(override.toolBudget !== undefined ? { toolBudget: override.toolBudget === false ? false : { ...override.toolBudget, ...(Array.isArray(override.toolBudget.block) ? { block: [...override.toolBudget.block] } : {}) } } : {}),
+		...(override.rlimits !== undefined ? { rlimits: override.rlimits === false ? false : { ...override.rlimits } } : {}),
 	};
 }
 
@@ -702,6 +709,16 @@ function parseBuiltinOverrideEntry(
 		}
 	}
 
+	if ("rlimits" in input) {
+		if (input.rlimits === false) {
+			override.rlimits = false;
+		} else {
+			const resolved = validateRlimitsConfig(input.rlimits, `Builtin override '${name}' in '${filePath}' rlimits`);
+			if (resolved.error) throw new Error(resolved.error);
+			override.rlimits = resolved.rlimits;
+		}
+	}
+
 	if ("systemPrompt" in input) {
 		if (typeof input.systemPrompt === "string") override.systemPrompt = input.systemPrompt;
 		else throw new Error(`Builtin override '${name}' in '${filePath}' has invalid 'systemPrompt'; expected a string.`);
@@ -825,6 +842,7 @@ function applyBuiltinOverride(
 	}
 	if (override.completionGuard !== undefined) next.completionGuard = override.completionGuard;
 	if (override.toolBudget !== undefined) next.toolBudget = override.toolBudget === false ? undefined : override.toolBudget;
+	if (override.rlimits !== undefined) next.rlimits = override.rlimits === false ? undefined : override.rlimits;
 
 	return next;
 }
@@ -976,6 +994,9 @@ function applyCustomAgentOverride(
 	if (override.toolBudget !== undefined) {
 		fill("toolBudget", ["toolBudget"], override.toolBudget === false ? undefined : override.toolBudget);
 	}
+	if (override.rlimits !== undefined) {
+		fill("rlimits", ["rlimits"], override.rlimits === false ? undefined : override.rlimits);
+	}
 
 	if (!anyFilled || !next) return agent;
 	next.override = { ...meta, base: cloneOverrideBase(agent) };
@@ -1008,7 +1029,7 @@ function applyCustomAgentOverrides(
 
 export function buildBuiltinOverrideConfig(
 	base: BuiltinAgentOverrideBase,
-	draft: Pick<AgentConfig, "model" | "fallbackModels" | "thinking" | "systemPromptMode" | "inheritProjectContext" | "inheritSkills" | "defaultContext" | "acceptanceRole" | "disabled" | "systemPrompt" | "skills" | "tools" | "mcpDirectTools" | "subagentOnlyExtensions" | "completionGuard" | "toolBudget">,
+	draft: Pick<AgentConfig, "model" | "fallbackModels" | "thinking" | "systemPromptMode" | "inheritProjectContext" | "inheritSkills" | "defaultContext" | "acceptanceRole" | "disabled" | "systemPrompt" | "skills" | "tools" | "mcpDirectTools" | "subagentOnlyExtensions" | "completionGuard" | "toolBudget" | "rlimits">,
 ): BuiltinAgentOverrideConfig | undefined {
 	const override: BuiltinAgentOverrideConfig = {};
 
@@ -1034,6 +1055,7 @@ export function buildBuiltinOverrideConfig(
 		override.completionGuard = draft.completionGuard !== false;
 	}
 	if (JSON.stringify(draft.toolBudget) !== JSON.stringify(base.toolBudget)) override.toolBudget = draft.toolBudget ?? false;
+	if (JSON.stringify(draft.rlimits) !== JSON.stringify(base.rlimits)) override.rlimits = draft.rlimits ?? false;
 
 	return Object.keys(override).length > 0 ? override : undefined;
 }
@@ -1304,6 +1326,20 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 			}
 			toolBudget = parsed as ToolBudgetConfig;
 		}
+		let rlimits: RlimitsConfig | undefined;
+		if (frontmatter.rlimits !== undefined && frontmatter.rlimits.trim()) {
+			let parsedRlimits: unknown;
+			try {
+				parsedRlimits = JSON.parse(frontmatter.rlimits);
+			} catch {
+				// Frontmatter values are strings, so a YAML mapping block arrives here as
+				// "cpuSeconds: 30". Report that clearly instead of leaking a SyntaxError.
+				throw new Error(`Agent '${localName}' has invalid rlimits frontmatter; expected a single-line JSON object such as {"cpuSeconds":30}.`);
+			}
+			const resolved = validateRlimitsConfig(parsedRlimits, `Agent '${localName}' rlimits frontmatter`);
+			if (resolved.error) throw new Error(resolved.error);
+			rlimits = resolved.rlimits;
+		}
 		const completionGuard = frontmatter.completionGuard === "false"
 			? false
 			: frontmatter.completionGuard === "true"
@@ -1346,6 +1382,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 					: undefined,
 			completionGuard,
 			toolBudget,
+			rlimits,
 			memory: parseMemoryFrontmatter(frontmatter.memory),
 			extraFields: Object.keys(extraFields).length > 0 ? extraFields : undefined,
 		};

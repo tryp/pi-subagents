@@ -30,6 +30,7 @@ export const KNOWN_FIELDS = new Set([
 	"maxSubagentDepth",
 	"completionGuard",
 	"toolBudget",
+	"rlimits",
 	"memory",
 ]);
 
@@ -110,6 +111,9 @@ export function serializeAgent(config: AgentConfig, options: SerializeAgentOptio
 	}
 	if (config.toolBudget || preserve("toolBudget")) {
 		lines.push(`toolBudget: ${config.toolBudget ? JSON.stringify(config.toolBudget) : ""}`);
+	}
+	if (config.rlimits || preserve("rlimits")) {
+		lines.push(`rlimits: ${config.rlimits ? JSON.stringify(config.rlimits) : ""}`);
 	}
 
 	if (config.memory) {

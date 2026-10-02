@@ -92,6 +92,17 @@ const ToolBudgetOverride = Type.Object({
 	block: Type.Optional(ToolBudgetBlock),
 }, { additionalProperties: false, description: "Optional child tool-call budget. soft nudges the child; after hard, block tools (default read/grep/find/ls, or '*' for all tools) are blocked so the child can finalize." });
 
+// OS resource limits applied to the child process via prlimit(1). Memory and
+// process-count are deliberately absent: they cannot be bounded this way for a
+// Node child (RLIMIT_AS/RLIMIT_DATA abort V8 at startup, RLIMIT_RSS is a no-op,
+// RLIMIT_NPROC is per user ID). Those are rejected with an explanatory error.
+const RlimitsOverride = Type.Object({
+	cpuSeconds: Type.Optional(Type.Integer({ minimum: 1, description: "Per-process CPU-time ceiling in seconds." })),
+	fileSizeMb: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum size in MiB of any single file the child may write." })),
+	openFiles: Type.Optional(Type.Integer({ minimum: 64, description: "Maximum number of open file descriptors (minimum 64)." })),
+	coreSizeMb: Type.Optional(Type.Integer({ minimum: 0, description: "Maximum core dump size in MiB; 0 suppresses core dumps." })),
+}, { additionalProperties: false, description: "Optional OS resource limits applied to the child process (Linux, via prlimit). Bounds CPU time, per-file size, open files, and core dump size. Memory and process-count cannot be bounded with OS limits and are rejected." });
+
 const TaskItem = Type.Object({
 	agent: Type.String(), 
 	task: Type.String(), 
@@ -104,6 +115,7 @@ const TaskItem = Type.Object({
 	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'openai-codex/gpt-5.6-luna'). Bare names auto-resolve across providers. Omit to inherit parent session model." })),
 	skill: Type.Optional(SkillOverride),
 	toolBudget: Type.Optional(ToolBudgetOverride),
+	rlimits: Type.Optional(RlimitsOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-task timeout in ms applied to this child run only. Falls back to the run-level timeout when omitted." })),
 });
@@ -125,6 +137,7 @@ export const ParallelTaskSchema = Type.Object({
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'openai-codex/gpt-5.6-luna'). Bare names auto-resolve." })),
 	toolBudget: Type.Optional(ToolBudgetOverride),
+	rlimits: Type.Optional(RlimitsOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-task timeout in ms applied to this child run only. Falls back to the run-level timeout when omitted." })),
 });
@@ -154,6 +167,7 @@ export const DynamicParallelTemplateSchema = Type.Object({
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'opencode-go/gpt-5-mini'). Bare names auto-resolve." })),
 	toolBudget: Type.Optional(ToolBudgetOverride),
+	rlimits: Type.Optional(RlimitsOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-task timeout in ms applied to each materialized child run. Falls back to the run-level timeout when omitted." })),
 }, { additionalProperties: false });
@@ -181,6 +195,7 @@ export const ChainItem = Type.Object({
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Override model for this step (e.g. 'opencode-go/gpt-5-mini'). Bare names auto-resolve across providers." })),
 	toolBudget: Type.Optional(ToolBudgetOverride),
+	rlimits: Type.Optional(RlimitsOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-step timeout in ms applied to this child run only. Falls back to the run-level timeout when omitted." })),
 	parallel: Type.Optional(Type.Unsafe({
@@ -274,6 +289,7 @@ const SubagentParamsSchema = Type.Object({
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional run-level timeout in ms for foreground and async/background runs." })),
 	turnBudget: Type.Optional(TurnBudgetOverride),
 	toolBudget: Type.Optional(ToolBudgetOverride),
+	rlimits: Type.Optional(RlimitsOverride),
 	agentScope: Type.Optional(Type.String({ description: "Agent discovery scope: 'user', 'project', or 'both' (default: 'both'; project wins on name collisions)" })),
 	cwd: Type.Optional(Type.String()),
 	artifacts: Type.Optional(Type.Boolean({ description: "Write debug artifacts (default: true)" })),

@@ -58,6 +58,8 @@ import {
 	type ResolvedControlConfig,
 	type ResolvedTurnBudget,
 	type ResolvedToolBudget,
+	type ResolvedRlimits,
+	type RlimitsConfig,
 	type SingleResult,
 	type ToolBudgetConfig,
 	MAX_CONCURRENCY,
@@ -73,6 +75,7 @@ import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelSt
 import { acceptanceFailureMessage, aggregateAcceptanceReport, evaluateAcceptance, resolveEffectiveAcceptance } from "../shared/acceptance.ts";
 import type { ChainOutputMap } from "../../shared/types.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
+import { validateRlimitsConfig, rlimitsEnforceabilityError } from "../shared/rlimits.ts";
 import { resolveChildDeadline } from "../shared/timeout.ts";
 
 interface ChainExecutionDetailsInput {
@@ -152,6 +155,8 @@ interface ParallelChainRunInput {
 	onDetachedExit?: (index: number, result: SingleResult) => void;
 	toolBudget?: ResolvedToolBudget;
 	configToolBudget?: ToolBudgetConfig;
+	rlimits?: ResolvedRlimits;
+	configRlimits?: ResolvedRlimits;
 	globalSemaphore?: Semaphore;
 	dynamic?: boolean;
 }
@@ -215,6 +220,19 @@ function resolveChainToolBudget(input: { stepBudget?: ToolBudgetConfig; runBudge
 	return { toolBudget: resolved.budget, error: resolved.error };
 }
 
+function resolveChainRlimits(input: { stepBudget?: RlimitsConfig; runBudget?: ResolvedRlimits; agentBudget?: RlimitsConfig; configBudget?: RlimitsConfig }): { rlimits?: ResolvedRlimits; error?: string } {
+	const resolved = input.stepBudget !== undefined
+		? validateRlimitsConfig(input.stepBudget, "rlimits")
+		: input.runBudget !== undefined
+			? { rlimits: input.runBudget }
+			: input.agentBudget !== undefined
+				? validateRlimitsConfig(input.agentBudget, "agent.rlimits")
+				: validateRlimitsConfig(input.configBudget, "config.rlimits");
+	if (resolved.error) return { rlimits: resolved.rlimits, error: resolved.error };
+	const unsupported = rlimitsEnforceabilityError(resolved.rlimits);
+	return unsupported ? { error: unsupported } : { rlimits: resolved.rlimits };
+}
+
 async function runParallelChainTasks(input: ParallelChainRunInput): Promise<SingleResult[]> {
 	const concurrency = input.step.concurrency ?? MAX_CONCURRENCY;
 	const failFast = input.step.failFast ?? false;
@@ -272,6 +290,8 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 			const maxSubagentDepth = resolveChildMaxSubagentDepth(input.maxSubagentDepth, taskAgentConfig?.maxSubagentDepth);
 			const toolBudget = resolveChainToolBudget({ stepBudget: task.toolBudget, runBudget: input.toolBudget, agentBudget: taskAgentConfig?.toolBudget, configBudget: input.configToolBudget });
 			if (toolBudget.error) throw new Error(toolBudget.error);
+			const rlimits = resolveChainRlimits({ stepBudget: task.rlimits, runBudget: input.rlimits, agentBudget: taskAgentConfig?.rlimits, configBudget: input.configRlimits });
+			if (rlimits.error) throw new Error(rlimits.error);
 
 			const taskCwd = input.worktreeSetup
 				? input.worktreeSetup.worktrees[taskIndex]!.agentCwd
@@ -337,6 +357,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 					? (result) => input.onDetachedExit?.(input.globalTaskIndex + taskIndex, result)
 					: undefined,
 				toolBudget: toolBudget.toolBudget,
+				rlimits: rlimits.rlimits,
 				onUpdate: input.onUpdate
 					? (progressUpdate) => {
 						const stepResults = progressUpdate.details?.results || [];
@@ -449,6 +470,8 @@ interface ChainExecutionParams {
 	onDetachedExit?: (index: number, result: SingleResult) => void;
 	toolBudget?: ResolvedToolBudget;
 	configToolBudget?: ToolBudgetConfig;
+	rlimits?: ResolvedRlimits;
+	configRlimits?: ResolvedRlimits;
 	/** Global cap on simultaneously-running tasks within this chain. Defaults to DEFAULT_GLOBAL_CONCURRENCY_LIMIT. */
 	globalConcurrencyLimit?: number;
 }
@@ -756,6 +779,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					onDetachedExit,
 					toolBudget: params.toolBudget,
 					configToolBudget: params.configToolBudget,
+					rlimits: params.rlimits,
+					configRlimits: params.configRlimits,
 					globalSemaphore,
 				});
 				globalTaskIndex += step.parallel.length;
@@ -974,6 +999,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				onDetachedExit,
 				toolBudget: params.toolBudget,
 				configToolBudget: params.configToolBudget,
+				rlimits: params.rlimits,
+				configRlimits: params.configRlimits,
 				globalSemaphore,
 				dynamic: true,
 			});
@@ -1179,6 +1206,23 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				dynamicChildren,
 				dynamicGroupStatuses,
 			});
+			const rlimits = resolveChainRlimits({ stepBudget: seqStep.rlimits, runBudget: params.rlimits, agentBudget: agentConfig?.rlimits, configBudget: params.configRlimits });
+			if (rlimits.error) return buildChainExecutionErrorResult(rlimits.error, {
+				results,
+				includeProgress,
+				allProgress,
+				allArtifactPaths,
+				artifactsDir: params.artifactsDir,
+				chainAgents,
+				chainSteps,
+				totalSteps,
+				currentStepIndex: stepIndex,
+				runId: params.runId,
+				outputs,
+				currentFlatIndex: globalTaskIndex,
+				dynamicChildren,
+				dynamicGroupStatuses,
+			});
 			const r = await runSync(ctx.cwd, agents, seqStep.agent, stepTask, {
 				parentSessionId: ctx.sessionManager.getSessionId() ?? undefined,
 				cwd: resolveChildCwd(cwd ?? ctx.cwd, seqStep.cwd),
@@ -1217,6 +1261,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					? (result) => onDetachedExit(childIndex, result)
 					: undefined,
 				toolBudget: toolBudget.toolBudget,
+				rlimits: rlimits.rlimits,
 				onUpdate: onUpdate
 					? (p) => {
 						const stepResults = p.details?.results || [];

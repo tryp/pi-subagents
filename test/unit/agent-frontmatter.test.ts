@@ -153,6 +153,53 @@ body`);
 	}));
 });
 
+describe("agent rlimits frontmatter", () => {
+	it("parses a JSON object, defaults core dumps off, and round-trips", () => withTempHome(() => {
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-rlimits-agent-"));
+		tempDirs.push(project);
+		writeAgent(path.join(project, ".pi", "agents", "worker.md"), `---
+name: worker
+description: Worker
+rlimits: {"cpuSeconds":30,"openFiles":128}
+---
+body`);
+
+		const worker = discoverAgents(project, "both").agents.find((agent) => agent.name === "worker")!;
+		assert.deepEqual(worker.rlimits, { cpuSeconds: 30, openFiles: 128, coreSizeMb: 0 });
+		assert.match(serializeAgent(worker), /^rlimits: \{"cpuSeconds":30,"openFiles":128,"coreSizeMb":0\}$/m);
+	}));
+
+	it("rejects a YAML mapping block with a clear message, not a SyntaxError", () => withTempHome(() => {
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-rlimits-yaml-"));
+		tempDirs.push(project);
+		writeAgent(path.join(project, ".pi", "agents", "worker.md"), `---
+name: worker
+description: Worker
+rlimits:
+  cpuSeconds: 30
+---
+body`);
+
+		assert.throws(
+			() => discoverAgents(project, "both"),
+			/invalid rlimits frontmatter; expected a single-line JSON object/,
+		);
+	}));
+
+	it("rejects an unsupported field through the frontmatter path", () => withTempHome(() => {
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-rlimits-bad-"));
+		tempDirs.push(project);
+		writeAgent(path.join(project, ".pi", "agents", "worker.md"), `---
+name: worker
+description: Worker
+rlimits: {"rssMb":256}
+---
+body`);
+
+		assert.throws(() => discoverAgents(project, "both"), /not supported/);
+	}));
+});
+
 describe("agent simple-scalar list frontmatter", () => {
 	it("discovers newline block lists for all list fields and routes MCP tools", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agent-block-list-frontmatter-"));

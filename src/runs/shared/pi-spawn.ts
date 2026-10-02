@@ -1,9 +1,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { ResolvedRlimits } from "../../shared/types.ts";
+import { buildRlimitArgs, clampRlimitsToInherited, describeRlimits, hasRlimits, parseProcSelfLimits, type InheritedHardLimits } from "./rlimits.ts";
 
 export const PI_CODING_AGENT_PACKAGE = "@earendil-works/pi-coding-agent";
 export const PI_SUBAGENT_PI_BINARY_ENV = "PI_SUBAGENT_PI_BINARY";
+export const PRLIMIT_COMMAND = "prlimit";
 
 export function findPiPackageRootFromEntry(
 	entryPoint: string,
@@ -51,11 +54,25 @@ export interface PiSpawnDeps {
 	resolvePackageEntry?: () => string;
 	piPackageRoot?: string;
 	env?: NodeJS.ProcessEnv;
+	/** Resolved OS resource limits to apply to the child via prlimit(1). */
+	rlimits?: ResolvedRlimits;
+	/** Injectable prlimit(1) lookup so tests never probe the real PATH. */
+	resolvePrlimitPath?: () => string | undefined;
+	/** Hard limits already inherited by this process; read from /proc when omitted. */
+	inheritedHardLimits?: InheritedHardLimits;
 }
 
-interface PiSpawnCommand {
+export interface PiSpawnCommand {
 	command: string;
 	args: string[];
+	/**
+	 * Limits actually applied to the child, after clamping to the inherited hard
+	 * limits. Attribution must use these rather than the requested values, since
+	 * the kernel enforces the clamped ones.
+	 */
+	rlimitsApplied?: ResolvedRlimits;
+	/** Why requested limits were not applied. Absent when applied or not requested. */
+	rlimitsSkipped?: string;
 }
 
 function isRunnableNodeScript(
@@ -131,7 +148,53 @@ export function resolvePiCliScript(
 	return undefined;
 }
 
-export function getPiSpawnCommand(
+export function resolvePrlimitPath(deps: PiSpawnDeps = {}): string | undefined {
+	if (deps.resolvePrlimitPath) return deps.resolvePrlimitPath();
+	const existsSync = deps.existsSync ?? fs.existsSync;
+	const env = deps.env ?? process.env;
+	const pathValue = env.PATH ?? env.Path ?? "";
+	if (!pathValue) return undefined;
+	for (const dir of pathValue.split(path.delimiter)) {
+		if (!dir) continue;
+		const candidate = path.join(dir, PRLIMIT_COMMAND);
+		if (existsSync(candidate)) return candidate;
+	}
+	return undefined;
+}
+
+/**
+ * Why OS rlimits cannot be applied on this host, or undefined when they can.
+ * `getPiSpawnCommand` turns this into `rlimitsSkipped`, and the spawn sites
+ * report that on the child's stderr, so configured bounds are never dropped
+ * without a visible reason. The platform case is also rejected earlier, at
+ * resolution time, by `rlimitsEnforceabilityError`.
+ */
+export function rlimitsUnsupportedReason(
+	deps: PiSpawnDeps = {},
+): "platform" | "missing-prlimit" | undefined {
+	if ((deps.platform ?? process.platform) !== "linux") return "platform";
+	if (!resolvePrlimitPath(deps)) return "missing-prlimit";
+	return undefined;
+}
+
+/**
+ * Hard limits this process already inherited. Read lazily from /proc/self/limits
+ * so a requested limit can be clamped instead of being rejected by prlimit(1).
+ */
+export function readInheritedHardLimits(deps: PiSpawnDeps = {}): InheritedHardLimits {
+	if (deps.inheritedHardLimits) return deps.inheritedHardLimits;
+	if ((deps.platform ?? process.platform) !== "linux") return {};
+	const readFileSync = deps.readFileSync ?? ((filePath: string, encoding: "utf-8") => fs.readFileSync(filePath, encoding));
+	try {
+		return parseProcSelfLimits(readFileSync("/proc/self/limits", "utf-8"));
+	} catch {
+		// An unreadable /proc leaves the request unclamped; prlimit(1) still reports
+		// any rejection on the child's stderr.
+		return {};
+	}
+}
+
+function resolveBasePiSpawnCommand(
 	args: string[],
 	deps: PiSpawnDeps = {},
 ): PiSpawnCommand {
@@ -150,4 +213,38 @@ export function getPiSpawnCommand(
 	}
 
 	return { command: "pi", args };
+}
+
+export function getPiSpawnCommand(
+	args: string[],
+	deps: PiSpawnDeps = {},
+): PiSpawnCommand {
+	const base = resolveBasePiSpawnCommand(args, deps);
+	if (!hasRlimits(deps.rlimits)) return base;
+	// Requested limits must never be dropped silently: report why they cannot be
+	// applied so callers can surface it instead of implying the child is bounded.
+	const unsupported = rlimitsUnsupportedReason(deps);
+	if (unsupported === "platform") {
+		return { ...base, rlimitsSkipped: `OS resource limits (${describeRlimits(deps.rlimits)}) were not applied: they require Linux (prlimit). This host is ${deps.platform ?? process.platform}.` };
+	}
+	if (unsupported === "missing-prlimit") {
+		return { ...base, rlimitsSkipped: `OS resource limits (${describeRlimits(deps.rlimits)}) were not applied: the prlimit(1) command was not found on PATH.` };
+	}
+	// Clamp to the inherited hard limits first: prlimit(1) cannot raise a hard
+	// limit, and a rejected request aborts the spawn instead of running bounded.
+	const effective = clampRlimitsToInherited(deps.rlimits, readInheritedHardLimits(deps));
+	if (!hasRlimits(effective)) {
+		return { ...base, rlimitsSkipped: `OS resource limits (${describeRlimits(deps.rlimits)}) were not applied: this process already inherited tighter hard limits.` };
+	}
+	const flags = buildRlimitArgs(effective);
+	if (flags.length === 0) return base;
+	const prlimitPath = resolvePrlimitPath(deps);
+	if (!prlimitPath) return base;
+	// prlimit(1) execs the target in place, so the returned PID is the child
+	// itself and signal/exit semantics are unchanged.
+	return {
+		command: prlimitPath,
+		args: [...flags, "--", base.command, ...base.args],
+		rlimitsApplied: effective,
+	};
 }

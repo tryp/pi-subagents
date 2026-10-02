@@ -52,6 +52,7 @@ import { getPiSpawnCommand } from "../shared/pi-spawn.ts";
 import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
+import { RLIMITS_ENV, decodeRlimitsEnv, resourceLimitExceededMessage, resourceLimitKindForSignal } from "../shared/rlimits.ts";
 import { readStructuredOutput } from "../shared/structured-output.ts";
 import { readChildToolDiagnosticError } from "../shared/tool-availability.ts";
 import { captureSingleOutputSnapshot, extractChildWrittenOutput, formatSavedOutputReference, injectOutputPathSystemPrompt, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
@@ -237,6 +238,11 @@ async function runSingleAttempt(
 		parentSessionId: options.parentSessionId,
 		structuredOutput: options.structuredOutput,
 		toolBudget: options.toolBudget,
+		// Forwarded so the child environment carries PI_SUBAGENT_RLIMITS: the spawn
+		// below decodes the limits back out of that same env, which keeps what the
+		// kernel enforces identical to what the child sees (and lets nested agents
+		// clamp against it). Omitting this silently disables rlimits entirely.
+		rlimits: options.rlimits,
 		childWatchdog,
 		waitToolEnabled: options.waitToolEnabled,
 	});
@@ -310,7 +316,7 @@ async function runSingleAttempt(
 	let observedMutationAttempt = false;
 
 	const exitCode = await new Promise<number>((resolve) => {
-		const spawnSpec = getPiSpawnCommand(args);
+		const spawnSpec = getPiSpawnCommand(args, { rlimits: decodeRlimitsEnv(spawnEnv[RLIMITS_ENV]) });
 		const proc = spawn(spawnSpec.command, spawnSpec.args, {
 			cwd: options.cwd ?? runtimeCwd,
 			env: spawnEnv,
@@ -886,6 +892,7 @@ async function runSingleAttempt(
 		}
 
 		const stderrTail = createBoundedByteTail();
+		if (spawnSpec.rlimitsSkipped) stderrTail.push(`${spawnSpec.rlimitsSkipped}\n`);
 		const failProtocol = (limit: ProtocolOutputLimit): void => {
 			if (result.protocolError) return;
 			result.protocolError = limit;
@@ -931,7 +938,11 @@ async function runSingleAttempt(
 			stdoutReader.end();
 			stderrReader.end();
 			const stderr = stderrTail.text();
+			// A limit-triggered death must be reported as a resource bound, not as an
+			// unexplained exit 1 that looks identical to any other child failure.
+			const limitKind = resourceLimitKindForSignal(signal, spawnSpec.rlimitsApplied);
 			let closeError = result.error ?? toolDiagnosticError ?? assistantError;
+			if (!closeError && limitKind) closeError = resourceLimitExceededMessage(limitKind, spawnSpec.rlimitsApplied);
 			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && (cleanTerminalAssistantStopReceived || agentSettledReceived) && !closeError;
 			if (code !== 0 && stderr.trim() && !closeError && !forcedDrainAfterFinalSuccess) {
 				closeError = stderr.trim();

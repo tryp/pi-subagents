@@ -113,6 +113,26 @@ export interface ResolvedToolBudget {
 	block: string[] | "*";
 }
 
+/**
+ * OS resource limits applied to a sub-agent child process via prlimit(1).
+ *
+ * Only resources that can actually bound a Node child are accepted here.
+ * Memory and process-count are deliberately absent: RLIMIT_AS/RLIMIT_DATA
+ * abort V8 at startup for plausible values, RLIMIT_RSS is a no-op on Linux,
+ * and RLIMIT_NPROC is per real-UID rather than per sub-agent tree.
+ */
+export interface RlimitsConfig {
+	cpuSeconds?: number;
+	fileSizeMb?: number;
+	openFiles?: number;
+	coreSizeMb?: number;
+}
+
+export type ResolvedRlimits = RlimitsConfig;
+
+/** Which OS resource bound terminated a child. */
+export type ResourceLimitKind = "cpuSeconds" | "fileSizeMb";
+
 export type ToolBudgetOutcome = "within-budget" | "soft-reached" | "hard-blocked";
 
 export interface ToolBudgetState extends ResolvedToolBudget {
@@ -1161,6 +1181,7 @@ export interface RunSyncOptions {
 	deadlineAt?: number;
 	turnBudget?: ResolvedTurnBudget;
 	toolBudget?: ResolvedToolBudget;
+	rlimits?: ResolvedRlimits;
 	allowIntercomDetach?: boolean;
 	intercomEvents?: IntercomEventBus;
 	/** Sync wake: after this much runtime, detach the still-running child and
@@ -1267,6 +1288,7 @@ export interface ExtensionConfig {
 	completionBatch?: CompletionBatchConfig;
 	turnBudget?: TurnBudgetConfig;
 	toolBudget?: ToolBudgetConfig;
+	rlimits?: RlimitsConfig;
 	parallel?: TopLevelParallelConfig;
 	chain?: ExtensionChainConfig;
 	worktreeSetupHook?: string;

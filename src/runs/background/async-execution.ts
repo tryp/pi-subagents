@@ -36,6 +36,7 @@ import {
 	type ResolvedControlConfig,
 	type ResolvedTurnBudget,
 	type ResolvedToolBudget,
+	type ResolvedRlimits,
 	type SubagentRunMode,
 	type SteeringRecoveryDescriptor,
 	ASYNC_DIR,
@@ -50,6 +51,7 @@ import { nestedResultsPath, resolveInheritedNestedRouteFromEnv, resolveNestedPar
 import { initialTurnBudgetState } from "../shared/turn-budget.ts";
 import { resolveTimeout } from "../shared/timeout.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
+import { validateRlimitsConfig, rlimitsEnforceabilityError } from "../shared/rlimits.ts";
 import type { ImportedAsyncRoot } from "./chain-root-attachment.ts";
 import type { SessionLeaseRequest } from "../shared/session-lease.ts";
 
@@ -151,6 +153,8 @@ interface AsyncChainParams {
 	turnBudget?: ResolvedTurnBudget;
 	toolBudget?: ResolvedToolBudget;
 	configToolBudget?: ResolvedToolBudget;
+	rlimits?: ResolvedRlimits;
+	configRlimits?: ResolvedRlimits;
 	/** Global cap on simultaneously-running subagent tasks within the async run. */
 	globalConcurrencyLimit?: number;
 }
@@ -195,6 +199,8 @@ interface AsyncSingleParams {
 	turnBudget?: ResolvedTurnBudget;
 	toolBudget?: ResolvedToolBudget;
 	configToolBudget?: ResolvedToolBudget;
+	rlimits?: ResolvedRlimits;
+	configRlimits?: ResolvedRlimits;
 }
 
 interface AsyncExecutionResult {
@@ -225,6 +231,8 @@ export interface AsyncRunnerStepBuildParams {
 	validateOutputBindings?: boolean;
 	toolBudget?: ResolvedToolBudget;
 	configToolBudget?: ResolvedToolBudget;
+	rlimits?: ResolvedRlimits;
+	configRlimits?: ResolvedRlimits;
 }
 
 export type AsyncRunnerStepBuildResult =
@@ -575,6 +583,11 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 		const toolBudgetInput = s.toolBudget ?? params.toolBudget ?? a.toolBudget ?? params.configToolBudget;
 		const resolvedToolBudget = validateToolBudgetConfig(toolBudgetInput, s.toolBudget ? "toolBudget" : a.toolBudget ? "agent.toolBudget" : "config.toolBudget");
 		if (resolvedToolBudget.error) throw new AsyncStartValidationError(resolvedToolBudget.error);
+		const rlimitsInput = s.rlimits ?? params.rlimits ?? a.rlimits ?? params.configRlimits;
+		const resolvedRlimits = validateRlimitsConfig(rlimitsInput, s.rlimits ? "rlimits" : a.rlimits ? "agent.rlimits" : "config.rlimits");
+		if (resolvedRlimits.error) throw new AsyncStartValidationError(resolvedRlimits.error);
+		const rlimitsUnsupported = rlimitsEnforceabilityError(resolvedRlimits.rlimits);
+		if (rlimitsUnsupported) throw new AsyncStartValidationError(rlimitsUnsupported);
 		const stepCwd = resolveChildCwd(runnerCwd, s.cwd);
 		const instructionCwd = behaviorCwd ?? stepCwd;
 		let behavior = suppressProgressForReadOnlyTask(resolvedBehavior ?? resolveStepBehavior(a, buildStepOverrides(s), chainSkills), s.task, originalTask);
@@ -676,6 +689,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			...(s.outputSchema ? { structuredOutputSchema: s.outputSchema } : {}),
 			...(s.outputSchema ? { structuredOutput: createStructuredOutputRuntime(s.outputSchema, path.join(asyncDir, "structured-output")) } : {}),
 			...(resolvedToolBudget.budget ? { toolBudget: resolvedToolBudget.budget } : {}),
+			...(resolvedRlimits.rlimits ? { rlimits: resolvedRlimits.rlimits } : {}),
 		};
 	};
 
@@ -861,6 +875,8 @@ export function executeAsyncChain(
 		asyncDir,
 		toolBudget: params.toolBudget,
 		configToolBudget: params.configToolBudget,
+		rlimits: params.rlimits,
+		configRlimits: params.configRlimits,
 	});
 	if ("error" in built) {
 		try {
@@ -913,6 +929,7 @@ export function executeAsyncChain(
 				controlConfig,
 				turnBudget: params.turnBudget,
 				toolBudget: params.toolBudget,
+				rlimits: params.rlimits,
 				controlIntercomTarget,
 				childIntercomTargets,
 				resultMode,
@@ -1040,7 +1057,7 @@ export function executeAsyncChain(
 
 	return {
 		content: [{ type: "text", text: formatAsyncStartedMessage(`Async ${resultMode}: ${chainDesc} [${id}]`, ctx.interactive === true) }],
-		details: { mode: resultMode, runId: id, results: [], asyncId: id, asyncDir, workflowGraph, ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}), ...(params.turnBudget ? { turnBudget: params.turnBudget } : {}), ...(params.toolBudget ? { toolBudget: params.toolBudget } : {}) },
+		details: { mode: resultMode, runId: id, results: [], asyncId: id, asyncDir, workflowGraph, ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}), ...(params.turnBudget ? { turnBudget: params.turnBudget } : {}), ...(params.toolBudget ? { toolBudget: params.toolBudget } : {}), ...(params.rlimits ? { rlimits: params.rlimits } : {}) },
 	};
 }
 
@@ -1127,6 +1144,11 @@ export function executeAsyncSingle(
 	const toolBudgetInput = params.toolBudget ?? agentConfig.toolBudget ?? params.configToolBudget;
 	const resolvedToolBudget = validateToolBudgetConfig(toolBudgetInput, params.toolBudget ? "toolBudget" : agentConfig.toolBudget ? "agent.toolBudget" : "config.toolBudget");
 	if (resolvedToolBudget.error) return formatAsyncStartError("single", resolvedToolBudget.error);
+	const rlimitsInput = params.rlimits ?? agentConfig.rlimits ?? params.configRlimits;
+	const resolvedRlimits = validateRlimitsConfig(rlimitsInput, params.rlimits ? "rlimits" : agentConfig.rlimits ? "agent.rlimits" : "config.rlimits");
+	if (resolvedRlimits.error) return formatAsyncStartError("single", resolvedRlimits.error);
+	const rlimitsUnsupported = rlimitsEnforceabilityError(resolvedRlimits.rlimits);
+	if (rlimitsUnsupported) return formatAsyncStartError("single", rlimitsUnsupported);
 	const deadlineAt = params.absoluteDeadlineAt ?? (params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined);
 	const timeoutMs = params.absoluteDeadlineAt !== undefined && deadlineAt !== undefined
 		? deadlineAt - Date.now()
@@ -1171,6 +1193,7 @@ export function executeAsyncSingle(
 		...(deadlineAt !== undefined ? { absoluteDeadlineAt: deadlineAt } : {}),
 		...(params.turnBudget ? { initialTurnBudget: params.turnBudget } : {}),
 		...(resolvedToolBudget.budget ? { initialToolBudget: resolvedToolBudget.budget } : {}),
+		...(resolvedRlimits.rlimits ? { rlimits: resolvedRlimits.rlimits } : {}),
 		maxSubagentDepth: resolveChildMaxSubagentDepth(maxSubagentDepth, agentConfig.maxSubagentDepth),
 		...(maxOutput ? { maxOutput } : {}),
 		share: shareEnabled,
@@ -1216,6 +1239,7 @@ export function executeAsyncSingle(
 						waitToolEnabled: params.waitToolEnabled,
 						effectiveAcceptance: resolvedAcceptance,
 						...(resolvedToolBudget.budget ? { toolBudget: resolvedToolBudget.budget } : {}),
+						...(resolvedRlimits.rlimits ? { rlimits: resolvedRlimits.rlimits } : {}),
 					},
 				],
 				resultPath: inheritedNestedRoute ? nestedResultsPath(inheritedNestedRoute.rootRunId, id) : path.join(RESULTS_DIR, `${id}.json`),
@@ -1238,6 +1262,7 @@ export function executeAsyncSingle(
 				deadlineAt,
 				turnBudget: params.turnBudget,
 				toolBudget: params.toolBudget,
+				rlimits: params.rlimits,
 				controlIntercomTarget,
 				childIntercomTargets: childIntercomTarget ? [childIntercomTarget(agent, 0)] : undefined,
 				resultMode: "single",

@@ -5,9 +5,10 @@ import { fileURLToPath } from "node:url";
 import { encodeNestedPathEnv, parseNestedPathEnv, type NestedPathEntry } from "./nested-path.ts";
 import { resolveMcpDirectToolNames } from "./mcp-direct-tool-allowlist.ts";
 import { STRUCTURED_OUTPUT_CAPTURE_ENV, STRUCTURED_OUTPUT_SCHEMA_ENV } from "./structured-output.ts";
-import { TEMP_ROOT_DIR, type JsonSchemaObject, type ResolvedToolBudget } from "../../shared/types.ts";
+import { TEMP_ROOT_DIR, type JsonSchemaObject, type ResolvedRlimits, type ResolvedToolBudget } from "../../shared/types.ts";
 import { THINKING_LEVELS } from "../../shared/model-info.ts";
 import { TOOL_BUDGET_ENV, encodeToolBudgetEnv } from "./tool-budget.ts";
+import { RLIMITS_ENV, encodeRlimitsEnv } from "./rlimits.ts";
 import { CHILD_TOOL_DIAGNOSTIC_PATH_ENV, REQUIRED_CHILD_TOOLS_ENV } from "./tool-availability.ts";
 import { CHILD_WATCHDOG_CONFIG_ENV, encodeChildWatchdogConfig, type ChildWatchdogConfig } from "../../watchdog/child-status.ts";
 import { WAIT_TOOL_ENABLED_ENV } from "../background/wait-config.ts";
@@ -78,6 +79,7 @@ interface BuildPiArgsInput {
 		outputPath: string;
 	};
 	toolBudget?: ResolvedToolBudget;
+	rlimits?: ResolvedRlimits;
 	childWatchdog?: ChildWatchdogConfig;
 	waitToolEnabled?: boolean;
 }
@@ -278,6 +280,8 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 	if (input.steerAckDir) env[SUBAGENT_STEER_ACK_DIR_ENV] = input.steerAckDir;
 	const encodedToolBudget = encodeToolBudgetEnv(input.toolBudget);
 	if (encodedToolBudget) env[TOOL_BUDGET_ENV] = encodedToolBudget;
+	const encodedRlimits = encodeRlimitsEnv(input.rlimits);
+	if (encodedRlimits) env[RLIMITS_ENV] = encodedRlimits;
 	const encodedChildWatchdog = encodeChildWatchdogConfig(input.childWatchdog);
 	if (encodedChildWatchdog) env[CHILD_WATCHDOG_CONFIG_ENV] = encodedChildWatchdog;
 

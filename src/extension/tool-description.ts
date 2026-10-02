@@ -24,6 +24,7 @@ EXECUTION (use exactly ONE mode):
 • Optional context: { context: "fresh" | "fork" } (explicit value overrides every child; when omitted, each requested agent uses its own defaultContext, otherwise "fresh"; inspect agent defaults via { action: "list" })
 • Fork thinking: model strings accept a thinking suffix (provider/model:off|minimal|low|medium|high|xhigh|max). Forking over a parent transcript that carries signed Anthropic thinking blocks forces thinking off only when a child's effective primary or fallback model resolves to the Anthropic provider or anthropic-messages API; unresolved models are treated conservatively. The result notes affected children, including on failures. Use fresh context when an Anthropic child needs thinking.
 • Optional timeout: { timeoutMs } sets a run-level max runtime for foreground and async/background runs
+• Optional OS limits: { rlimits: { cpuSeconds?, fileSizeMb?, openFiles?, coreSizeMb? } } applies Linux process limits through util-linux prlimit. These do not bound memory or process count; CPU is per-process, not process-tree aggregate. A configured limit on macOS/Windows is rejected rather than silently ignored, and limits are inherited by nested agents, which can only lower them. CPU uses a higher hard limit than its configured soft limit; SIGXCPU is attributed to the CPU limit, file-size failures are heuristic, and SIGKILL is never attributed to a limit. See the README for details.
 • Sync wake/checkpoint: foreground sync runs without an explicit timeout, and blocking subagent_wait calls in an interactive parent session return control after the shared budget (default 4 min, config syncWakeMs; 0 disables) while work continues — use the returned status/results and handles to continue instead of launching a replacement; headless auto-drain runs to completion
 • If { action: "list" } shows proactive skill subagent suggestions, consider a small fresh-context fanout for broad tasks where one of those skills would materially help
 
@@ -81,6 +82,7 @@ EXECUTE:
 • Before execution, call { action: "list" }; run only executable/non-disabled configured agents/chains.
 • SINGLE {agent, task?}; PARALLEL {tasks:[{agent,task,count?,output?,reads?,progress?}], concurrency?, worktree?}; CHAIN {chain:[{agent,task?},{parallel:[...]}]}.
 • context can be "fresh" or "fork"; omitted uses each agent defaultContext, otherwise fresh. timeoutMs applies to foreground and async/background runs.
+• rlimits can set cpuSeconds, fileSizeMb, openFiles, and coreSizeMb; Linux only, no memory/process-count bound, inherited by nested agents (which can only lower them). A configured limit on macOS/Windows is rejected, not ignored.
 • Chain templates may use {task}, {previous}, {chain_dir}, and named outputs. Parallel worktree isolation requires a clean git repo.
 • Chain example: { chain: [{agent:"agent-a", task:"Analyze {task}"}, {parallel: [{agent:"agent-b", task:"Check {previous}", count: 3}]}] }
 • If list shows proactive skill subagent suggestions, use a small fresh-context fanout only when the task is broad enough.

@@ -48,6 +48,7 @@ import { formatControlIntercomMessage, formatControlNoticeMessage, resolveContro
 import { resolveTurnBudgetConfig } from "../shared/turn-budget.ts";
 import { formatSpawnBudget, getSpawnBudgetSnapshot, grantSpawnBudget, preflightSpawnBudget, preflightSpawnBudgetGrant, reserveSpawnBudget } from "../shared/spawn-budget.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
+import { validateRlimitsConfig, rlimitsEnforceabilityError } from "../shared/rlimits.ts";
 import { resolveChildDeadline, resolveTimeout } from "../shared/timeout.ts";
 import { finalizeSingleOutput, injectSingleOutputInstruction, normalizeSingleOutputOverride, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, readStatus, resolveChildCwd, sumResultsCost, sumResultsUsage } from "../../shared/utils.ts";
@@ -96,8 +97,10 @@ import {
 	type NestedRouteInfo,
 	type NestedRunSummary,
 	type ResolvedControlConfig,
+	type ResolvedRlimits,
 	type ResolvedTurnBudget,
 	type ResolvedToolBudget,
+	type RlimitsConfig,
 	type SingleResult,
 	type ToolBudgetConfig,
 	type TurnBudgetConfig,
@@ -133,6 +136,7 @@ interface TaskParam {
 	skill?: string | string[] | boolean;
 	acceptance?: AcceptanceInput;
 	toolBudget?: ToolBudgetConfig;
+	rlimits?: RlimitsConfig;
 	timeoutMs?: number;
 }
 
@@ -158,6 +162,7 @@ export interface SubagentParamsLike {
 	timeoutMs?: number;
 	turnBudget?: TurnBudgetConfig;
 	toolBudget?: ToolBudgetConfig;
+	rlimits?: RlimitsConfig;
 	clarify?: boolean;
 	share?: boolean;
 	control?: ControlConfig;
@@ -228,6 +233,8 @@ interface ExecutionContextData {
 	turnBudget?: ResolvedTurnBudget;
 	toolBudget?: ResolvedToolBudget;
 	configToolBudget?: ResolvedToolBudget;
+	rlimits?: ResolvedRlimits;
+	configRlimits?: ResolvedRlimits;
 	contextPolicy: AgentDefaultContextPolicy;
 	modelScope?: ModelScopeConfig;
 	parentSessionId: string | null;
@@ -1314,6 +1321,7 @@ async function resumeAsyncRun(input: {
 		...(input.absoluteDeadlineAt !== undefined ? { absoluteDeadlineAt: input.absoluteDeadlineAt } : {}),
 		...(input.params.turnBudget !== undefined ? { turnBudget: input.params.turnBudget } : {}),
 		...(input.params.toolBudget !== undefined ? { toolBudget: input.params.toolBudget } : {}),
+		...(input.params.rlimits !== undefined ? { rlimits: input.params.rlimits } : {}),
 	});
 	if (result.isError) return result;
 
@@ -1640,6 +1648,19 @@ function resolveEffectiveToolBudget(input: { stepBudget?: ToolBudgetConfig; runB
 	if (input.runBudget !== undefined) return { toolBudget: input.runBudget };
 	if (input.agentBudget !== undefined) return resolveToolBudget(input.agentBudget, "agent.toolBudget");
 	return resolveToolBudget(input.configBudget, "config.toolBudget");
+}
+
+function resolveEffectiveRlimits(input: { stepBudget?: RlimitsConfig; runBudget?: ResolvedRlimits; agentBudget?: RlimitsConfig; configBudget?: RlimitsConfig }): { rlimits?: ResolvedRlimits; error?: string } {
+	const resolved = input.stepBudget !== undefined
+		? validateRlimitsConfig(input.stepBudget, "rlimits")
+		: input.runBudget !== undefined
+			? { rlimits: input.runBudget }
+			: input.agentBudget !== undefined
+				? validateRlimitsConfig(input.agentBudget, "agent.rlimits")
+				: validateRlimitsConfig(input.configBudget, "config.rlimits");
+	if (resolved.error) return resolved;
+	const unsupported = rlimitsEnforceabilityError(resolved.rlimits);
+	return unsupported ? { error: unsupported } : resolved;
 }
 
 function expandTopLevelTaskCounts(tasks: TaskParam[]): { tasks?: TaskParam[]; error?: string } {
@@ -2022,6 +2043,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			...(task.reads !== undefined && task.reads !== true ? { reads: task.reads } : {}),
 			...(task.progress !== undefined ? { progress: task.progress } : {}),
 			...(task.toolBudget !== undefined ? { toolBudget: task.toolBudget } : {}),
+			...(task.rlimits !== undefined ? { rlimits: task.rlimits } : {}),
 			...(task.acceptance !== undefined ? { acceptance: task.acceptance } : {}),
 		}));
 		return executeAsyncChain(id, {
@@ -2056,6 +2078,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			timeoutMs: data.timeoutMs,
 			turnBudget: data.turnBudget,
 			toolBudget: data.toolBudget,
+			rlimits: data.rlimits,
+			configRlimits: data.configRlimits,
 			configToolBudget: data.configToolBudget,
 			globalConcurrencyLimit: deps.config.globalConcurrencyLimit,
 		});
@@ -2095,6 +2119,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			timeoutMs: data.timeoutMs,
 			turnBudget: data.turnBudget,
 			toolBudget: data.toolBudget,
+			rlimits: data.rlimits,
+			configRlimits: data.configRlimits,
 			configToolBudget: data.configToolBudget,
 			globalConcurrencyLimit: deps.config.globalConcurrencyLimit,
 		});
@@ -2149,6 +2175,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			timeoutMs: data.timeoutMs,
 			turnBudget: data.turnBudget,
 			toolBudget: data.toolBudget,
+			rlimits: data.rlimits,
+			configRlimits: data.configRlimits,
 			configToolBudget: data.configToolBudget,
 		});
 	}
@@ -2221,6 +2249,8 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		turnBudget: data.turnBudget,
 		onDetachedExit: (index, result) => updateRememberedForegroundChild(deps.state, { runId, mode: "chain", cwd: effectiveCwd, sessionId: data.parentSessionId, index, result, events: deps.pi.events }),
 		toolBudget: data.toolBudget,
+		rlimits: data.rlimits,
+		configRlimits: data.configRlimits,
 		configToolBudget: data.configToolBudget,
 		globalConcurrencyLimit: deps.config.globalConcurrencyLimit,
 	});
@@ -2276,6 +2306,8 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 			timeoutMs: data.timeoutMs,
 			turnBudget: data.turnBudget,
 			toolBudget: data.toolBudget,
+			rlimits: data.rlimits,
+			configRlimits: data.configRlimits,
 			configToolBudget: data.configToolBudget,
 			globalConcurrencyLimit: deps.config.globalConcurrencyLimit,
 		});
@@ -2353,6 +2385,7 @@ interface ForegroundParallelRunInput {
 	deadlineAt?: number;
 	turnBudget?: ResolvedTurnBudget;
 	toolBudgets: (ResolvedToolBudget | undefined)[];
+	rlimitsList: (ResolvedRlimits | undefined)[];
 }
 
 function buildParallelModeError(message: string): AgentToolResult<Details> {
@@ -2527,6 +2560,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			...resolveChildDeadline(input.timeoutMs, input.deadlineAt, task.timeoutMs),
 			turnBudget: input.turnBudget,
 			toolBudget: input.toolBudgets[index],
+			rlimits: input.rlimitsList[index],
 			onUpdate: input.onUpdate
 				? (progressUpdate) => {
 					const stepResults = progressUpdate.details?.results || [];
@@ -2624,10 +2658,14 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		resolveChildMaxSubagentDepth(currentMaxSubagentDepth, config.maxSubagentDepth),
 	);
 	const toolBudgets: (ResolvedToolBudget | undefined)[] = [];
+	const rlimitsList: (ResolvedRlimits | undefined)[] = [];
 	for (let index = 0; index < tasks.length; index++) {
 		const resolved = resolveEffectiveToolBudget({ stepBudget: tasks[index]?.toolBudget, runBudget: data.toolBudget, agentBudget: agentConfigs[index]?.toolBudget, configBudget: data.configToolBudget });
 		if (resolved.error) return buildParallelModeError(resolved.error);
 		toolBudgets.push(resolved.toolBudget);
+		const resolvedRlimits = resolveEffectiveRlimits({ stepBudget: tasks[index]?.rlimits, runBudget: data.rlimits, agentBudget: agentConfigs[index]?.rlimits, configBudget: data.configRlimits });
+		if (resolvedRlimits.error) return buildParallelModeError(resolvedRlimits.error);
+		rlimitsList.push(resolvedRlimits.rlimits);
 	}
 
 	if (params.worktree) {
@@ -2730,6 +2768,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 					...(behaviorOverrides[i]?.reads !== undefined ? { reads: behaviorOverrides[i]!.reads } : {}),
 					...(progress !== undefined ? { progress } : {}),
 					...(t.toolBudget !== undefined ? { toolBudget: t.toolBudget } : {}),
+					...(t.rlimits !== undefined ? { rlimits: t.rlimits } : {}),
 					...(t.acceptance !== undefined ? { acceptance: t.acceptance } : {}),
 					...(t.timeoutMs !== undefined ? { timeoutMs: t.timeoutMs } : {}),
 				};
@@ -2865,6 +2904,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			deadlineAt,
 			turnBudget: data.turnBudget,
 			toolBudgets,
+			rlimitsList,
 		});
 		for (let i = 0; i < results.length; i++) {
 			const run = results[i]!;
@@ -2980,6 +3020,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 	}
 	const effectiveToolBudget = resolveEffectiveToolBudget({ runBudget: data.toolBudget, agentBudget: agentConfig.toolBudget, configBudget: data.configToolBudget });
 	if (effectiveToolBudget.error) return toExecutionErrorResult(params, new Error(effectiveToolBudget.error));
+	const effectiveRlimits = resolveEffectiveRlimits({ runBudget: data.rlimits, agentBudget: agentConfig.rlimits, configBudget: data.configRlimits });
+	if (effectiveRlimits.error) return toExecutionErrorResult(params, new Error(effectiveRlimits.error));
 
 	const currentProvider = ctx.model?.provider;
 	const availableModels: ModelInfo[] = ctx.modelRegistry.getAvailable().map(toModelInfo);
@@ -3082,6 +3124,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 				timeoutMs: data.timeoutMs,
 				turnBudget: data.turnBudget,
 				toolBudget: effectiveToolBudget.toolBudget,
+				rlimits: effectiveRlimits.rlimits,
 			});
 		}
 	}
@@ -3180,6 +3223,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		deadlineAt,
 		turnBudget: data.turnBudget,
 		toolBudget: effectiveToolBudget.toolBudget,
+		rlimits: effectiveRlimits.rlimits,
 	});
 	if (foregroundControl?.currentIndex === 0) {
 		foregroundControl.interrupt = undefined;
@@ -3219,6 +3263,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		results: [r],
 		...(data.turnBudget ? { turnBudget: data.turnBudget } : {}),
 		...(effectiveToolBudget.toolBudget ? { toolBudget: effectiveToolBudget.toolBudget } : {}),
+		...(effectiveRlimits.rlimits ? { rlimits: effectiveRlimits.rlimits } : {}),
 		progress: params.includeProgress ? allProgress : undefined,
 		artifacts: allArtifactPaths.length ? { dir: artifactsDir, files: allArtifactPaths } : undefined,
 		truncation: r.truncation,
@@ -3678,6 +3723,10 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		if (runToolBudget.error) return buildRequestedModeError(effectiveParams, runToolBudget.error);
 		const configToolBudget = resolveToolBudget(deps.config.toolBudget, "config.toolBudget");
 		if (configToolBudget.error) return buildRequestedModeError(effectiveParams, configToolBudget.error);
+		const runRlimits = validateRlimitsConfig(effectiveParams.rlimits, "rlimits");
+		if (runRlimits.error) return buildRequestedModeError(effectiveParams, runRlimits.error);
+		const configRlimits = validateRlimitsConfig(deps.config.rlimits, "config.rlimits");
+		if (configRlimits.error) return buildRequestedModeError(effectiveParams, configRlimits.error);
 
 		const scope: AgentScope = resolveExecutionAgentScope(effectiveParams.agentScope);
 		const effectiveCwd = effectiveParams.cwd ?? ctx.cwd;
@@ -3885,6 +3934,8 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			turnBudget: turnBudget.turnBudget,
 			toolBudget: runToolBudget.toolBudget,
 			configToolBudget: configToolBudget.toolBudget,
+			rlimits: runRlimits.rlimits,
+			configRlimits: configRlimits.rlimits,
 			contextPolicy,
 			modelScope,
 			parentSessionId: deps.state.currentSessionId,

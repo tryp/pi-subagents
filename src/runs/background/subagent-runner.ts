@@ -59,6 +59,7 @@ import {
 	Semaphore,
 } from "../shared/parallel-utils.ts";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
+import { RLIMITS_ENV, decodeRlimitsEnv, resourceLimitExceededMessage, resourceLimitKindForSignal } from "../shared/rlimits.ts";
 import { outputEntryFromAsyncResult, resolveOutputReferences } from "../shared/chain-outputs.ts";
 import { createStructuredOutputRuntime, readStructuredOutput } from "../shared/structured-output.ts";
 import { readChildToolDiagnosticError } from "../shared/tool-availability.ts";
@@ -450,9 +451,11 @@ function runPiStreaming(
 		onWriterProcess?.({ state: "spawning" });
 		const outputStream = fs.createWriteStream(outputFile, { flags: "w" });
 		const spawnEnv = { ...process.env, ...(env ?? {}), ...getSubagentDepthEnv(maxSubagentDepth) };
+		const spawnRlimits = decodeRlimitsEnv(spawnEnv[RLIMITS_ENV]);
 		const spawnSpec = getPiSpawnCommand(args, {
 			...(piPackageRoot ? { piPackageRoot } : {}),
 			...(piArgv1 ? { argv1: piArgv1 } : {}),
+			rlimits: spawnRlimits,
 		});
 		const child = spawn(spawnSpec.command, spawnSpec.args, {
 			cwd,
@@ -461,6 +464,7 @@ function runPiStreaming(
 			windowsHide: true,
 		});
 		const stderrTail = createBoundedByteTail();
+		if (spawnSpec.rlimitsSkipped) stderrTail.push(`${spawnSpec.rlimitsSkipped}\n`);
 		const rawStdoutTail = createBoundedByteTail();
 		const messages: Message[] = [];
 		const usage = emptyUsage();
@@ -801,6 +805,9 @@ function runPiStreaming(
 			const stderr = stderrTail.text();
 			const finalOutput = getFinalOutput(messages) || rawStdoutTail.text().trim();
 			const finalError = error ?? assistantError;
+			// A limit-triggered death must be reported as a resource bound, not as an
+			// unexplained signal kill that looks identical to our own timeout kill.
+			const resourceLimitKind = resourceLimitKindForSignal(signal, spawnSpec.rlimitsApplied);
 			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && (cleanTerminalAssistantStopReceived || agentSettledReceived) && !finalError;
 			resolve({
 				stderr,
@@ -808,7 +815,7 @@ function runPiStreaming(
 				messages,
 				usage,
 				model,
-				error: stopped ? (stopMessage ?? "Subagent stopped by user.") : timedOut ? (timeoutMessage ?? "Subagent timed out.") : turnBudgetExceeded ? turnBudgetMessage : interrupted || forcedDrainAfterFinalSuccess ? undefined : finalError,
+				error: stopped ? (stopMessage ?? "Subagent stopped by user.") : timedOut ? (timeoutMessage ?? "Subagent timed out.") : turnBudgetExceeded ? turnBudgetMessage : interrupted || forcedDrainAfterFinalSuccess ? undefined : finalError ?? (resourceLimitKind ? resourceLimitExceededMessage(resourceLimitKind, spawnSpec.rlimitsApplied) : undefined),
 				protocolError,
 				finalOutput: (timedOut || stopped) && !finalOutput.trim() ? (stopped ? stopMessage ?? "Subagent stopped by user." : timeoutMessage ?? "Subagent timed out.") : finalOutput,
 				interrupted,
@@ -1207,6 +1214,7 @@ async function runSingleStep(
 			steerAckDir: ctx.steerAckDir,
 			structuredOutput: effectiveStructuredOutput,
 			toolBudget: step.toolBudget,
+			rlimits: step.rlimits,
 			childWatchdog,
 			waitToolEnabled: step.waitToolEnabled,
 		});

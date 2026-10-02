@@ -807,6 +807,7 @@ Important fields:
 | `async` | Default a single-agent launch to background (`true`) or foreground (`false`) when the call omits `async`. Explicit call values and `forceTopLevelAsync` win. |
 | `timeoutMs` | Positive integer default runtime deadline in milliseconds for single-agent launches. An explicit `timeoutMs` wins. |
 | `turnBudget` | JSON object default such as `{"maxTurns":20,"graceTurns":2}` for single-agent launches. An explicit call value wins, followed by this agent default, then global `turnBudget` config. |
+| `rlimits` | JSON object default for single-agent launches, using the fields described in [Resource limits](#resource-limits). An explicit task/step or run value wins, followed by this agent default, then global `rlimits` config. |
 | `acceptance` | Acceptance default for single-agent launches. Use a scalar level such as `checked` or an inline/block YAML map such as `{ level: "none", reason: "lightweight lookup" }`. Explicit call values win; chain and parallel acceptance remains task/step configuration. |
 | `acceptanceRole` | Optional `read-only` or `writer` role for automatic acceptance inference. Explicit task mutation or no-edit intent wins; otherwise the declared role replaces agent-name guessing. This does not grant or revoke tools. |
 | `completionGuard` | Set `false` only for non-implementation agents that may mention implementation words while using mutation-capable tools such as `bash`. |
@@ -1251,7 +1252,7 @@ Agent definitions are not loaded into context by default. Management actions let
 | `outputMode` | `"inline" \| "file-only"` | `inline` | Return saved output inline or as a concise saved-file reference. `file-only` requires an `output` path. |
 | `skill` | `string \| string[] \| false` | agent default | Override skills or disable all. |
 | `model` | string | agent default | Override model. |
-| `tasks` | array | - | Top-level parallel tasks. Supports `agent`, `task`, `cwd`, `count`, `output`, `outputMode`, `reads`, `progress`, `skill`, `model`, `toolBudget`, and `acceptance`. |
+| `tasks` | array | - | Top-level parallel tasks. Supports `agent`, `task`, `cwd`, `count`, `output`, `outputMode`, `reads`, `progress`, `skill`, `model`, `toolBudget`, `rlimits`, and `acceptance`. |
 | `concurrency` | number | config or `4` | Top-level parallel concurrency. |
 | `worktree` | boolean | false | Create isolated git worktrees for parallel tasks. |
 | `chain` | array | - | Sequential, static parallel, and dynamic fanout chain steps. Steps and chain parallel tasks support `phase`, `label`, `as`, `outputSchema`, and `acceptance` in addition to the usual execution fields. Dynamic fanout uses `expand`, one child `parallel` template, and `collect`. With `action: "append-step"`, pass exactly one step to append to a running async chain. |
@@ -1265,6 +1266,7 @@ Agent definitions are not loaded into context by default. Management actions let
 | `timeoutMs` | number | none | Optional run-level max runtime in milliseconds for foreground and async/background runs. |
 | `turnBudget` | object | none | Optional assistant-turn budget `{ maxTurns, graceTurns }`. At `maxTurns` the child is warned to wrap up. After the grace window (default 1), termination occurs at the next assistant boundary; a response that starts tool work records `termination-deferred` until a later boundary. Partial output is returned on abort. |
 | `toolBudget` | object | none | Optional child tool-call budget `{ soft?, hard, block? }`. At `soft` the child is nudged to finalize. After `hard`, configured tools are blocked; `block` defaults to `read`, `grep`, `find`, and `ls`, while `"*"` blocks every tool call. Final assistant text is never blocked. |
+| `rlimits` | object | none | Optional Linux OS resource limits for the child; see [Resource limits](#resource-limits). |
 | `cwd` | string | runtime cwd | Override working directory. |
 | `maxOutput` | object | 200KB, 5000 lines | Final output truncation limits. |
 | `artifacts` | boolean | true | Write debug artifacts. |
@@ -1281,7 +1283,7 @@ Bound writer work with a narrow task and an outer `timeoutMs` that leaves enough
 
 Use `outputMode: "file-only"` when a saved output may be large and the parent only needs a pointer. The returned text is a compact reference like `Output saved to: /abs/report.md (48.2 KB, 2847 lines). Read this file if needed.` Failed runs and save errors still return normal inline output for debugging. In chains, later `{previous}` steps receive the same compact reference when the prior step used file-only mode. A child with only read-only tools does not need direct filesystem access for `output`: it returns the complete artifact in its final response and the runtime persists it. Children with mutation-capable tools retain the direct-write instruction.
 
-Sequential and parallel chain tasks accept `agent`, `task`, `phase`, `label`, `as`, `outputSchema`, `cwd`, `output`, `outputMode`, `reads`, `progress`, `skill`, `model`, and `toolBudget`. Parallel tasks also accept `count`. Parallel step groups accept `parallel`, `concurrency`, `failFast`, and `worktree`. If `outputSchema` is present, the child must call `structured_output` with schema-valid JSON; prose-only completion or invalid JSON fails the step. Validated structured values are preserved on the step result, and `as` also exposes a compact text representation through `{outputs.name}`.
+Sequential and parallel chain tasks accept `agent`, `task`, `phase`, `label`, `as`, `outputSchema`, `cwd`, `output`, `outputMode`, `reads`, `progress`, `skill`, `model`, `toolBudget`, and `rlimits`. Parallel tasks also accept `count`. Parallel step groups accept `parallel`, `concurrency`, `failFast`, and `worktree`. If `outputSchema` is present, the child must call `structured_output` with schema-valid JSON; prose-only completion or invalid JSON fails the step. Validated structured values are preserved on the step result, and `as` also exposes a compact text representation through `{outputs.name}`.
 
 Status and control actions:
 
@@ -1350,6 +1352,27 @@ After a worktree parallel step completes, worktrees and temp branches are cleane
 - If commit inspection or pin creation fails, the worktree is removed but the branch is deliberately left intact: recoverability beats tidiness.
 
 Salvage refs accumulate by design until reviewed; expired pins are pruned automatically — the next worktree-enabled run drops managed refs older than 30 days. Manually created pins (any name outside `managed/v1/`, e.g. `refs/pi-salvage/manual-*`) and legacy-format refs are never auto-dropped. List pins with `git for-each-ref --format='%(refname)' refs/pi-salvage`. Review the JSON/patch artifacts first, then drop pins you no longer need — all at once with `git for-each-ref --format='%(refname)' refs/pi-salvage | while read ref; do git update-ref -d "$ref"; done`, or programmatically with the exported `dropSalvageRefs(repoCwd, refs?)` and `pruneExpiredSalvageRefs(repoCwd, nowMs?)` from `src/runs/shared/worktree.ts`. Runs also surface newly pinned commits in their result output and status/fleet views (`salvage: N ref(s)`); inspect the associated artifacts before dropping those pins.
+
+## Resource limits
+
+`rlimits` is an optional object with no fields beyond those listed below, accepted on a run, each parallel task, each chain step/task, agent frontmatter (JSON object), or as the global `rlimits` setting in `~/.pi/agent/extensions/subagent/config.json`. More specific values take precedence: task/step, then run, then explicit agent frontmatter, then global default. Omitted fields do not impose a limit.
+
+| Field | Minimum | Limit |
+|-------|---------|-------|
+| `cpuSeconds` | integer >= 1 | Per-process CPU-time soft ceiling in seconds. It is enforced as soft:hard, where hard = soft + max(5, soft). The mandatory gap lets the runner distinguish SIGXCPU from its own timeout kill; CPU is not aggregated across a child process tree, so a forked process has its own CPU clock. |
+| `fileSizeMb` | integer >= 1 | Maximum size in MiB of any one file the child may write. A breach commonly surfaces as the child catching EFBIG and exiting 1, so it is reported heuristically and only when this limit was configured. |
+| `openFiles` | integer >= 64 | Maximum number of open file descriptors. Values below 64 are rejected because they can prevent the child from starting. |
+| `coreSizeMb` | integer >= 0 | Maximum core-dump size in MiB; `0` suppresses core dumps. |
+
+These limits use Linux `prlimit` (util-linux). On macOS and Windows a configured limit is rejected with an error rather than silently ignored, because a resource bound that is quietly dropped gives a false sense of protection. On Linux, a limit that cannot be applied (no `prlimit` on `PATH`, or a request already covered by tighter inherited hard limits) is reported on the child's stderr instead of being dropped silently. They do **not** bound memory or process count. `addressSpaceMb` and `dataSegMb` are rejected because RLIMIT_AS and RLIMIT_DATA can abort Node at startup (a 1.5 GiB address-space cap failed at 200 MiB RSS; 256–512 MiB data-segment caps crashed). `rssMb` is rejected because RLIMIT_RSS is a no-op on Linux (a process reached 2.4 GiB with a 50 MiB limit). `maxProcesses` is rejected because RLIMIT_NPROC is per real user ID, not per sub-agent tree; it may do nothing or prevent forking (a five-process cap blocked a child when the user already had about 220 processes).
+
+Limits are inherited by nested sub-agents through the `PI_SUBAGENT_RLIMITS` child environment variable, which is why a nested request is clamped down to the hard limits that process already inherited: a child can lower limits but never raise them, so a higher nested value tightens to the inherited ceiling and the child still starts. Without that clamp, `prlimit` rejects the raise with `Operation not permitted` and never execs the child. A limit reported to the parent is the effective clamped value, not the requested one. SIGXCPU is confidently reported as a CPU-limit death. SIGKILL is never attributed to a limit because it may be a supervisor timeout, kernel OOM kill, or ambiguous collapsed CPU soft/hard limit.
+
+Example global default:
+
+```json
+{ "rlimits": { "cpuSeconds": 600, "fileSizeMb": 128, "openFiles": 256, "coreSizeMb": 0 } }
+```
 
 ## Configuration
 
