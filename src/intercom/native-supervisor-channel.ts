@@ -671,6 +671,7 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 			else {
 				removeRequestFile(request.requestFile);
 			}
+			// Wake idle parents for asks; streaming parents steer the request into the current turn.
 			pi.sendMessage({
 				customType: "subagent_supervisor_request",
 				content: requestVisibleText(request),
@@ -684,7 +685,7 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 					agent: request.agent,
 					childIndex: request.childIndex,
 				},
-			});
+			}, request.expectsReply ? { triggerTurn: true } : undefined);
 			if (request.expectsReply) {
 				(pi as { events?: IntercomEventBus }).events?.emit(INTERCOM_DETACH_REQUEST_EVENT, {
 					requestId: request.requestId,

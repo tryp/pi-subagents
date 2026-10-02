@@ -48,7 +48,7 @@ function makeState(sessionId: string | null, ctx: unknown): SubagentState {
 	};
 }
 
-function writeRequest(input: { sessionId: string; runId: string; agent?: string; index?: number; message?: string; createdAt?: number; expiresAt?: number; legacyIdOnly?: boolean }): string {
+function writeRequest(input: { sessionId: string; runId: string; agent?: string; index?: number; message?: string; createdAt?: number; expiresAt?: number; legacyIdOnly?: boolean; reason?: "need_decision" | "interview_request" | "progress_update"; expectsReply?: boolean }): string {
 	const agent = input.agent ?? "worker";
 	const index = input.index ?? 0;
 	const channelDir = resolveSupervisorChannelDir(input.runId, agent, index);
@@ -61,9 +61,9 @@ function writeRequest(input: { sessionId: string; runId: string; agent?: string;
 		id: requestId,
 		createdAt: input.createdAt ?? Date.now(),
 		...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
-		reason: "need_decision",
+		reason: input.reason ?? "need_decision",
 		message: input.message ?? "Need a decision",
-		expectsReply: true,
+		expectsReply: input.expectsReply ?? true,
 		orchestratorSessionId: input.sessionId,
 		orchestratorTarget: "shared-name",
 		runId: input.runId,
@@ -142,6 +142,70 @@ describe("native supervisor channel", () => {
 		assert.deepEqual(sent.map((message) => message.details?.id), [matchingId]);
 		assert.equal(channel.pending.has(matchingId), false, "disposed channel clears pending requests");
 		assert.equal(sent.some((message) => message.details?.id === otherId), false);
+	});
+
+	it("triggers a turn when delivering supervisor requests that expect a reply", () => {
+		const currentSessionId = `session-${randomUUID()}`;
+		const runId = `run-${randomUUID()}`;
+		const requestId = writeRequest({ sessionId: currentSessionId, runId, message: "Choose an option" });
+		const sent: Array<{ message: { customType?: string; content?: unknown; details?: { requestId?: string; expectsReply?: boolean } }; options?: { triggerTurn?: boolean } }> = [];
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: false,
+			sessionManager: { getSessionId: () => currentSessionId, getSessionFile: () => null, getEntries: () => [] },
+		};
+		const pi = {
+			getAllTools: () => [],
+			registerTool: () => {},
+			sendMessage: (message: typeof sent[number]["message"], options?: typeof sent[number]["options"]) => { sent.push({ message, options }); },
+			getSessionName: () => "shared-name",
+		};
+		const channel = createNativeSupervisorChannel(pi as never, makeState(currentSessionId, ctx));
+
+		channel.start();
+		channel.dispose();
+
+		assert.equal(sent.length, 1);
+		assert.equal(sent[0]?.message.customType, "subagent_supervisor_request");
+		assert.match(String(sent[0]?.message.content), /Choose an option/);
+		assert.equal(sent[0]?.message.details?.requestId, requestId);
+		assert.equal(sent[0]?.message.details?.expectsReply, true);
+		assert.deepEqual(sent[0]?.options, { triggerTurn: true });
+	});
+
+	it("does not trigger a turn for progress updates that do not expect a reply", () => {
+		const currentSessionId = `session-${randomUUID()}`;
+		const runId = `run-${randomUUID()}`;
+		const requestId = writeRequest({
+			sessionId: currentSessionId,
+			runId,
+			reason: "progress_update",
+			message: "Stage B2 is complete",
+			expectsReply: false,
+		});
+		const sent: Array<{ message: { customType?: string; content?: unknown; details?: { requestId?: string; expectsReply?: boolean } }; options?: { triggerTurn?: boolean } }> = [];
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: false,
+			sessionManager: { getSessionId: () => currentSessionId, getSessionFile: () => null, getEntries: () => [] },
+		};
+		const pi = {
+			getAllTools: () => [],
+			registerTool: () => {},
+			sendMessage: (message: typeof sent[number]["message"], options?: typeof sent[number]["options"]) => { sent.push({ message, options }); },
+			getSessionName: () => "shared-name",
+		};
+		const channel = createNativeSupervisorChannel(pi as never, makeState(currentSessionId, ctx));
+
+		channel.start();
+		channel.dispose();
+
+		assert.equal(sent.length, 1);
+		assert.equal(sent[0]?.message.customType, "subagent_supervisor_request");
+		assert.match(String(sent[0]?.message.content), /Stage B2 is complete/);
+		assert.equal(sent[0]?.message.details?.requestId, requestId);
+		assert.equal(sent[0]?.message.details?.expectsReply, false);
+		assert.equal(sent[0]?.options, undefined);
 	});
 
 	it("normalizes legacy id-only requests while exposing canonical requestId details", () => {
