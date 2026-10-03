@@ -49,6 +49,7 @@ import { resolveTurnBudgetConfig } from "../shared/turn-budget.ts";
 import { formatSpawnBudget, getSpawnBudgetSnapshot, grantSpawnBudget, preflightSpawnBudget, preflightSpawnBudgetGrant, reserveSpawnBudget } from "../shared/spawn-budget.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
 import { validateRlimitsConfig, rlimitsEnforceabilityError } from "../shared/rlimits.ts";
+import { resolvePrlimitPath } from "../shared/pi-spawn.ts";
 import { resolveChildDeadline, resolveTimeout } from "../shared/timeout.ts";
 import { finalizeSingleOutput, injectSingleOutputInstruction, normalizeSingleOutputOverride, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, readStatus, resolveChildCwd, sumResultsCost, sumResultsUsage } from "../../shared/utils.ts";
@@ -1659,7 +1660,7 @@ function resolveEffectiveRlimits(input: { stepBudget?: RlimitsConfig; runBudget?
 				? validateRlimitsConfig(input.agentBudget, "agent.rlimits")
 				: validateRlimitsConfig(input.configBudget, "config.rlimits");
 	if (resolved.error) return resolved;
-	const unsupported = rlimitsEnforceabilityError(resolved.rlimits);
+	const unsupported = rlimitsEnforceabilityError(resolved.rlimits, process.platform, () => resolvePrlimitPath() !== undefined);
 	return unsupported ? { error: unsupported } : resolved;
 }
 

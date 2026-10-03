@@ -566,4 +566,35 @@ describe("rlimitsEnforceabilityError", () => {
 		assert.equal(rlimitsEnforceabilityError(undefined, "darwin"), undefined);
 		assert.equal(rlimitsEnforceabilityError({}, "win32"), undefined);
 	});
+
+	it("rejects limits on Linux when prlimit is not on PATH", () => {
+		// A Linux host without util-linux would otherwise run the child fully
+		// unbounded and report nothing on a successful run.
+		const error = rlimitsEnforceabilityError({ cpuSeconds: 30 }, "linux", () => false);
+		assert.match(error ?? "", /prlimit\(1\)/);
+		assert.match(error ?? "", /not found on PATH/);
+	});
+
+	it("accepts limits on Linux when prlimit is available", () => {
+		assert.equal(rlimitsEnforceabilityError({ cpuSeconds: 30 }, "linux", () => true), undefined);
+	});
+
+	it("does not probe for prlimit when no limits are configured or the platform is wrong", () => {
+		let probes = 0;
+		const probe = () => {
+			probes += 1;
+			return true;
+		};
+		assert.equal(rlimitsEnforceabilityError(undefined, "linux", probe), undefined);
+		assert.equal(rlimitsEnforceabilityError({}, "linux", probe), undefined);
+		// Wrong platform still fails closed with the platform error, without probing.
+		assert.match(rlimitsEnforceabilityError({ cpuSeconds: 30 }, "darwin", probe) ?? "", /requires Linux/);
+		assert.equal(probes, 0);
+	});
+
+	it("still rejects a missing prlimit when the platform is checked without a probe", () => {
+		// Callers that omit the probe keep the platform-only behavior rather than
+		// failing open on an unknown probe result.
+		assert.equal(rlimitsEnforceabilityError({ cpuSeconds: 30 }, "linux"), undefined);
+	});
 });

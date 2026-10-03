@@ -115,10 +115,17 @@ export function validateRlimitsConfig(
 export function rlimitsEnforceabilityError(
 	rlimits: ResolvedRlimits | undefined,
 	platform: NodeJS.Platform = process.platform,
+	hasPrlimit?: () => boolean,
 ): string | undefined {
 	if (!hasRlimits(rlimits)) return undefined;
 	if (platform !== "linux") {
 		return `rlimits requires Linux (prlimit); this host is ${platform}. Remove the rlimits configuration or run on Linux.`;
+	}
+	// Refuse rather than degrade: on a Linux host without util-linux the child would
+	// run completely unbounded, and a successful run reports nothing to the caller.
+	// The probe is injected (and lazy) so pure callers and tests can skip it.
+	if (hasPrlimit && !hasPrlimit()) {
+		return `rlimits requires the prlimit(1) command, which was not found on PATH. Install util-linux or remove the rlimits configuration.`;
 	}
 	return undefined;
 }

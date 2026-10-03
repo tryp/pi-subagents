@@ -76,6 +76,7 @@ import { acceptanceFailureMessage, aggregateAcceptanceReport, evaluateAcceptance
 import type { ChainOutputMap } from "../../shared/types.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
 import { validateRlimitsConfig, rlimitsEnforceabilityError } from "../shared/rlimits.ts";
+import { resolvePrlimitPath } from "../shared/pi-spawn.ts";
 import { resolveChildDeadline } from "../shared/timeout.ts";
 
 interface ChainExecutionDetailsInput {
@@ -229,7 +230,7 @@ function resolveChainRlimits(input: { stepBudget?: RlimitsConfig; runBudget?: Re
 				? validateRlimitsConfig(input.agentBudget, "agent.rlimits")
 				: validateRlimitsConfig(input.configBudget, "config.rlimits");
 	if (resolved.error) return { rlimits: resolved.rlimits, error: resolved.error };
-	const unsupported = rlimitsEnforceabilityError(resolved.rlimits);
+	const unsupported = rlimitsEnforceabilityError(resolved.rlimits, process.platform, () => resolvePrlimitPath() !== undefined);
 	return unsupported ? { error: unsupported } : { rlimits: resolved.rlimits };
 }
 

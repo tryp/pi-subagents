@@ -15,7 +15,7 @@ import { applyThinkingSuffix } from "../shared/pi-args.ts";
 import { injectOutputPathSystemPrompt, injectSingleOutputInstruction, normalizeSingleOutputOverride, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { buildChainInstructions, isDynamicParallelStep, isParallelStep, resolveStepBehavior, suppressProgressForReadOnlyTask, writeInitialProgressFile, type ChainStep, type ResolvedStepBehavior, type SequentialStep, type StepOverrides } from "../../shared/settings.ts";
 import type { RunnerStep } from "../shared/parallel-utils.ts";
-import { resolvePiPackageRoot } from "../shared/pi-spawn.ts";
+import { resolvePiPackageRoot, resolvePrlimitPath } from "../shared/pi-spawn.ts";
 import { buildSkillInjection, normalizeSkillInput, resolveSkillsWithFallback } from "../../agents/skills.ts";
 import { buildAgentMemoryInjection } from "../../agents/agent-memory.ts";
 import { PI_CODING_AGENT_PACKAGE_ROOT_ENV, resolveChildCwd } from "../../shared/utils.ts";
@@ -586,7 +586,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 		const rlimitsInput = s.rlimits ?? params.rlimits ?? a.rlimits ?? params.configRlimits;
 		const resolvedRlimits = validateRlimitsConfig(rlimitsInput, s.rlimits ? "rlimits" : a.rlimits ? "agent.rlimits" : "config.rlimits");
 		if (resolvedRlimits.error) throw new AsyncStartValidationError(resolvedRlimits.error);
-		const rlimitsUnsupported = rlimitsEnforceabilityError(resolvedRlimits.rlimits);
+		const rlimitsUnsupported = rlimitsEnforceabilityError(resolvedRlimits.rlimits, process.platform, () => resolvePrlimitPath() !== undefined);
 		if (rlimitsUnsupported) throw new AsyncStartValidationError(rlimitsUnsupported);
 		const stepCwd = resolveChildCwd(runnerCwd, s.cwd);
 		const instructionCwd = behaviorCwd ?? stepCwd;
@@ -1147,7 +1147,7 @@ export function executeAsyncSingle(
 	const rlimitsInput = params.rlimits ?? agentConfig.rlimits ?? params.configRlimits;
 	const resolvedRlimits = validateRlimitsConfig(rlimitsInput, params.rlimits ? "rlimits" : agentConfig.rlimits ? "agent.rlimits" : "config.rlimits");
 	if (resolvedRlimits.error) return formatAsyncStartError("single", resolvedRlimits.error);
-	const rlimitsUnsupported = rlimitsEnforceabilityError(resolvedRlimits.rlimits);
+	const rlimitsUnsupported = rlimitsEnforceabilityError(resolvedRlimits.rlimits, process.platform, () => resolvePrlimitPath() !== undefined);
 	if (rlimitsUnsupported) return formatAsyncStartError("single", rlimitsUnsupported);
 	const deadlineAt = params.absoluteDeadlineAt ?? (params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined);
 	const timeoutMs = params.absoluteDeadlineAt !== undefined && deadlineAt !== undefined

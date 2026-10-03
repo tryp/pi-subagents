@@ -239,7 +239,11 @@ export function getPiSpawnCommand(
 	const flags = buildRlimitArgs(effective);
 	if (flags.length === 0) return base;
 	const prlimitPath = resolvePrlimitPath(deps);
-	if (!prlimitPath) return base;
+	// Unreachable while `rlimitsUnsupportedReason` checks first, but never fall back
+	// to an unwrapped command: an unapplied requested bound must stay visible.
+	if (!prlimitPath) {
+		return { ...base, rlimitsSkipped: `OS resource limits (${describeRlimits(deps.rlimits)}) were not applied: the prlimit(1) command was not found on PATH.` };
+	}
 	// prlimit(1) execs the target in place, so the returned PID is the child
 	// itself and signal/exit semantics are unchanged.
 	return {
