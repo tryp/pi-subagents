@@ -303,10 +303,33 @@ export function validateResolvedAcceptanceConfig(input: unknown, pathLabel = "ac
 	for (const field of ["criteria", "evidence", "verify", "stopRules"] as const) {
 		if (!Array.isArray(value[field])) errors.push(`${pathLabel}.${field} must be an array.`);
 	}
+	// resolveEffectiveAcceptance normalizes every resolved criterion into a full
+	// gate object; the real-writer descriptor integration test guards this shape.
 	if (Array.isArray(value.criteria)) {
 		for (const [index, criterion] of value.criteria.entries()) {
+			const criterionPath = `${pathLabel}.criteria[${index}]`;
 			if (!criterion || typeof criterion !== "object" || Array.isArray(criterion)) {
-				errors.push(`${pathLabel}.criteria[${index}] must be a resolved acceptance criterion object.`);
+				errors.push(`${criterionPath} must be a resolved acceptance criterion object.`);
+				continue;
+			}
+			const resolvedCriterion = criterion as Record<string, unknown>;
+			if (typeof resolvedCriterion.id !== "string" || !resolvedCriterion.id.trim()) {
+				errors.push(`${criterionPath}.id must be a non-empty string.`);
+			}
+			if (typeof resolvedCriterion.must !== "string" || !resolvedCriterion.must.trim()) {
+				errors.push(`${criterionPath}.must must be a non-empty string.`);
+			}
+			if (!Array.isArray(resolvedCriterion.evidence)) {
+				errors.push(`${criterionPath}.evidence must be an array of supported evidence kinds.`);
+			} else {
+				for (const [evidenceIndex, evidence] of resolvedCriterion.evidence.entries()) {
+					if (typeof evidence !== "string" || !VALID_EVIDENCE.has(evidence as AcceptanceEvidenceKind)) {
+						errors.push(`${criterionPath}.evidence[${evidenceIndex}] is not a supported evidence kind.`);
+					}
+				}
+			}
+			if (resolvedCriterion.severity !== "required" && resolvedCriterion.severity !== "recommended") {
+				errors.push(`${criterionPath}.severity must be required or recommended.`);
 			}
 		}
 	}

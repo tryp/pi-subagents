@@ -115,6 +115,64 @@ describe("async recovery descriptor acceptance", () => {
 		);
 	});
 
+	it("accepts normalized criteria emitted by the real resolver", () => {
+		const resolved = resolveEffectiveAcceptance({
+			explicit: { level: "checked", criteria: ["Tests pass"] },
+			agentName: "worker",
+			task: "Explore",
+			mode: "single",
+		});
+		assert.deepEqual(resolved.criteria, [{
+			id: "criterion-1",
+			must: "Tests pass",
+			evidence: resolved.evidence,
+			severity: "required",
+		}]);
+		assert.deepEqual(validateResolvedAcceptanceConfig(resolved), []);
+	});
+
+	it("rejects string criteria in a resolved acceptance config", () => {
+		const resolved = resolveEffectiveAcceptance({ agentName: "worker", task: "Explore", mode: "single" });
+		assert.match(
+			validateResolvedAcceptanceConfig({ ...resolved, criteria: ["criterion"] }).join(" "),
+			/criteria\[0\] must be a resolved acceptance criterion object/,
+		);
+	});
+
+	it("rejects resolved criterion objects without severity", () => {
+		const resolved = resolveEffectiveAcceptance({
+			explicit: { level: "checked", criteria: ["Tests pass"] },
+			agentName: "worker",
+			task: "Explore",
+			mode: "single",
+		});
+		const criterion = resolved.criteria[0];
+		assert.ok(criterion);
+		const withoutSeverity: Record<string, unknown> = { ...criterion };
+		delete withoutSeverity.severity;
+		assert.match(
+			validateResolvedAcceptanceConfig({ ...resolved, criteria: [withoutSeverity] }).join(" "),
+			/criteria\[0\]\.severity must be required or recommended/,
+		);
+	});
+
+	it("rejects resolved criterion objects without evidence", () => {
+		const resolved = resolveEffectiveAcceptance({
+			explicit: { level: "checked", criteria: ["Tests pass"] },
+			agentName: "worker",
+			task: "Explore",
+			mode: "single",
+		});
+		const criterion = resolved.criteria[0];
+		assert.ok(criterion);
+		const withoutEvidence: Record<string, unknown> = { ...criterion };
+		delete withoutEvidence.evidence;
+		assert.match(
+			validateResolvedAcceptanceConfig({ ...resolved, criteria: [withoutEvidence] }).join(" "),
+			/criteria\[0\]\.evidence must be an array of supported evidence kinds/,
+		);
+	});
+
 	it("rejects malformed resolved acceptance in recovery descriptors", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-acceptance-invalid-"));
 		try {
