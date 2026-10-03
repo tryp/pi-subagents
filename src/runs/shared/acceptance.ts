@@ -290,6 +290,9 @@ export function validateResolvedAcceptanceConfig(input: unknown, pathLabel = "ac
 		errors.push(`${pathLabel}.level must be one of none, attested, checked, verified, reviewed.`);
 	}
 	if (typeof value.explicit !== "boolean") errors.push(`${pathLabel}.explicit must be a boolean.`);
+	if (value.reason !== undefined && value.explicit !== true) {
+		errors.push(`${pathLabel}.reason is only valid on an explicitly requested acceptance config.`);
+	}
 	if (!Array.isArray(value.inferredReason)) {
 		errors.push(`${pathLabel}.inferredReason must be an array of non-empty strings.`);
 	} else {

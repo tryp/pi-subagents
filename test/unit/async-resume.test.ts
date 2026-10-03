@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { buildRevivedAsyncTask, readAsyncRecoveryDescriptor, resolveAsyncResumeTarget } from "../../src/runs/background/async-resume.ts";
-import { acceptanceInputFromResolved, resolveEffectiveAcceptance, validateAcceptanceInput } from "../../src/runs/shared/acceptance.ts";
+import { acceptanceInputFromResolved, resolveEffectiveAcceptance, validateAcceptanceInput, validateResolvedAcceptanceConfig } from "../../src/runs/shared/acceptance.ts";
 import type { AcceptanceInput, SteeringRecoveryDescriptor } from "../../src/shared/types.ts";
 
 function writeJson(filePath: string, value: object): void {
@@ -61,6 +61,7 @@ describe("async recovery descriptor acceptance", () => {
 			{ label: "verified", input: "verified" },
 			{ label: "none with reason", input: { level: "none", reason: "disabled by parent" } },
 			{ label: "false", input: false },
+			{ label: "bare none shorthand", input: "none" },
 			{
 				label: "full config",
 				input: {
@@ -93,6 +94,25 @@ describe("async recovery descriptor acceptance", () => {
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
+	});
+
+	it("enforces that a resolved reason came from explicit acceptance input", () => {
+		const cases: Array<{ label: string; input: AcceptanceInput | undefined }> = [
+			{ label: "deprecated false shorthand", input: false },
+			{ label: "none with reason", input: { level: "none", reason: "disabled by caller" } },
+		];
+		for (const { label, input } of cases) {
+			const resolved = resolveEffectiveAcceptance({ explicit: input, agentName: "worker", task: "Explore", mode: "single" });
+			assert.equal(resolved.explicit, true, `${label} must retain explicit provenance`);
+			assert.ok(resolved.reason, `${label} must carry its caller-provided reason`);
+			assert.deepEqual(validateResolvedAcceptanceConfig(resolved), [], `${label} resolver output is valid`);
+		}
+
+		const resolved = resolveEffectiveAcceptance({ explicit: { level: "none", reason: "disabled by caller" }, agentName: "worker", task: "Explore", mode: "single" });
+		assert.match(
+			validateResolvedAcceptanceConfig({ ...resolved, explicit: false }).join(" "),
+			/reason is only valid on an explicitly requested acceptance config/,
+		);
 	});
 
 	it("rejects malformed resolved acceptance in recovery descriptors", () => {
