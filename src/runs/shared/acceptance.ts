@@ -43,6 +43,7 @@ const VALID_EVIDENCE = new Set<AcceptanceEvidenceKind>([
 	"manual-notes",
 ]);
 const ACCEPTANCE_CONFIG_KEYS = new Set(["level", "criteria", "evidence", "verify", "review", "stopRules", "reason"]);
+const RESOLVED_ACCEPTANCE_CONFIG_KEYS = new Set([...ACCEPTANCE_CONFIG_KEYS, "explicit", "inferredReason"]);
 const ACCEPTANCE_GATE_KEYS = new Set(["id", "must", "evidence", "severity"]);
 const ACCEPTANCE_VERIFY_KEYS = new Set(["id", "command", "timeoutMs", "cwd", "env", "allowFailure"]);
 const ACCEPTANCE_REVIEW_KEYS = new Set(["agent", "focus", "required"]);
@@ -274,6 +275,60 @@ export function validateAcceptanceInput(input: unknown, pathLabel = "acceptance"
 		}
 	}
 	return errors;
+}
+
+export function validateResolvedAcceptanceConfig(input: unknown, pathLabel = "acceptance"): string[] {
+	const errors: string[] = [];
+	if (!input || typeof input !== "object" || Array.isArray(input)) {
+		return [`${pathLabel} must be a resolved acceptance object.`];
+	}
+	const value = input as Record<string, unknown>;
+	for (const key of Object.keys(value)) {
+		if (!RESOLVED_ACCEPTANCE_CONFIG_KEYS.has(key)) errors.push(`${pathLabel}.${key} is not supported.`);
+	}
+	if (typeof value.level !== "string" || !VALID_LEVELS.has(value.level as AcceptanceLevel) || value.level === "auto") {
+		errors.push(`${pathLabel}.level must be one of none, attested, checked, verified, reviewed.`);
+	}
+	if (typeof value.explicit !== "boolean") errors.push(`${pathLabel}.explicit must be a boolean.`);
+	if (!Array.isArray(value.inferredReason)) {
+		errors.push(`${pathLabel}.inferredReason must be an array of non-empty strings.`);
+	} else {
+		for (const [index, reason] of value.inferredReason.entries()) {
+			if (typeof reason !== "string" || !reason.trim()) errors.push(`${pathLabel}.inferredReason[${index}] must be a non-empty string.`);
+		}
+	}
+	for (const field of ["criteria", "evidence", "verify", "stopRules"] as const) {
+		if (!Array.isArray(value[field])) errors.push(`${pathLabel}.${field} must be an array.`);
+	}
+	if (Array.isArray(value.criteria)) {
+		for (const [index, criterion] of value.criteria.entries()) {
+			if (!criterion || typeof criterion !== "object" || Array.isArray(criterion)) {
+				errors.push(`${pathLabel}.criteria[${index}] must be a resolved acceptance criterion object.`);
+			}
+		}
+	}
+	// Reuse field-level validation while bypassing only the input-only policy that
+	// forbids callers from explicitly requesting `reviewed`. Inferred resolved
+	// configs may legitimately have that level.
+	const validationShape: Record<string, unknown> = {};
+	for (const key of ACCEPTANCE_CONFIG_KEYS) {
+		if (Object.hasOwn(value, key)) validationShape[key] = value[key];
+	}
+	if (value.level === "reviewed") validationShape.level = "checked";
+	errors.push(...validateAcceptanceInput(validationShape, pathLabel));
+	return errors;
+}
+
+export function acceptanceInputFromResolved(resolved: ResolvedAcceptanceConfig): AcceptanceInput {
+	return {
+		level: resolved.level,
+		criteria: resolved.criteria,
+		evidence: resolved.evidence,
+		verify: resolved.verify,
+		...(resolved.review !== undefined ? { review: resolved.review } : {}),
+		stopRules: resolved.stopRules,
+		...(resolved.reason !== undefined ? { reason: resolved.reason } : {}),
+	};
 }
 
 export function validateExecutionAcceptance(input: {

@@ -40,7 +40,7 @@ import { resolveLaunchAsync } from "../background/async-default-config.ts";
 import type { ScheduledRunAction } from "../background/scheduled-runs.ts";
 import { enqueueChainAppendRequest, readPendingChainAppendRequests, runnerStepOutputNames } from "../background/chain-append.ts";
 import { ChainOutputValidationError, validateChainOutputBindingsWithContext } from "../shared/chain-outputs.ts";
-import { validateExecutionAcceptance } from "../shared/acceptance.ts";
+import { acceptanceInputFromResolved, validateExecutionAcceptance } from "../shared/acceptance.ts";
 import { createForkContextResolver, forkedChildRequiresThinkingOff } from "../../shared/fork-context.ts";
 import { resolveCurrentSessionId } from "../../shared/session-identity.ts";
 import { applyIntercomBridgeToAgent, INTERCOM_BRIDGE_MARKER, resolveIntercomBridge, resolveIntercomSessionTarget, resolveSubagentIntercomTarget, type IntercomBridgeState } from "../../intercom/intercom-bridge.ts";
@@ -1317,12 +1317,12 @@ async function resumeAsyncRun(input: {
 		output: recoveryDescriptor?.outputPath,
 		outputMode: recoveryDescriptor?.outputMode,
 		...(recoveryDescriptor?.skills ? { skills: [...recoveryDescriptor.skills] } : {}),
-		...(recoveryDescriptor?.acceptance !== undefined && input.params.acceptance === undefined ? { acceptance: recoveryDescriptor.acceptance } : {}),
+		...(recoveryDescriptor?.acceptance !== undefined && input.params.acceptance === undefined ? { acceptance: acceptanceInputFromResolved(recoveryDescriptor.acceptance) } : {}),
 		...(input.params.timeoutMs !== undefined ? { timeoutMs: input.params.timeoutMs } : {}),
 		...(input.absoluteDeadlineAt !== undefined ? { absoluteDeadlineAt: input.absoluteDeadlineAt } : {}),
 		...(input.params.turnBudget !== undefined ? { turnBudget: input.params.turnBudget } : {}),
 		...(input.params.toolBudget !== undefined ? { toolBudget: input.params.toolBudget } : {}),
-		...(input.params.rlimits !== undefined ? { rlimits: input.params.rlimits } : {}),
+		...(input.params.rlimits !== undefined ? { rlimits: input.params.rlimits } : recoveryDescriptor?.rlimits !== undefined ? { rlimits: recoveryDescriptor.rlimits } : {}),
 	});
 	if (result.isError) return result;
 

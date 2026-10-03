@@ -329,11 +329,12 @@ export interface SteeringRecoveryDescriptor {
 	memory?: { scope: "project" | "user"; path: string };
 	outputPath?: string;
 	outputMode: "inline" | "file-only";
-	acceptance?: AcceptanceInput;
+	acceptance?: ResolvedAcceptanceConfig;
 	controlConfig?: ResolvedControlConfig;
 	absoluteDeadlineAt?: number;
 	initialTurnBudget?: ResolvedTurnBudget;
 	initialToolBudget?: ResolvedToolBudget;
+	rlimits?: ResolvedRlimits;
 	maxSubagentDepth: number;
 	maxOutput?: MaxOutputConfig;
 	share: boolean;

@@ -16,6 +16,9 @@ import * as path from "node:path";
 import { createEventBus, createMockPi, createTempDir, events, makeAgent, makeMinimalCtx, removeTempDir, tryImport } from "../support/helpers.ts";
 import type { MockPi } from "../support/helpers.ts";
 import { deliverInterruptRequest, deliverStopRequest, deliverTimeoutRequest } from "../../src/runs/background/control-channel.ts";
+import { readAsyncRecoveryDescriptor } from "../../src/runs/background/async-resume.ts";
+import { resolveControlConfig } from "../../src/runs/shared/subagent-control.ts";
+import { resolvePrlimitPath } from "../../src/runs/shared/pi-spawn.ts";
 import { waitForSubagents, type SubagentWaitDeps } from "../../src/runs/background/subagent-wait.ts";
 import { registerStepNotifications } from "../../src/runs/background/step-notify.ts";
 import { consumedStepResultSet, stepResultKey } from "../../src/runs/shared/step-results.ts";
@@ -2101,7 +2104,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		}
 	});
 
-	it("background runs record fallback attempts and final model", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+	it("background runs record fallback attempts and round-trip the complete recovery descriptor", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform !== "linux" || !resolvePrlimitPath() ? "rlimits require Linux and prlimit" : undefined }, async () => {
 		mockPi.onCall({
 			jsonl: [{
 				type: "message_end",
@@ -2143,6 +2146,12 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			shareEnabled: false,
 			sessionRoot,
 			maxSubagentDepth: 2,
+			acceptance: { level: "none", reason: "integration descriptor round-trip" },
+			rlimits: { openFiles: 64 },
+			turnBudget: { maxTurns: 5, graceTurns: 1 },
+			toolBudget: { hard: 10, soft: 8, block: ["read"] },
+			controlConfig: resolveControlConfig(undefined, { enabled: true, activeNoticeAfterTurns: 2, notifyOn: ["needs_attention"], notifyChannels: ["event"] }),
+			maxOutput: { bytes: 4096, lines: 100 },
 		});
 
 		assert.equal(run.details.asyncId, id);
@@ -2157,6 +2166,14 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 
 		const descriptorPath = path.join(asyncDir, "recovery-descriptor.json");
 		const descriptor = JSON.parse(fs.readFileSync(descriptorPath, "utf-8"));
+		assert.doesNotThrow(() => readAsyncRecoveryDescriptor(asyncDir), "the real writer's descriptor must pass the real reader");
+		assert.equal(descriptor.acceptance.level, "none");
+		assert.deepEqual(descriptor.rlimits, { openFiles: 64, coreSizeMb: 0 });
+		assert.equal(descriptor.initialTurnBudget.maxTurns, 5);
+		assert.equal(descriptor.initialToolBudget.hard, 10);
+		assert.equal(descriptor.controlConfig.enabled, true);
+		assert.equal(descriptor.artifactConfig.cleanupDays, 7);
+		assert.equal(descriptor.maxOutput.bytes, 4096);
 		assert.equal(descriptor.sourceRunId, id);
 		assert.equal(descriptor.agent, "worker");
 		assert.equal(descriptor.model, "openai/gpt-5-mini:high");

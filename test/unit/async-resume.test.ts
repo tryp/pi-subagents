@@ -3,12 +3,163 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { buildRevivedAsyncTask, resolveAsyncResumeTarget } from "../../src/runs/background/async-resume.ts";
+import { buildRevivedAsyncTask, readAsyncRecoveryDescriptor, resolveAsyncResumeTarget } from "../../src/runs/background/async-resume.ts";
+import { acceptanceInputFromResolved, resolveEffectiveAcceptance, validateAcceptanceInput } from "../../src/runs/shared/acceptance.ts";
+import type { AcceptanceInput, SteeringRecoveryDescriptor } from "../../src/shared/types.ts";
 
 function writeJson(filePath: string, value: object): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
 	fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf-8");
 }
+
+function writeRecoveryDescriptor(root: string, acceptance: SteeringRecoveryDescriptor["acceptance"]): string {
+	const asyncDir = path.join(root, "run");
+	const descriptorPath = path.join(asyncDir, "recovery-descriptor.json");
+	const descriptor: SteeringRecoveryDescriptor = {
+		version: 1,
+		sourceRunId: "run",
+		agent: "worker",
+		cwd: root,
+		systemPromptMode: "replace",
+		inheritProjectContext: false,
+		inheritSkills: false,
+		outputMode: "inline",
+		maxSubagentDepth: 2,
+		share: false,
+		...(acceptance ? { acceptance } : {}),
+	};
+	writeJson(descriptorPath, descriptor);
+	return asyncDir;
+}
+
+describe("async recovery descriptor acceptance", () => {
+	it("round-trips a persisted resolved acceptance (regression for explicit/inferredReason rejection)", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-acceptance-"));
+		try {
+			const resolved = resolveEffectiveAcceptance({
+				explicit: "checked",
+				agentName: "worker",
+				task: "Implement the fix",
+				mode: "single",
+				async: true,
+			});
+			const asyncDir = writeRecoveryDescriptor(root, resolved);
+
+			assert.deepEqual(readAsyncRecoveryDescriptor(asyncDir)?.acceptance, JSON.parse(JSON.stringify(resolved)));
+			assert.equal(resolved.level, "reviewed", "async writer inference must produce the resolved-only reviewed level");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("round-trips the writer's resolved acceptance shape across input and inference cases", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-acceptance-matrix-"));
+		const inputs: Array<{ label: string; input: AcceptanceInput | undefined; task?: string; async?: boolean }> = [
+			{ label: "undefined", input: undefined },
+			{ label: "auto", input: "auto" },
+			{ label: "checked", input: "checked" },
+			{ label: "verified", input: "verified" },
+			{ label: "none with reason", input: { level: "none", reason: "disabled by parent" } },
+			{ label: "false", input: false },
+			{
+				label: "full config",
+				input: {
+					level: "checked",
+					criteria: [{ id: "tests", must: "Tests pass", evidence: ["validation-output"], severity: "required" }],
+					evidence: ["tests-added", "validation-output"],
+					review: { agent: "reviewer", required: true },
+					verify: [{ id: "unit", command: "npm test", timeoutMs: 1000 }],
+					stopRules: ["Do not widen scope"],
+				},
+			},
+			{ label: "inferred async review", input: undefined, task: "Implement the fix", async: true },
+		];
+		try {
+			for (const { label, input, task, async } of inputs) {
+				const resolved = resolveEffectiveAcceptance({
+					explicit: input,
+					agentName: "worker",
+					task: task ?? "Explore the repository",
+					mode: "single",
+					async,
+				});
+				const caseRoot = path.join(root, label.replaceAll(" ", "-"));
+				const asyncDir = writeRecoveryDescriptor(caseRoot, resolved);
+				const recovered = readAsyncRecoveryDescriptor(asyncDir)?.acceptance;
+				assert.deepEqual(recovered, JSON.parse(JSON.stringify(resolved)), label);
+				assert.equal(recovered?.level, resolved.level, `${label} effective level`);
+				if (label === "inferred async review") assert.equal(recovered?.level, "reviewed");
+			}
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects malformed resolved acceptance in recovery descriptors", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-acceptance-invalid-"));
+		try {
+			const valid = resolveEffectiveAcceptance({ agentName: "worker", task: "Explore", mode: "single" });
+			const corruptions: Array<{ label: string; mutate: (acceptance: Record<string, unknown>) => void; message: RegExp }> = [
+				{ label: "unknown key", mutate: (acceptance) => { acceptance.surprise = true; }, message: /surprise is not supported/ },
+				{ label: "bad level", mutate: (acceptance) => { acceptance.level = "unexpected"; }, message: /level must be one of/ },
+				{ label: "non-boolean explicit", mutate: (acceptance) => { acceptance.explicit = "yes"; }, message: /explicit must be a boolean/ },
+				{ label: "non-array inferredReason", mutate: (acceptance) => { acceptance.inferredReason = "worker"; }, message: /inferredReason must be an array/ },
+			];
+			for (const { label, mutate, message } of corruptions) {
+				const caseRoot = path.join(root, label.replaceAll(" ", "-"));
+				const asyncDir = writeRecoveryDescriptor(caseRoot, valid);
+				const descriptorPath = path.join(asyncDir, "recovery-descriptor.json");
+				const descriptor = JSON.parse(fs.readFileSync(descriptorPath, "utf-8")) as Record<string, unknown>;
+				const acceptance = descriptor.acceptance as Record<string, unknown>;
+				mutate(acceptance);
+				writeJson(descriptorPath, descriptor);
+				assert.throws(() => readAsyncRecoveryDescriptor(asyncDir), message, label);
+			}
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("validates persisted resolved rlimits instead of only allowlisting the field", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-rlimits-"));
+		try {
+			const asyncDir = writeRecoveryDescriptor(root, resolveEffectiveAcceptance({ agentName: "worker", task: "Explore", mode: "single" }));
+			const descriptorPath = path.join(asyncDir, "recovery-descriptor.json");
+			const descriptor = JSON.parse(fs.readFileSync(descriptorPath, "utf-8")) as Record<string, unknown>;
+			descriptor.rlimits = { openFiles: 64, coreSizeMb: 0 };
+			writeJson(descriptorPath, descriptor);
+			assert.deepEqual(readAsyncRecoveryDescriptor(asyncDir)?.rlimits, { openFiles: 64, coreSizeMb: 0 });
+
+			descriptor.rlimits = { openFiles: 63 };
+			writeJson(descriptorPath, descriptor);
+			assert.throws(() => readAsyncRecoveryDescriptor(asyncDir), /rlimits.openFiles must be >= 64/);
+
+			descriptor.rlimits = { openFiles: 64, mystery: true };
+			writeJson(descriptorPath, descriptor);
+			assert.throws(() => readAsyncRecoveryDescriptor(asyncDir), /rlimits.mystery is not supported/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("converts resolved acceptance back to its input-compatible execution form", () => {
+		const resolved = resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single", async: true });
+		assert.equal(resolved.level, "reviewed");
+		const input = acceptanceInputFromResolved(resolved);
+		assert.equal(input.level, resolved.level);
+		assert.deepEqual(input.criteria, resolved.criteria);
+		assert.deepEqual(input.evidence, resolved.evidence);
+		assert.equal(Object.hasOwn(input, "explicit"), false);
+		assert.equal(Object.hasOwn(input, "inferredReason"), false);
+		assert.equal(resolveEffectiveAcceptance({ explicit: input, agentName: "worker", task: "Implement the fix", mode: "single", async: true }).level, resolved.level);
+	});
+
+	it("keeps resolved-only fields and reviewed level invalid for genuine input", () => {
+		assert.match(validateAcceptanceInput({ level: "checked", explicit: true }).join(" "), /explicit is not supported/);
+		assert.match(validateAcceptanceInput({ level: "checked", inferredReason: ["writer"] }).join(" "), /inferredReason is not supported/);
+		assert.match(validateAcceptanceInput({ level: "reviewed" }).join(" "), /cannot be requested explicitly/);
+	});
+});
 
 describe("async resume lookup", () => {
 	it("resolves a completed single-child run from persisted status", () => {

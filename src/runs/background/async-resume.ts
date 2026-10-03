@@ -2,9 +2,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { ASYNC_DIR, RESULTS_DIR, type AsyncStatus, type SteeringRecoveryDescriptor } from "../../shared/types.ts";
 import type { AgentConfig } from "../../agents/agents.ts";
-import { validateAcceptanceInput } from "../shared/acceptance.ts";
+import { validateResolvedAcceptanceConfig } from "../shared/acceptance.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
 import { resolveTurnBudgetConfig } from "../shared/turn-budget.ts";
+import { validateRlimitsConfig } from "../shared/rlimits.ts";
 import { reconcileAsyncRun } from "./stale-run-reconciler.ts";
 
 export interface AsyncResumeParams {
@@ -266,7 +267,7 @@ export function readAsyncRecoveryDescriptor(asyncDir: string | undefined): Steer
 		"version", "sourceRunId", "agent", "sessionFile", "cwd", "model", "fallbackModels", "thinking", "tools", "extensions",
 		"subagentOnlyExtensions", "mcpDirectTools", "systemPrompt", "systemPromptMode", "inheritProjectContext", "inheritSkills", "skills",
 		"skillPath", "agentFilePath", "completionGuard", "memory", "outputPath", "outputMode", "acceptance", "sessionDir", "artifactConfig",
-		"artifactsDir", "maxOutput", "controlConfig", "absoluteDeadlineAt", "initialTurnBudget", "initialToolBudget", "maxSubagentDepth", "share",
+		"artifactsDir", "maxOutput", "controlConfig", "absoluteDeadlineAt", "initialTurnBudget", "initialToolBudget", "rlimits", "maxSubagentDepth", "share",
 	]);
 	for (const field of Object.keys(parsed)) {
 		if (!allowedFields.has(field)) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': unknown field '${field}'.`);
@@ -305,6 +306,10 @@ export function readAsyncRecoveryDescriptor(asyncDir: string | undefined): Steer
 		const result = validateToolBudgetConfig(parsed.initialToolBudget, "recoveryDescriptor.initialToolBudget");
 		if (result.error) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': ${result.error}`);
 	}
+	if (parsed.rlimits !== undefined) {
+		const result = validateRlimitsConfig(parsed.rlimits, "recoveryDescriptor.rlimits");
+		if (result.error) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': ${result.error}`);
+	}
 	if (parsed.maxOutput !== undefined) {
 		if (!parsed.maxOutput || typeof parsed.maxOutput !== "object" || Array.isArray(parsed.maxOutput)) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': maxOutput must be an object.`);
 		for (const field of ["bytes", "lines"] as const) {
@@ -335,7 +340,7 @@ export function readAsyncRecoveryDescriptor(asyncDir: string | undefined): Steer
 		if (!Array.isArray(control.notifyChannels) || control.notifyChannels.some((item) => item !== "event" && item !== "async" && item !== "intercom")) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': controlConfig.notifyChannels is invalid.`);
 	}
 	if (parsed.acceptance !== undefined) {
-		const errors = validateAcceptanceInput(parsed.acceptance, "recoveryDescriptor.acceptance");
+		const errors = validateResolvedAcceptanceConfig(parsed.acceptance, "recoveryDescriptor.acceptance");
 		if (errors.length) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': ${errors.join(" ")}`);
 	}
 	return parsed as unknown as SteeringRecoveryDescriptor;
