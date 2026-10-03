@@ -747,6 +747,7 @@ export async function waitForSubagents(
 	}
 
 	const sessionActiveRuns = active;
+	// Concurrent waits share this store; simultaneous scans split deltas, so supervisor waits should stay serial.
 	const checkpointDeltas = deps.state.checkpointDeltas ??= new CheckpointDeltaStore();
 	checkpointDeltas.retain(new Set(sessionActiveRuns.map((run) => run.id)));
 	if (runId) active = activeRunsForSession({ ...params, id: runId }, deps);
@@ -881,7 +882,7 @@ export async function waitForSubagents(
 			...activeInitialRuns.map((run) => `${oneLine(run.id, 64)} (${oneLine(run.state, 16)})`),
 			...activeInitialProviderItems.map((item) => `${oneLine(item.provider, 40)}/${oneLine(item.id, 64)}`),
 		];
-		// Keep the message head bounded so the progress block and its deferral trailer retain space.
+		// Load-bearing: this bound keeps the progress block and deferral trailer inside the 2KB message cap.
 		const stillActive = stillActiveEntries.length > 8
 			? `${stillActiveEntries.slice(0, 8).join(", ")}, … ${stillActiveEntries.length - 8} more`
 			: stillActiveEntries.join(", ");
