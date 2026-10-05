@@ -23,6 +23,7 @@ import { listAsyncRuns, type AsyncRunSummary } from "./async-status.ts";
 import {
 	CONTROL_EVENT_READ_CHUNK_BYTES,
 	CONTROL_EVENT_SCAN_WINDOW_BYTES,
+	MAX_CONTROL_EVENT_LINE_BYTES,
 	scanControlEventLines,
 } from "./control-event-scanner.ts";
 
@@ -64,32 +65,38 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 	};
 	const refreshWidget = (ctx: ExtensionContext) => rerenderWidget(ctx);
 	/**
-	 * Start restored jobs at EOF without replaying control events. The cursor is
-	 * snapped back to the last newline so a writer that is mid-append cannot leave
-	 * the scanner parsing the tail of a partial line; that single unterminated
-	 * line is the only region re-read, and it was never delivered before.
+	 * Start restored jobs at the trailing unterminated line without replaying any
+	 * completed line, so a writer that is mid-append cannot leave the scanner
+	 * parsing the tail of a partial line. Walks back at most
+	 * MAX_CONTROL_EVENT_LINE_BYTES: a trailing line that exceeds the per-line
+	 * budget can never be a control event, so it is reported as oversized instead.
 	 */
-	const restoredControlEventCursor = (asyncDir: string): { cursor: number; midLine: boolean } => {
+	const restoredControlEventCursor = (asyncDir: string): { cursor: number; midLine: boolean; discardedOversizedLine: boolean } => {
 		let fd: number;
 		try {
 			fd = fs.openSync(path.join(asyncDir, "events.jsonl"), "r");
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return { cursor: 0, midLine: false };
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return { cursor: 0, midLine: false, discardedOversizedLine: false };
 			throw error;
 		}
 		try {
 			const size = fs.fstatSync(fd).size;
-			if (size === 0) return { cursor: 0, midLine: false };
-			const probeBytes = Math.min(size, CONTROL_EVENT_READ_CHUNK_BYTES);
-			const buffer = Buffer.alloc(probeBytes);
-			const bytesRead = fs.readSync(fd, buffer, 0, probeBytes, size - probeBytes);
-			if (bytesRead <= 0) return { cursor: 0, midLine: false };
-			const lastNewline = buffer.subarray(0, bytesRead).lastIndexOf(0x0a);
-			if (lastNewline >= 0) return { cursor: size - probeBytes + lastNewline + 1, midLine: false };
-			if (probeBytes >= size) return { cursor: 0, midLine: false };
-			// The trailing line is longer than the probe: resume inside it and let
-			// the scanner discard its remainder up to the next newline.
-			return { cursor: size - probeBytes, midLine: true };
+			if (size === 0) return { cursor: 0, midLine: false, discardedOversizedLine: false };
+			for (let scanned = 0; scanned < MAX_CONTROL_EVENT_LINE_BYTES; scanned += CONTROL_EVENT_READ_CHUNK_BYTES) {
+				const probeBytes = Math.min(size - scanned, CONTROL_EVENT_READ_CHUNK_BYTES);
+				if (probeBytes <= 0) return { cursor: 0, midLine: false, discardedOversizedLine: false };
+				const buffer = Buffer.alloc(probeBytes);
+				const bytesRead = fs.readSync(fd, buffer, 0, probeBytes, size - scanned - probeBytes);
+				if (bytesRead <= 0) return { cursor: 0, midLine: false, discardedOversizedLine: false };
+				const lastNewline = buffer.subarray(0, bytesRead).lastIndexOf(0x0a);
+				if (lastNewline >= 0) {
+					return { cursor: size - scanned - probeBytes + lastNewline + 1, midLine: false, discardedOversizedLine: false };
+				}
+				if (scanned + probeBytes >= size) return { cursor: 0, midLine: false, discardedOversizedLine: false };
+			}
+			// No newline within the per-line budget: the trailing line is over
+			// budget, so skip it instead of holding a cursor inside it.
+			return { cursor: size - MAX_CONTROL_EVENT_LINE_BYTES, midLine: true, discardedOversizedLine: true };
 		} finally {
 			fs.closeSync(fd);
 		}
@@ -142,7 +149,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			sessionFile: run.sessionFile,
 			controlEventCursor: restoredCursor.cursor,
 			controlEventMidLine: restoredCursor.midLine,
-			controlEventOversizedLines: 0,
+			controlEventOversizedLines: restoredCursor.discardedOversizedLine ? 1 : 0,
 			controlEventMalformedLines: 0,
 			nestedChildren: run.nestedChildren,
 		};
@@ -177,8 +184,15 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 		try {
 			const stat = fs.fstatSync(fd);
 			const savedCursor = job.controlEventCursor;
-			let cursor = stat.size < (savedCursor ?? 0) ? 0 : (savedCursor ?? 0);
-			const startedFromTail = savedCursor === undefined && stat.size > CONTROL_EVENT_SCAN_WINDOW_BYTES;
+			// Truncation or rotation invalidates the stored position; reset it and the
+			// mid-line flag together so the next poll restarts from a real boundary.
+			const truncated = stat.size < (savedCursor ?? 0);
+			let cursor = truncated ? 0 : (savedCursor ?? 0);
+			if (truncated) {
+				job.controlEventCursor = 0;
+				job.controlEventMidLine = false;
+			}
+			const startedFromTail = !truncated && savedCursor === undefined && stat.size > CONTROL_EVENT_SCAN_WINDOW_BYTES;
 			if (startedFromTail) cursor = stat.size - CONTROL_EVENT_SCAN_WINDOW_BYTES;
 			if (stat.size <= cursor) return;
 			const handleLine = (line: string) => {

@@ -270,21 +270,21 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			});
 			tracker.restoreActiveJobs();
 
-			await new Promise((resolve) => setTimeout(resolve, 30));
-			assert.equal(recorder.events.length, 0, "the completed history line must not be replayed after restore");
-
 			// The writer finishes the partial line and appends a fresh control event.
-			fs.appendFileSync(eventsPath, `\"}\n${controlEvent("after")}\n`, "utf-8");
+			fs.appendFileSync(eventsPath, `}\n${controlEvent("after")}\n`, "utf-8");
 			await waitForCondition(
 				() => recorder.events.some((event) => event.channel === "subagent:control-event"),
 				"control event after the writer completes the partial line",
 			);
+			await new Promise((resolve) => setTimeout(resolve, 50));
 			const messages = recorder.events
 				.filter((event) => event.channel === "subagent:control-event")
 				.map((event) => ((event.data as { noticeText?: string }).noticeText ?? ""));
 			assert.equal(messages.length, 1);
 			assert.equal(messages[0].includes("after"), true);
+			assert.equal(messages.some((message) => message.includes("before")), false, "completed history must not be replayed");
 			assert.equal(errors.filter((message) => message.includes("malformed async control event")).length, 0);
+			tracker.resetJobs();
 		} finally {
 			console.error = originalError;
 			removeTempDir(asyncRoot);
@@ -840,6 +840,182 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 		}
 	});
 
+	it("delivers fresh control events after the event log is truncated mid-scan", async () => {
+		// Regression: a stale mid-line flag survived a shrink, so the first fresh
+		// control line was discarded as if it were a fragment.
+		const asyncRoot = createTempDir("pi-async-job-tracker-");
+		const originalError = console.error;
+		const errors: string[] = [];
+		try {
+			const runDir = path.join(asyncRoot, "run-truncated");
+			fs.mkdirSync(runDir, { recursive: true });
+			fs.writeFileSync(path.join(runDir, "status.json"), JSON.stringify({
+				runId: "run-truncated",
+				mode: "single",
+				state: "running",
+				startedAt: Date.now() - 1000,
+				lastUpdate: Date.now(),
+				steps: [{ agent: "worker", status: "running" }],
+			}), "utf-8");
+			const controlEvent = (message: string) => JSON.stringify({
+				type: "subagent.control",
+				channels: ["event"],
+				event: { type: "needs_attention", to: "needs_attention", ts: 123, runId: "run-truncated", agent: "worker", message },
+			});
+			const eventsPath = path.join(runDir, "events.jsonl");
+			fs.writeFileSync(eventsPath, `${controlEvent("before")}\n${JSON.stringify({ type: "agent_end", messages: [{ role: "user", content: [{ type: "text", text: "x".repeat(2_400_000) }] }] })}`, "utf-8");
+
+			console.error = (...args: unknown[]) => {
+				errors.push(args.map((arg) => String(arg)).join(" "));
+			};
+			const state = createState();
+			const recorder = createEventRecorder();
+			const tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, { pollIntervalMs: 10 });
+			tracker.handleStarted({ id: "run-truncated", asyncDir: runDir, agent: "worker" });
+			await new Promise((resolve) => setTimeout(resolve, 40));
+			const beforeTruncate = state.asyncJobs.get("run-truncated") as { controlEventMidLine?: boolean; controlEventCursor?: number };
+			assert.equal(beforeTruncate.controlEventMidLine, true, "expected the oversized line to leave a mid-line cursor");
+
+			// The runner rotates its log: a fresh, much smaller file with two events.
+			fs.writeFileSync(eventsPath, `${controlEvent("fresh-one")}\n${controlEvent("fresh-two")}\n`, "utf-8");
+			await waitForCondition(
+				() => recorder.events.filter((event) => event.channel === "subagent:control-event").length >= 3,
+				"control events from the replacement log",
+			);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			const messages = recorder.events
+				.filter((event) => event.channel === "subagent:control-event")
+				.map((event) => ((event.data as { noticeText?: string }).noticeText ?? ""));
+			assert.equal(messages.length, 3, "no event is replayed or dropped by the rotation");
+			assert.equal(messages.some((message) => message.includes("fresh-one")), true, "first fresh event must survive truncation");
+			assert.equal(messages.some((message) => message.includes("fresh-two")), true);
+			assert.equal(errors.filter((message) => message.includes("malformed async control event")).length, 0);
+			const job = state.asyncJobs.get("run-truncated") as { controlEventMalformedLines?: number };
+			assert.equal(job.controlEventMalformedLines ?? 0, 0);
+			tracker.resetJobs();
+		} finally {
+			console.error = originalError;
+			removeTempDir(asyncRoot);
+		}
+	});
+
+	it("recovers control events after the event log is truncated to empty", async () => {
+		// Regression: an empty-file early return never persisted cursor 0, so the
+		// refill was scanned from a stale offset and the first line reached JSON.parse
+		// as a fragment.
+		const asyncRoot = createTempDir("pi-async-job-tracker-");
+		const originalError = console.error;
+		const errors: string[] = [];
+		try {
+			const runDir = path.join(asyncRoot, "run-truncated-empty");
+			fs.mkdirSync(runDir, { recursive: true });
+			fs.writeFileSync(path.join(runDir, "status.json"), JSON.stringify({
+				runId: "run-truncated-empty",
+				mode: "single",
+				state: "running",
+				startedAt: Date.now() - 1000,
+				lastUpdate: Date.now(),
+				steps: [{ agent: "worker", status: "running" }],
+			}), "utf-8");
+			const controlEvent = (message: string) => JSON.stringify({
+				type: "subagent.control",
+				channels: ["event"],
+				event: { type: "needs_attention", to: "needs_attention", ts: 123, runId: "run-truncated-empty", agent: "worker", message },
+			});
+			const eventsPath = path.join(runDir, "events.jsonl");
+			fs.writeFileSync(eventsPath, `${controlEvent("before")}\n`, "utf-8");
+
+			console.error = (...args: unknown[]) => {
+				errors.push(args.map((arg) => String(arg)).join(" "));
+			};
+			const state = createState();
+			const recorder = createEventRecorder();
+			const tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, { pollIntervalMs: 10 });
+			tracker.handleStarted({ id: "run-truncated-empty", asyncDir: runDir, agent: "worker" });
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			assert.equal(recorder.events.some((event) => event.channel === "subagent:control-event"), true, "expected the initial event first");
+
+			fs.writeFileSync(eventsPath, "", "utf-8");
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			fs.writeFileSync(eventsPath, `${controlEvent("after-emptied")}\n`, "utf-8");
+			await waitForCondition(
+				() => recorder.events.some((event) => ((event.data as { noticeText?: string }).noticeText ?? "").includes("after-emptied")),
+				"control event written after the log was emptied",
+			);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			const messages = recorder.events
+				.filter((event) => event.channel === "subagent:control-event")
+				.map((event) => ((event.data as { noticeText?: string }).noticeText ?? ""));
+			assert.deepEqual(
+				messages.map((message) => (message.includes("after-emptied") ? "after-emptied" : "before")),
+				["before", "after-emptied"],
+			);
+			assert.equal(errors.filter((message) => message.includes("malformed async control event")).length, 0);
+			tracker.resetJobs();
+		} finally {
+			console.error = originalError;
+			removeTempDir(asyncRoot);
+		}
+	});
+
+	it("restores a run whose unfinished log line is larger than one probe window", async () => {
+		// Regression: restore fell back to a mid-line cursor after 64 KiB, which
+		// discarded the unfinished (but deliverable) line when the writer completed it.
+		const asyncRoot = createTempDir("pi-async-job-restore-big-partial-");
+		const originalError = console.error;
+		const errors: string[] = [];
+		try {
+			const runDir = path.join(asyncRoot, "run-big-partial");
+			fs.mkdirSync(runDir, { recursive: true });
+			fs.writeFileSync(path.join(runDir, "status.json"), JSON.stringify({
+				runId: "run-big-partial",
+				mode: "single",
+				state: "running",
+				sessionId: "session-big-partial",
+				startedAt: 1000,
+				steps: [{ agent: "worker", status: "running" }],
+			}), "utf-8");
+			const controlEvent = (message: string) => JSON.stringify({
+				type: "subagent.control",
+				channels: ["event"],
+				event: { type: "needs_attention", to: "needs_attention", ts: 123, runId: "run-big-partial", agent: "worker", message },
+			});
+			// An unfinished control event whose message body pushes it past one
+			// 64 KiB probe window but stays under the 1 MiB line budget.
+			const bigEvent = controlEvent("big-partial").replace('"ts":123', `"ts":123,"note":"${"n".repeat(200_000)}"`);
+			const eventsPath = path.join(runDir, "events.jsonl");
+			fs.writeFileSync(eventsPath, bigEvent.slice(0, bigEvent.length - 1), "utf-8");
+
+			console.error = (...args: unknown[]) => {
+				errors.push(args.map((arg) => String(arg)).join(" "));
+			};
+			const state = createState();
+			state.currentSessionId = "session-big-partial";
+			const recorder = createEventRecorder();
+			const tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, { pollIntervalMs: 10 });
+			tracker.restoreActiveJobs();
+			assert.equal(recorder.events.length, 0, "an unfinished line must not be delivered as a fragment");
+
+			fs.appendFileSync(eventsPath, `}\n${controlEvent("after-big")}\n`, "utf-8");
+			await waitForCondition(
+				() => recorder.events.some((event) => ((event.data as { noticeText?: string }).noticeText ?? "").includes("after-big")),
+				"the control event that follows the completed oversized line",
+			);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			const messages = recorder.events
+				.filter((event) => event.channel === "subagent:control-event")
+				.map((event) => ((event.data as { noticeText?: string }).noticeText ?? ""));
+			assert.equal(messages.length, 2, "the completed 200 KiB control event and its successor both arrive");
+			assert.equal(messages.some((message) => message.includes("big-partial")), true, "the completed oversized line is delivered, not discarded");
+			assert.equal(messages.some((message) => message.includes("after-big")), true);
+			assert.equal(errors.filter((message) => message.includes("malformed async control event")).length, 0);
+			tracker.resetJobs();
+		} finally {
+			console.error = originalError;
+			removeTempDir(asyncRoot);
+		}
+	});
+
 	it("keeps control events intact when a log line exceeds the scan window", async () => {
 		// Regression: an `agent_end` event carrying a multi-megabyte message list
 		// made the tracker persist a mid-line cursor while discarding it, so the
@@ -893,10 +1069,12 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 				() => recorder.events.filter((event) => event.channel === "subagent:control-event").length >= 2,
 				"control events around the oversized line",
 			);
+			// Let further polls run so a late duplicate would be caught.
+			await new Promise((resolve) => setTimeout(resolve, 50));
 			const messages = recorder.events
 				.filter((event) => event.channel === "subagent:control-event")
 				.map((event) => ((event.data as { noticeText?: string }).noticeText ?? ""));
-			assert.equal(messages.length, 2);
+			assert.equal(messages.length, 2, "each surrounding event is delivered exactly once");
 			assert.equal(messages.some((message) => message.includes("before")), true);
 			assert.equal(messages.some((message) => message.includes("after")), true);
 			assert.equal(errors.filter((message) => message.includes("malformed async control event")).length, 0);
@@ -905,7 +1083,8 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 				controlEventOversizedLines?: number;
 			};
 			assert.equal(job.controlEventMalformedLines ?? 0, 0);
-			assert.ok((job.controlEventOversizedLines ?? 0) >= 1, "the oversized line should be counted as skipped");
+			assert.equal(job.controlEventOversizedLines ?? 0, 1, "the single oversized line must be counted once");
+			tracker.resetJobs();
 		} finally {
 			console.error = originalError;
 			removeTempDir(asyncRoot);

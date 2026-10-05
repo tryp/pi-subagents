@@ -51,13 +51,19 @@ export function scanControlEventLines(input: ControlEventScanInput): ControlEven
 	const scanWindowBytes = input.scanWindowBytes ?? CONTROL_EVENT_SCAN_WINDOW_BYTES;
 	const { fd, size, onLine } = input;
 	let cursor = input.cursor < 0 ? 0 : input.cursor;
-	if (size < cursor) cursor = 0;
-	if (size <= cursor) return { cursor, midLine: input.midLine === true, oversizedLines: 0 };
+	let midLine = input.midLine === true;
+	if (size < cursor) {
+		// The log was truncated or rotated: restart from the top and forget any
+		// mid-line state, or the first genuine line would be discarded as a fragment.
+		cursor = 0;
+		midLine = false;
+	}
+	if (size <= cursor) return { cursor, midLine, oversizedLines: 0 };
 
 	const scanEnd = Math.min(size, cursor + scanWindowBytes);
 	// True while the scanner is discarding the remainder of a line whose start
 	// is before `cursor` (oversized, or resumed mid-line from a previous poll).
-	let discarding = input.midLine === true;
+	let discarding = midLine;
 	let oversizedLines = 0;
 	let readCursor = cursor;
 	let lastCompleteCursor = cursor;
@@ -98,18 +104,23 @@ export function scanControlEventLines(input: ControlEventScanInput): ControlEven
 		readCursor += bytesRead;
 	}
 
+	// Bytes actually read this pass. The caller's `size` is a stat() snapshot that a
+	// concurrent truncation can invalidate, so the resume point never runs ahead of
+	// what was really read.
+	const scannedEnd = readCursor;
+
 	if (discarding) {
-		// An oversized line is still in progress: hand the next poll a mid-line
-		// cursor so the remainder of the same line is never re-counted or parsed.
-		return { cursor: scanEnd, midLine: true, oversizedLines };
+		// An oversized or previously-started line is still in progress: hand the next
+		// poll a mid-line cursor so the remainder is never re-counted or parsed. This
+		// branch also owns mid-line-at-EOF, so no later branch needs to handle it.
+		return { cursor: scannedEnd, midLine: true, oversizedLines };
 	}
 	if (lastCompleteCursor > cursor) return { cursor: lastCompleteCursor, midLine: false, oversizedLines };
-	if (scanEnd >= size) {
-		// Reached EOF without completing a line.
-		if (!input.midLine) return { cursor, midLine: false, oversizedLines };
-		// Resumed mid-line: keep advancing so a trailing fragment is not
-		// rescanned forever, and stay marked mid-line until its newline lands.
-		return { cursor: scanEnd, midLine: true, oversizedLines };
+	if (scanEnd >= size || scannedEnd < scanEnd) {
+		// EOF without a complete line (or a stat() size that over-reported the file):
+		// leave the cursor at the line start so the writer's whole line is re-read
+		// once it finishes, instead of leaving it stranded mid-line.
+		return { cursor, midLine: false, oversizedLines };
 	}
 	// Window exhausted mid-line: resume mid-line on the next poll.
 	return { cursor: scanEnd, midLine: true, oversizedLines };
