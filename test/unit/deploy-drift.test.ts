@@ -232,7 +232,7 @@ type GitFixture = Fixture & { commit: string };
 function gitFixture(): GitFixture {
 	const f = fixture();
 	const git = (...args: string[]) =>
-		spawnSync("git", ["-C", f.source, "-c", "user.email=deploy@example.com", "-c", "user.name=deploy", "-c", "commit.gpgsign=false", ...args], {
+		spawnSync("git", ["-C", f.source, "-c", "user.email=deploy@example.com", "-c", "user.name=deploy", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args], {
 			encoding: "utf8",
 		});
 	const init = git("init", "-q", "-b", "main");
@@ -256,15 +256,25 @@ function withGitFixture(test: (f: GitFixture) => void): void {
 }
 
 function gitInSource(f: GitFixture, ...args: string[]) {
-	const result = spawnSync("git", ["-C", f.source, "-c", "user.email=deploy@example.com", "-c", "user.name=deploy", "-c", "commit.gpgsign=false", ...args], {
+	const result = spawnSync("git", ["-C", f.source, "-c", "user.email=deploy@example.com", "-c", "user.name=deploy", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args], {
 		encoding: "utf8",
 	});
 	assert.equal(result.status, 0, result.stderr);
 	return result;
 }
 
+/** Run preflight with no stamp at all and return the result. */
+function withMissingStamp(f: GitFixture) {
+	fs.rmSync(path.join(f.runtime, ".deployed-commit"));
+	return preflight(f);
+}
+
+function headOf(f: GitFixture): string {
+	return gitInSource(f, "rev-parse", "HEAD").stdout.trim();
+}
+
 /** Stamp the runtime the way `make deploy` does: commit plus the runtime tree hash. */
-function stampDeployed(f: GitFixture, commit = f.commit): void {
+function stampDeployed(f: GitFixture, commit = headOf(f)): void {
 	const tree = run(["--runtime", f.runtime, "--print-tree-hash"]);
 	assert.equal(tree.status, 0, tree.stderr);
 	fs.writeFileSync(path.join(f.runtime, ".deployed-commit"), `commit: ${commit}\ntree: ${tree.stdout.trim()}\n`);
@@ -391,6 +401,85 @@ describe("deploy drift preflight baseline", () => {
 			assert.ok(patch);
 			const header = fs.readFileSync(path.join(f.artifacts, patch), "utf8").split("\n", 1)[0];
 			assert.match(header, new RegExp(`^# Runtime drift patch: deployed baseline ${f.commit.slice(0, 12)} -> runtime\\.`));
+		});
+	});
+
+	it("detects a symlink whose target changed after the stamp", () => {
+		withGitFixture((f) => {
+			const target = path.join(f.root, "target-a");
+			fs.writeFileSync(target, "a\n");
+			fs.symlinkSync(target, path.join(f.source, "link.txt"));
+			gitInSource(f, "add", "-A");
+			gitInSource(f, "commit", "-q", "-m", "add symlink");
+			fs.cpSync(path.join(f.source, "link.txt"), path.join(f.runtime, "link.txt"), { verbatimSymlinks: true });
+			stampDeployed(f);
+			const before = run(["--runtime", f.runtime, "--check-stamp"]);
+			assert.equal(before.status, 0, before.stderr);
+			fs.unlinkSync(path.join(f.runtime, "link.txt"));
+			fs.symlinkSync("/nowhere", path.join(f.runtime, "link.txt"));
+			const result = preflight(f);
+			assert.equal(result.status, 2, result.stderr);
+			assert.match(result.stdout, /link\.txt/);
+			assert.match(result.stdout, /were edited in the runtime/);
+			const stamp = run(["--runtime", f.runtime, "--check-stamp"]);
+			assert.equal(stamp.status, 2, stamp.stderr);
+			assert.match(stamp.stdout, /changed since deploy/);
+		});
+	});
+
+	it("detects a deployed file the runtime replaced with a directory", () => {
+		withGitFixture((f) => {
+			stampDeployed(f);
+			fs.unlinkSync(path.join(f.runtime, "tracked.txt"));
+			// An empty directory is the case rsync reports with the same
+			// `>f+++++++++` code it uses for a genuinely absent file, so this
+			// test fails unless preflight inspects the runtime's object type.
+			fs.mkdirSync(path.join(f.runtime, "tracked.txt"));
+			const result = preflight(f);
+			assert.equal(result.status, 2, result.stderr);
+			assert.match(result.stdout, /tracked\.txt/);
+			const withContents = preflight(f, "--json");
+			assert.equal(withContents.status, 2, withContents.stderr);
+			const parsed = JSON.parse(withContents.stdout) as Record<string, unknown>;
+			assert.deepEqual(parsed.modifiedFiles, ["tracked.txt"]);
+		});
+	});
+
+	it("detects a deployed directory the runtime replaced with a file", () => {
+		withGitFixture((f) => {
+			fs.mkdirSync(path.join(f.source, "nested"));
+			fs.writeFileSync(path.join(f.source, "nested", "inner.txt"), "inner\n");
+			gitInSource(f, "add", "-A");
+			gitInSource(f, "commit", "-q", "-m", "add nested dir");
+			fs.cpSync(path.join(f.source, "nested"), path.join(f.runtime, "nested"), { recursive: true });
+			stampDeployed(f);
+			fs.rmSync(path.join(f.runtime, "nested"), { recursive: true, force: true });
+			fs.writeFileSync(path.join(f.runtime, "nested"), "now a file\n");
+			const result = preflight(f);
+			assert.equal(result.status, 2, result.stderr);
+			assert.match(result.stdout, /nested/);
+		});
+	});
+
+	it("still treats a deployed file missing from the runtime as a benign recreation", () => {
+		withGitFixture((f) => {
+			stampDeployed(f);
+			fs.rmSync(path.join(f.runtime, "tracked.txt"));
+			const result = preflight(f);
+			assert.equal(result.status, 0, result.stderr);
+			assert.match(result.stdout, /matches deployed baseline/);
+		});
+	});
+
+	it("says why it fell back to the checkout when the stamp cannot be parsed", () => {
+		withGitFixture((f) => {
+			stampDeployed(f);
+			fs.writeFileSync(path.join(f.runtime, ".deployed-commit"), "deployed from: nowhere\n");
+			const result = preflight(f);
+			assert.equal(result.status, 0, result.stderr);
+			assert.match(result.stdout, /no parseable commit/);
+			const missing = withMissingStamp(f);
+			assert.match(missing.stdout, /no deploy stamp/);
 		});
 	});
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import io
 import json
 import os
 from pathlib import Path
@@ -24,8 +23,47 @@ TREE_STAMP_RE = re.compile(r"^tree: sha256:([0-9a-f]{64})$", re.MULTILINE)
 COMMIT_STAMP_RE = re.compile(r"^commit:\s*([0-9a-f]{7,64})\s*$", re.MULTILINE)
 
 
+def file_digest(path: Path) -> str:
+    """Stream a file through sha256 so large trees do not land in memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def scan_symlinks(root: Path) -> dict[str, str]:
+    """Map every symlink under root to its target, without following links."""
+    found: dict[str, str] = {}
+    pending = [Path(".")]
+    while pending:
+        relative = pending.pop()
+        base = root if str(relative) == "." else root / relative
+        with os.scandir(base) as entries:
+            for entry in entries:
+                if entry.name in EXCLUDES:
+                    continue
+                child = Path(entry.name) if str(relative) == "." else relative / entry.name
+                if entry.is_symlink():
+                    found[child.as_posix()] = os.readlink(entry.path)
+                elif entry.is_dir(follow_symlinks=False):
+                    pending.append(child)
+    return found
+
+
+def symlink_diff(baseline: Path, runtime: Path) -> tuple[list[str], list[str]]:
+    """Return (runtime-only, target-changed) symlink paths relative to the baseline."""
+    baseline_links = scan_symlinks(baseline)
+    runtime_links = scan_symlinks(runtime)
+    extra = sorted(set(runtime_links) - set(baseline_links))
+    changed = sorted(
+        relative for relative in set(runtime_links) & set(baseline_links) if runtime_links[relative] != baseline_links[relative]
+    )
+    return extra, changed
+
+
 def tree_hash(runtime: Path) -> str:
-    """Hash regular files, excluding deploy-managed paths, deterministically."""
+    """Hash regular files and symlinks, excluding deploy-managed paths, deterministically."""
     if not runtime.is_dir():
         raise OSError(f"runtime directory is not readable: {runtime}")
 
@@ -48,9 +86,14 @@ def tree_hash(runtime: Path) -> str:
                 continue
             try:
                 mode = path.lstat().st_mode
-                if not stat.S_ISREG(mode):
+                if stat.S_ISLNK(mode):
+                    # Symlinks are deployed content (rsync -a copies them), so
+                    # a changed target must be visible to --check-stamp.
+                    digest = hashlib.sha256(b"symlink\0" + os.readlink(path).encode("utf-8")).hexdigest()
+                elif stat.S_ISREG(mode):
+                    digest = file_digest(path)
+                else:
                     continue
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
             except OSError as error:
                 raise OSError(f"cannot hash {path}: {error}") from error
             entries.append((rel_path, digest))
@@ -59,10 +102,18 @@ def tree_hash(runtime: Path) -> str:
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def parse_itemize(output: str) -> tuple[list[str], list[str]]:
-    """Return (extra, modified) relative paths from rsync itemize output."""
+def parse_itemize(output: str) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Return (extra, modified, created, retyped) relative paths from rsync itemize output.
+
+    `>f+++++++++` is ambiguous: rsync emits it both for a file the runtime
+    genuinely lacks and for a baseline file the runtime replaced with a
+    directory, symlink or fifo. The caller disambiguates with the runtime's
+    object type; only `created` entries that really are absent stay benign.
+    """
     extra: list[str] = []
     modified: list[str] = []
+    created: list[str] = []
+    retyped: list[str] = []
     for line in output.splitlines():
         if not line.strip():
             continue
@@ -73,15 +124,17 @@ def parse_itemize(output: str) -> tuple[list[str], list[str]]:
         if code.startswith("*deleting"):
             extra.append(path)
         elif code == ">f+++++++++":
-            # The source has a new file; rsync will create it without overwriting
-            # anything in the runtime, so it is clean drift-wise.
-            continue
+            created.append(path)
+        elif code.startswith("c"):
+            # Type changes (cd+++++++++, cL+++++++++, ...) replace a runtime
+            # object with one of a different kind; rsync -a will overwrite it.
+            retyped.append(path)
         elif code.startswith(">f") and any(flag in "cst" for flag in code[2:5].lower()):
             modified.append(path)
-    return sorted(set(extra)), sorted(set(modified))
+    return sorted(set(extra)), sorted(set(modified)), sorted(set(created)), sorted(set(retyped))
 
 
-def rsync_diff(source: Path, runtime: Path) -> tuple[list[str], list[str], str]:
+def rsync_diff(source: Path, runtime: Path) -> tuple[list[str], list[str], list[str], list[str], str]:
     command = [
         "rsync",
         "-nrc",
@@ -100,8 +153,7 @@ def rsync_diff(source: Path, runtime: Path) -> tuple[list[str], list[str], str]:
         detail = result.stderr.strip() or result.stdout.strip() or f"rsync exited {result.returncode}"
         raise RuntimeError(f"rsync failed: {detail}")
     raw = result.stdout
-    extra, modified = parse_itemize(raw)
-    return extra, modified, raw
+    return (*parse_itemize(raw), raw)
 
 
 def timestamp_name(directory: Path) -> str:
@@ -114,17 +166,25 @@ def timestamp_name(directory: Path) -> str:
     return candidate
 
 
-def stamped_commit(runtime: Path) -> str | None:
-    """Return the commit recorded in the runtime deploy stamp, if it is parseable."""
+def stamp_state(runtime: Path) -> str | None:
+    """Return the stamped commit, or a reason string when it is unusable."""
     stamp_path = runtime / ".deployed-commit"
     if not stamp_path.is_file():
         return None
     try:
         stamp_text = stamp_path.read_text(encoding="utf-8")
-    except OSError:
-        return None
+    except OSError as error:
+        return f"deploy stamp unreadable ({error.strerror or error})"
     match = COMMIT_STAMP_RE.search(stamp_text)
-    return match.group(1) if match else None
+    if match is None:
+        return "deploy stamp has no parseable commit"
+    return match.group(1)
+
+
+def stamped_commit(runtime: Path) -> str | None:
+    """Return the commit recorded in the runtime deploy stamp, if it is parseable."""
+    state = stamp_state(runtime)
+    return state if state is not None and re.fullmatch(r"[0-9a-f]{7,64}", state) else None
 
 
 def export_commit(source: Path, commit: str, destination: Path) -> str | None:
@@ -132,6 +192,7 @@ def export_commit(source: Path, commit: str, destination: Path) -> str | None:
 
     Preflight compares the runtime against the tree that was actually deployed,
     so a checkout that has since advanced is not mistaken for runtime drift.
+    The archive streams through a file on disk rather than into memory.
     """
     try:
         resolved = subprocess.run(
@@ -140,26 +201,28 @@ def export_commit(source: Path, commit: str, destination: Path) -> str | None:
             text=True,
             capture_output=True,
         )
-    except FileNotFoundError:
+    except OSError:
         return None
     sha = resolved.stdout.strip()
     if resolved.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", sha):
         return None
+    archive_path = destination.parent / f"{destination.name}.tar"
     try:
-        archive = subprocess.run(
-            ["git", "-C", str(source), "archive", "--format=tar", sha],
-            check=False,
-            capture_output=True,
-        )
-    except FileNotFoundError:
-        return None
-    if archive.returncode != 0:
-        return None
-    try:
-        with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r|") as tar:
+        with archive_path.open("wb") as sink:
+            archive = subprocess.run(
+                ["git", "-C", str(source), "archive", "--format=tar", sha],
+                check=False,
+                stdout=sink,
+                stderr=subprocess.PIPE,
+            )
+        if archive.returncode != 0:
+            return None
+        with tarfile.open(archive_path, mode="r|") as tar:
             tar.extractall(destination, filter="data")
     except (tarfile.TarError, OSError):
         return None
+    finally:
+        archive_path.unlink(missing_ok=True)
     return sha
 
 
@@ -276,21 +339,43 @@ def deployable_from(source: Path, runtime: Path, relative: str) -> bool:
     """
     source_path = source / relative
     runtime_path = runtime / relative
+    if source_path.is_symlink() or runtime_path.is_symlink():
+        if not (source_path.is_symlink() and runtime_path.is_symlink()):
+            return False
+        return os.readlink(source_path) == os.readlink(runtime_path)
     if source_path.is_dir():
         return True
     if not source_path.is_file() or not runtime_path.is_file():
         return False
     try:
-        if stat.S_ISREG(runtime_path.lstat().st_mode):
-            return source_path.read_bytes() == runtime_path.read_bytes()
+        if not stat.S_ISREG(runtime_path.lstat().st_mode):
+            return False
+        if source_path.stat().st_size != runtime_path.stat().st_size:
+            return False
+        return file_digest(source_path) == file_digest(runtime_path)
     except OSError:
         return False
-    return source_path.is_symlink() == runtime_path.is_symlink()
 
 
 def filter_extra(source: Path, runtime: Path, extra: list[str]) -> list[str]:
     """Drop runtime paths the checkout still mirrors byte for byte."""
     return [relative for relative in extra if not deployable_from(source, runtime, relative)]
+
+
+def retype_drift(runtime: Path, created: list[str], retyped: list[str]) -> list[str]:
+    """Baseline paths the runtime replaced with a different kind of object.
+
+    rsync reports a missing runtime file and a runtime file replaced by a
+    directory, symlink or fifo with the same `>f+++++++++` code. Only the first
+    is benign: the deploy recreates it from the checkout. The rest are drift,
+    because `rsync -a` would overwrite a runtime object the guard never saw.
+    """
+    drift = list(retyped)
+    for relative in created:
+        runtime_path = runtime / relative
+        if runtime_path.is_symlink() or runtime_path.exists():
+            drift.append(relative)
+    return sorted(set(drift))
 
 
 def resolve_baseline(source: Path, runtime: Path) -> tuple[Path, str, str | None, Path | None]:
@@ -301,9 +386,11 @@ def resolve_baseline(source: Path, runtime: Path) -> tuple[Path, str, str | None
     commit, so comparing against it would report every changed file as runtime
     drift and force ALLOW_DRIFT on routine deploys.
     """
-    stamp = stamped_commit(runtime)
+    stamp = stamp_state(runtime)
     if stamp is None:
-        return source, f"checkout {source}", None, None
+        return source, f"checkout {source} (no deploy stamp)", None, None
+    if re.fullmatch(r"[0-9a-f]{7,64}", stamp) is None:
+        return source, f"checkout {source} ({stamp})", None, None
     temp_dir = Path(tempfile.mkdtemp(prefix="pi-deploy-baseline-"))
     resolved = export_commit(source, stamp, temp_dir)
     if resolved is None:
@@ -336,10 +423,16 @@ def preflight(args: argparse.Namespace) -> int:
         )
         return 0
 
-    baseline, baseline_label, baseline_commit, temp_dir = resolve_baseline(source, runtime)
+    temp_dir: Path | None = None
     try:
-        extra, modified, raw = rsync_diff(baseline, runtime)
-        extra = filter_extra(source, runtime, extra)
+        baseline, baseline_label, baseline_commit, temp_dir = resolve_baseline(source, runtime)
+        extra, modified, created, retyped, raw = rsync_diff(baseline, runtime)
+        # rsync skips symlinks entirely ("skipping non-regular file"), so a
+        # changed link target would otherwise be invisible to both preflight and
+        # --check-stamp while `rsync -a` overwrites it.
+        link_extra, link_changed = symlink_diff(baseline, runtime)
+        extra = filter_extra(source, runtime, sorted(set(extra) | set(link_extra)))
+        modified = sorted(set(modified) | set(link_changed) | set(retype_drift(runtime, created, retyped)))
         artifacts: dict[str, str] = {}
         if args.save_drift and (extra or modified):
             artifacts = save_drift(args.save_drift, baseline, runtime, extra, modified, raw, baseline_label)
