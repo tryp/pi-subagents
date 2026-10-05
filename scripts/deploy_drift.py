@@ -52,14 +52,32 @@ def scan_symlinks(root: Path) -> dict[str, str]:
 
 
 def symlink_diff(baseline: Path, runtime: Path) -> tuple[list[str], list[str]]:
-    """Return (runtime-only, target-changed) symlink paths relative to the baseline."""
+    """Return (runtime-only, changed-or-replaced) symlink paths relative to the baseline.
+
+    rsync has no -l, so it never itemizes symlinks; their drift has to be
+    compared here. A baseline link that the runtime no longer has as a link is
+    drift too when the runtime holds a real object in its place.
+    """
     baseline_links = scan_symlinks(baseline)
     runtime_links = scan_symlinks(runtime)
-    extra = sorted(set(runtime_links) - set(baseline_links))
-    changed = sorted(
-        relative for relative in set(runtime_links) & set(baseline_links) if runtime_links[relative] != baseline_links[relative]
-    )
-    return extra, changed
+    shared = set(baseline_links) & set(runtime_links)
+    changed = {relative for relative in shared if baseline_links[relative] != runtime_links[relative]}
+    extra = set(runtime_links) - set(baseline_links)
+    replaced = {
+        relative
+        for relative in set(baseline_links) - set(runtime_links)
+        if (runtime / relative).is_symlink() or (runtime / relative).exists()
+    }
+    return sorted(extra), sorted(changed | replaced)
+
+
+def symlink_digest(path: Path) -> str:
+    """Stable digest of a symlink's target text.
+
+    Symlinks are deployed content (rsync -a copies them), so a changed target
+    must be visible to both preflight and --check-stamp.
+    """
+    return hashlib.sha256(b"symlink\0" + os.readlink(path).encode("utf-8")).hexdigest()
 
 
 def tree_hash(runtime: Path) -> str:
@@ -78,6 +96,22 @@ def tree_hash(runtime: Path) -> str:
             dirs[:] = [name for name in dirs if name not in EXCLUDES]
         else:
             dirs[:] = [name for name in dirs if name not in EXCLUDES]
+        # A symlink to a directory is listed under `dirs`, not `files`, so it
+        # has to be hashed here or a retargeted link would not change the
+        # stamp at all.
+        linked_dirs: list[str] = []
+        for name in list(dirs):
+            path = root_path / name
+            rel_path = path.relative_to(runtime).as_posix()
+            if rel_path.split("/", 1)[0] in EXCLUDES:
+                continue
+            try:
+                if stat.S_ISLNK(path.lstat().st_mode):
+                    entries.append((rel_path, symlink_digest(path)))
+                    linked_dirs.append(name)
+            except OSError as error:
+                raise OSError(f"cannot hash {path}: {error}") from error
+        dirs[:] = [name for name in dirs if name not in linked_dirs]
         for name in files:
             path = root_path / name
             rel_path = path.relative_to(runtime).as_posix()
@@ -87,9 +121,7 @@ def tree_hash(runtime: Path) -> str:
             try:
                 mode = path.lstat().st_mode
                 if stat.S_ISLNK(mode):
-                    # Symlinks are deployed content (rsync -a copies them), so
-                    # a changed target must be visible to --check-stamp.
-                    digest = hashlib.sha256(b"symlink\0" + os.readlink(path).encode("utf-8")).hexdigest()
+                    digest = symlink_digest(path)
                 elif stat.S_ISREG(mode):
                     digest = file_digest(path)
                 else:
@@ -105,10 +137,11 @@ def tree_hash(runtime: Path) -> str:
 def parse_itemize(output: str) -> tuple[list[str], list[str], list[str], list[str]]:
     """Return (extra, modified, created, retyped) relative paths from rsync itemize output.
 
-    `>f+++++++++` is ambiguous: rsync emits it both for a file the runtime
-    genuinely lacks and for a baseline file the runtime replaced with a
-    directory, symlink or fifo. The caller disambiguates with the runtime's
-    object type; only `created` entries that really are absent stay benign.
+    `>f+++++++++` and `cd+++++++++` are ambiguous. Measured with the flags
+    preflight uses, a genuinely absent runtime file arrives as `>f+++++++++`
+    and an absent runtime directory as `cd+++++++++`, while a file replaced by
+    a directory, symlink or fifo arrives with those same codes. The caller
+    disambiguates by inspecting the runtime's object type.
     """
     extra: list[str] = []
     modified: list[str] = []
@@ -218,7 +251,12 @@ def export_commit(source: Path, commit: str, destination: Path) -> str | None:
         if archive.returncode != 0:
             return None
         with tarfile.open(archive_path, mode="r|") as tar:
-            tar.extractall(destination, filter="data")
+            # "data", not "tar": the data filter rejects absolute and
+            # escaping symlink targets, which git happily tracks. Rejecting
+            # them made export_commit fail and silently degraded the baseline
+            # to the checkout comparison. Nothing here follows links, so the
+            # stricter filter's real value does not apply to this tree.
+            tar.extractall(destination, filter="tar")
     except (tarfile.TarError, OSError):
         return None
     finally:
@@ -362,16 +400,17 @@ def filter_extra(source: Path, runtime: Path, extra: list[str]) -> list[str]:
     return [relative for relative in extra if not deployable_from(source, runtime, relative)]
 
 
-def retype_drift(runtime: Path, created: list[str], retyped: list[str]) -> list[str]:
-    """Baseline paths the runtime replaced with a different kind of object.
+def retype_drift(runtime: Path, candidates: list[str]) -> list[str]:
+    """Baseline paths the runtime holds with a different kind of object.
 
-    rsync reports a missing runtime file and a runtime file replaced by a
-    directory, symlink or fifo with the same `>f+++++++++` code. Only the first
-    is benign: the deploy recreates it from the checkout. The rest are drift,
-    because `rsync -a` would overwrite a runtime object the guard never saw.
+    A candidate is benign only when the runtime truly lacks the path: the
+    deploy then recreates it from the checkout. If the runtime holds anything
+    at that path, `rsync -a` overwrites a runtime object the guard never saw,
+    which is drift. The same path must not also be reported as extra, or
+    --allow-drift could not authorize the overwrite.
     """
-    drift = list(retyped)
-    for relative in created:
+    drift: list[str] = []
+    for relative in candidates:
         runtime_path = runtime / relative
         if runtime_path.is_symlink() or runtime_path.exists():
             drift.append(relative)
@@ -431,8 +470,9 @@ def preflight(args: argparse.Namespace) -> int:
         # changed link target would otherwise be invisible to both preflight and
         # --check-stamp while `rsync -a` overwrites it.
         link_extra, link_changed = symlink_diff(baseline, runtime)
-        extra = filter_extra(source, runtime, sorted(set(extra) | set(link_extra)))
-        modified = sorted(set(modified) | set(link_changed) | set(retype_drift(runtime, created, retyped)))
+        typed = set(retype_drift(runtime, created + retyped))
+        extra = filter_extra(source, runtime, sorted((set(extra) | set(link_extra)) - typed))
+        modified = sorted(set(modified) | set(link_changed) | typed)
         artifacts: dict[str, str] = {}
         if args.save_drift and (extra or modified):
             artifacts = save_drift(args.save_drift, baseline, runtime, extra, modified, raw, baseline_label)

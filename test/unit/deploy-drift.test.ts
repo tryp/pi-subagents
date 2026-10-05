@@ -427,6 +427,100 @@ describe("deploy drift preflight baseline", () => {
 		});
 	});
 
+	it("still treats a deployed directory missing from the runtime as a benign recreation", () => {
+		withGitFixture((f) => {
+			fs.mkdirSync(path.join(f.source, "nested"));
+			fs.writeFileSync(path.join(f.source, "nested", "inner.txt"), "inner\n");
+			gitInSource(f, "add", "-A");
+			gitInSource(f, "commit", "-q", "-m", "add nested dir");
+			fs.cpSync(path.join(f.source, "nested"), path.join(f.runtime, "nested"), { recursive: true });
+			stampDeployed(f);
+			fs.rmSync(path.join(f.runtime, "nested"), { recursive: true });
+			// rsync reports an absent runtime directory as `cd+++++++++`, the
+			// same code it uses for a replaced one; only the runtime's object
+			// type tells them apart.
+			const result = preflight(f);
+			assert.equal(result.status, 0, result.stderr);
+			assert.match(result.stdout, /matches deployed baseline/);
+		});
+	});
+
+	it("detects a deployed symlink the runtime replaced with a directory", () => {
+		withGitFixture((f) => {
+			fs.mkdirSync(path.join(f.source, "actual"));
+			fs.writeFileSync(path.join(f.source, "actual", "inner.txt"), "inner\n");
+			fs.symlinkSync("actual", path.join(f.source, "link"));
+			gitInSource(f, "add", "-A");
+			gitInSource(f, "commit", "-q", "-m", "add symlinked dir");
+			fs.symlinkSync("actual", path.join(f.runtime, "link"));
+			stampDeployed(f);
+			fs.unlinkSync(path.join(f.runtime, "link"));
+			fs.mkdirSync(path.join(f.runtime, "link"));
+			const result = preflight(f, "--json");
+			assert.equal(result.status, 2, result.stderr);
+			assert.deepEqual((JSON.parse(result.stdout) as Record<string, unknown>).modifiedFiles, ["link"]);
+		});
+	});
+
+	it("detects a symlink to a directory whose target changed after the stamp", () => {
+		withGitFixture((f) => {
+			// Both link targets must be real directories in the runtime: a link
+			// whose target is missing is listed by os.walk as a file, a link to
+			// an existing directory is listed under dirs, and only the latter
+			// exercises the directory branch of tree_hash.
+			for (const name of ["one", "two"]) {
+				fs.mkdirSync(path.join(f.source, name));
+				fs.writeFileSync(path.join(f.source, name, "inner.txt"), `${name}\n`);
+			}
+			fs.symlinkSync("one", path.join(f.source, "link"));
+			gitInSource(f, "add", "-A");
+			gitInSource(f, "commit", "-q", "-m", "add dir symlink");
+			fs.cpSync(path.join(f.source, "one"), path.join(f.runtime, "one"), { recursive: true });
+			fs.cpSync(path.join(f.source, "two"), path.join(f.runtime, "two"), { recursive: true });
+			fs.symlinkSync("one", path.join(f.runtime, "link"));
+			stampDeployed(f);
+			assert.equal(run(["--runtime", f.runtime, "--check-stamp"]).status, 0);
+			fs.unlinkSync(path.join(f.runtime, "link"));
+			fs.symlinkSync("two", path.join(f.runtime, "link"));
+			assert.equal(run(["--runtime", f.runtime, "--check-stamp"]).status, 2);
+			const result = preflight(f);
+			assert.equal(result.status, 2, result.stderr);
+			assert.match(result.stdout, /link/);
+		});
+	});
+
+	it("reports a file replaced by a symlink once, so --allow-drift can authorize it", () => {
+		withGitFixture((f) => {
+			stampDeployed(f);
+			fs.unlinkSync(path.join(f.runtime, "tracked.txt"));
+			fs.symlinkSync("/nowhere", path.join(f.runtime, "tracked.txt"));
+			const result = preflight(f, "--json");
+			assert.equal(result.status, 2, result.stderr);
+			const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+			assert.deepEqual(parsed.extraFiles, []);
+			assert.deepEqual(parsed.modifiedFiles, ["tracked.txt"]);
+			const allowed = preflight(f, "--allow-drift");
+			assert.equal(allowed.status, 0, allowed.stderr);
+		});
+	});
+
+	it("still resolves the baseline when the commit tracks an absolute symlink", () => {
+		withGitFixture((f) => {
+			fs.symlinkSync("/etc/hostname", path.join(f.source, "absolute-link"));
+			gitInSource(f, "add", "-A");
+			gitInSource(f, "commit", "-q", "-m", "add absolute symlink");
+			fs.cpSync(path.join(f.source, "absolute-link"), path.join(f.runtime, "absolute-link"), { verbatimSymlinks: true });
+			stampDeployed(f);
+			// `data` extraction rejects absolute links; falling back to the
+			// checkout would mask the baseline behind a checkout comparison.
+			const result = preflight(f, "--json");
+			assert.equal(result.status, 0, result.stderr);
+			const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+			assert.match(String(parsed.baseline), /^deployed baseline /);
+			assert.equal(parsed.baselineCommit, headOf(f));
+		});
+	});
+
 	it("detects a deployed file the runtime replaced with a directory", () => {
 		withGitFixture((f) => {
 			stampDeployed(f);
