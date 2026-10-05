@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -13,11 +14,14 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 EXCLUDES = (".git", "node_modules", "tmp", ".deployed-commit", ".deploy.lock")
 TREE_STAMP_RE = re.compile(r"^tree: sha256:([0-9a-f]{64})$", re.MULTILINE)
+COMMIT_STAMP_RE = re.compile(r"^commit:\s*([0-9a-f]{7,64})\s*$", re.MULTILINE)
 
 
 def tree_hash(runtime: Path) -> str:
@@ -110,7 +114,56 @@ def timestamp_name(directory: Path) -> str:
     return candidate
 
 
-def _git_patch(source: Path, runtime: Path) -> tuple[str, str]:
+def stamped_commit(runtime: Path) -> str | None:
+    """Return the commit recorded in the runtime deploy stamp, if it is parseable."""
+    stamp_path = runtime / ".deployed-commit"
+    if not stamp_path.is_file():
+        return None
+    try:
+        stamp_text = stamp_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = COMMIT_STAMP_RE.search(stamp_text)
+    return match.group(1) if match else None
+
+
+def export_commit(source: Path, commit: str, destination: Path) -> str | None:
+    """Export `commit`'s tree into `destination`; return the resolved sha, or None.
+
+    Preflight compares the runtime against the tree that was actually deployed,
+    so a checkout that has since advanced is not mistaken for runtime drift.
+    """
+    try:
+        resolved = subprocess.run(
+            ["git", "-C", str(source), "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        return None
+    sha = resolved.stdout.strip()
+    if resolved.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", sha):
+        return None
+    try:
+        archive = subprocess.run(
+            ["git", "-C", str(source), "archive", "--format=tar", sha],
+            check=False,
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        return None
+    if archive.returncode != 0:
+        return None
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r|") as tar:
+            tar.extractall(destination, filter="data")
+    except (tarfile.TarError, OSError):
+        return None
+    return sha
+
+
+def _git_patch(source: Path, runtime: Path, label: str) -> tuple[str, str]:
     """Return a patch (source -> runtime) and a header noting application direction."""
     command = ["git", "diff", "--no-index", "--binary", "--", ".", str(runtime), "--"]
     command.append(".")
@@ -124,7 +177,7 @@ def _git_patch(source: Path, runtime: Path) -> tuple[str, str]:
         detail = result.stderr.strip() or f"git diff exited {result.returncode}"
         raise RuntimeError(f"could not build drift patch: {detail}")
     header = (
-        "# Runtime drift patch: source -> runtime. Apply to RUNTIME to return it to SOURCE state with `git apply -R`.\n"
+        f"# Runtime drift patch: {label} -> runtime. Apply to RUNTIME with `git apply -R` to return it to {label}.\n"
     )
     return header + result.stdout, "git diff --no-index --binary"
 
@@ -176,14 +229,14 @@ def _fallback_patch(source: Path, runtime: Path) -> str:
     return "".join(lines)
 
 
-def save_drift(directory: Path, source: Path, runtime: Path, extra: list[str], modified: list[str], raw: str) -> dict[str, str]:
+def save_drift(directory: Path, baseline: Path, runtime: Path, extra: list[str], modified: list[str], raw: str, label: str) -> dict[str, str]:
     directory.mkdir(parents=True, exist_ok=True)
     stamp = timestamp_name(directory)
     patch_path = directory / f"deploy-drift-{stamp}.patch"
     hash_path = directory / f"deploy-drift-{stamp}.sha256"
     listing_path = directory / f"deploy-drift-{stamp}.listing.txt"
 
-    patch, method = _git_patch(source, runtime)
+    patch, method = _git_patch(baseline, runtime, label)
     patch_path.write_text(patch, encoding="utf-8")
 
     hashes: list[str] = []
@@ -212,6 +265,53 @@ def emit(data: dict[str, Any], as_json: bool, prose: str) -> None:
         print(prose)
 
 
+def deployable_from(source: Path, runtime: Path, relative: str) -> bool:
+    """True when the checkout still provides this runtime path with identical content.
+
+    The deploy mirrors the checkout working tree, not just the committed tree, so
+    gitignored scratch content (for example .pi-subagents/artifacts/) is copied
+    to the runtime on every deploy. Such files are absent from the stamped
+    commit yet are not drift; only content that the checkout no longer provides
+    (or would overwrite with something different) is at risk.
+    """
+    source_path = source / relative
+    runtime_path = runtime / relative
+    if source_path.is_dir():
+        return True
+    if not source_path.is_file() or not runtime_path.is_file():
+        return False
+    try:
+        if stat.S_ISREG(runtime_path.lstat().st_mode):
+            return source_path.read_bytes() == runtime_path.read_bytes()
+    except OSError:
+        return False
+    return source_path.is_symlink() == runtime_path.is_symlink()
+
+
+def filter_extra(source: Path, runtime: Path, extra: list[str]) -> list[str]:
+    """Drop runtime paths the checkout still mirrors byte for byte."""
+    return [relative for relative in extra if not deployable_from(source, runtime, relative)]
+
+
+def resolve_baseline(source: Path, runtime: Path) -> tuple[Path, str, str | None, Path | None]:
+    """Pick the tree the runtime should match: the stamped commit, else the checkout.
+
+    Returns (baseline_dir, label, stamped_sha_or_None, temp_dir_to_clean_up).
+    A checkout that has advanced past the deployed commit is normal after any
+    commit, so comparing against it would report every changed file as runtime
+    drift and force ALLOW_DRIFT on routine deploys.
+    """
+    stamp = stamped_commit(runtime)
+    if stamp is None:
+        return source, f"checkout {source}", None, None
+    temp_dir = Path(tempfile.mkdtemp(prefix="pi-deploy-baseline-"))
+    resolved = export_commit(source, stamp, temp_dir)
+    if resolved is None:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return source, f"checkout {source} (stamped commit {stamp[:12]} is not resolvable here)", stamp, None
+    return temp_dir, f"deployed baseline {resolved[:12]}", resolved, temp_dir
+
+
 def preflight(args: argparse.Namespace) -> int:
     runtime = args.runtime.resolve()
     source = args.source.resolve()
@@ -219,7 +319,7 @@ def preflight(args: argparse.Namespace) -> int:
         raise RuntimeError(f"source directory is not readable: {source}")
     if not runtime.exists():
         emit(
-            {"mode": "preflight", "runtime": str(runtime), "source": str(source), "status": "clean", "exitCode": 0, "extraFiles": [], "modifiedFiles": []},
+            {"mode": "preflight", "runtime": str(runtime), "source": str(source), "baseline": None, "baselineCommit": None, "status": "clean", "exitCode": 0, "extraFiles": [], "modifiedFiles": []},
             args.json,
             f"drift guard: {runtime} matches {source} (runtime does not exist yet)",
         )
@@ -230,16 +330,22 @@ def preflight(args: argparse.Namespace) -> int:
         has_runtime_content = any(entry.name not in EXCLUDES for entry in entries)
     if not has_runtime_content:
         emit(
-            {"mode": "preflight", "runtime": str(runtime), "source": str(source), "status": "clean", "exitCode": 0, "extraFiles": [], "modifiedFiles": []},
+            {"mode": "preflight", "runtime": str(runtime), "source": str(source), "baseline": None, "baselineCommit": None, "status": "clean", "exitCode": 0, "extraFiles": [], "modifiedFiles": []},
             args.json,
             f"drift guard: {runtime} matches {source} (runtime is empty)",
         )
         return 0
 
-    extra, modified, raw = rsync_diff(source, runtime)
-    artifacts: dict[str, str] = {}
-    if args.save_drift and (extra or modified):
-        artifacts = save_drift(args.save_drift, source, runtime, extra, modified, raw)
+    baseline, baseline_label, baseline_commit, temp_dir = resolve_baseline(source, runtime)
+    try:
+        extra, modified, raw = rsync_diff(baseline, runtime)
+        extra = filter_extra(source, runtime, extra)
+        artifacts: dict[str, str] = {}
+        if args.save_drift and (extra or modified):
+            artifacts = save_drift(args.save_drift, baseline, runtime, extra, modified, raw, baseline_label)
+    finally:
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     rejected_extra = bool(extra)
     rejected_modified = bool(modified) and not args.allow_drift
@@ -249,6 +355,8 @@ def preflight(args: argparse.Namespace) -> int:
         "mode": "preflight",
         "runtime": str(runtime),
         "source": str(source),
+        "baseline": baseline_label,
+        "baselineCommit": baseline_commit if baseline != source else None,
         "status": status,
         "exitCode": exit_code,
         "extraFiles": extra,
@@ -260,17 +368,23 @@ def preflight(args: argparse.Namespace) -> int:
         return exit_code
 
     if not extra and not modified:
-        emit(data, False, f"drift guard: {runtime} matches {source}")
+        emit(data, False, f"drift guard: {runtime} matches {baseline_label}")
         return 0
 
     prefix = "ERROR" if exit_code == 2 else "WARNING"
-    lines = [f"drift guard: {runtime} vs {source}"]
+    lines = [f"drift guard: {runtime} vs {baseline_label}"]
     if extra:
-        lines.append(f"{prefix}: {len(extra)} file(s) in the runtime are not in the checkout and would be lost:")
+        lines.append(
+            f"{prefix}: {len(extra)} file(s) in the runtime are not in {baseline_label} and are no longer "
+            "provided by the checkout; they would be lost:"
+        )
         lines.extend(f"  {path}" for path in extra)
     if modified:
         modified_prefix = "ERROR" if rejected_modified else "WARNING"
-        lines.append(f"{modified_prefix}: {len(modified)} file(s) would be overwritten with checkout content:")
+        lines.append(
+            f"{modified_prefix}: {len(modified)} file(s) were edited in the runtime after {baseline_label} "
+            "and would be overwritten with checkout content:"
+        )
         lines.extend(f"  {path}" for path in modified)
     if artifacts:
         lines.extend((f"drift patch: {artifacts['patch']}", f"drift sha256: {artifacts['sha256']}", f"drift listing: {artifacts['listing']}"))

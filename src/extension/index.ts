@@ -168,10 +168,16 @@ function createSlashResultComponent(
 }
 
 class SubagentControlNoticeComponent implements Component {
-	constructor(
-		private readonly details: SubagentControlMessageDetails,
-		private readonly theme: ExtensionContext["ui"]["theme"],
-	) {}
+	// Explicit fields rather than constructor parameter properties: node runs
+	// TypeScript in strip-only mode (no --experimental-transform-types, which
+	// node 26 rejects), and strip-only mode cannot emit parameter properties.
+	private readonly details: SubagentControlMessageDetails;
+	private readonly theme: ExtensionContext["ui"]["theme"];
+
+	constructor(details: SubagentControlMessageDetails, theme: ExtensionContext["ui"]["theme"]) {
+		this.details = details;
+		this.theme = theme;
+	}
 
 	invalidate(): void {}
 
