@@ -1034,6 +1034,12 @@ export interface AsyncJobState {
 	totalTokens?: TokenUsage;
 	sessionFile?: string;
 	controlEventCursor?: number;
+	/** True when `controlEventCursor` is mid-line; the scanner discards up to the next newline. */
+	controlEventMidLine?: boolean;
+	/** Count of control-event log lines skipped for exceeding the per-line byte budget. */
+	controlEventOversizedLines?: number;
+	/** Count of control-event log lines that failed JSON.parse. */
+	controlEventMalformedLines?: number;
 	nestedRoute?: NestedRouteInfo;
 	nestedChildren?: NestedRunSummary[];
 }

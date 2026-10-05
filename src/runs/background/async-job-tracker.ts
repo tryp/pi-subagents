@@ -20,6 +20,11 @@ import { normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
 import { hasLiveNestedDescendants, updateAsyncJobNestedProjection } from "../shared/nested-events.ts";
 import { listAsyncRuns, type AsyncRunSummary } from "./async-status.ts";
+import {
+	CONTROL_EVENT_READ_CHUNK_BYTES,
+	CONTROL_EVENT_SCAN_WINDOW_BYTES,
+	scanControlEventLines,
+} from "./control-event-scanner.ts";
 
 interface AsyncJobTrackerOptions {
 	completionRetentionMs?: number;
@@ -30,9 +35,6 @@ interface AsyncJobTrackerOptions {
 	now?: () => number;
 }
 
-const CONTROL_EVENT_READ_CHUNK_BYTES = 64 * 1024;
-const MAX_CONTROL_EVENT_LINE_BYTES = 1024 * 1024;
-const CONTROL_EVENT_SCAN_WINDOW_BYTES = 2 * 1024 * 1024;
 const MAX_RECENT_FLEET_JOBS = 20;
 
 function rememberFleetJob(state: SubagentState, job: AsyncJobState): void {
@@ -61,15 +63,39 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 		ctx.ui.requestRender?.();
 	};
 	const refreshWidget = (ctx: ExtensionContext) => rerenderWidget(ctx);
-	const restoredControlEventCursor = (asyncDir: string) => {
+	/**
+	 * Start restored jobs at EOF without replaying control events. The cursor is
+	 * snapped back to the last newline so a writer that is mid-append cannot leave
+	 * the scanner parsing the tail of a partial line; that single unterminated
+	 * line is the only region re-read, and it was never delivered before.
+	 */
+	const restoredControlEventCursor = (asyncDir: string): { cursor: number; midLine: boolean } => {
+		let fd: number;
 		try {
-			return fs.statSync(path.join(asyncDir, "events.jsonl")).size;
+			fd = fs.openSync(path.join(asyncDir, "events.jsonl"), "r");
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return { cursor: 0, midLine: false };
 			throw error;
+		}
+		try {
+			const size = fs.fstatSync(fd).size;
+			if (size === 0) return { cursor: 0, midLine: false };
+			const probeBytes = Math.min(size, CONTROL_EVENT_READ_CHUNK_BYTES);
+			const buffer = Buffer.alloc(probeBytes);
+			const bytesRead = fs.readSync(fd, buffer, 0, probeBytes, size - probeBytes);
+			if (bytesRead <= 0) return { cursor: 0, midLine: false };
+			const lastNewline = buffer.subarray(0, bytesRead).lastIndexOf(0x0a);
+			if (lastNewline >= 0) return { cursor: size - probeBytes + lastNewline + 1, midLine: false };
+			if (probeBytes >= size) return { cursor: 0, midLine: false };
+			// The trailing line is longer than the probe: resume inside it and let
+			// the scanner discard its remainder up to the next newline.
+			return { cursor: size - probeBytes, midLine: true };
+		} finally {
+			fs.closeSync(fd);
 		}
 	};
 	const summaryToJob = (run: AsyncRunSummary): AsyncJobState => {
+		const restoredCursor = restoredControlEventCursor(run.asyncDir);
 		const groups = normalizeParallelGroups(run.parallelGroups, run.steps.length, run.chainStepCount ?? run.steps.length);
 		const activeGroup = run.currentStep !== undefined
 			? groups.find((group) => run.currentStep! >= group.start && run.currentStep! < group.start + group.count)
@@ -114,7 +140,10 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			outputFile: run.outputFile,
 			totalTokens: run.totalTokens,
 			sessionFile: run.sessionFile,
-			controlEventCursor: restoredControlEventCursor(run.asyncDir),
+			controlEventCursor: restoredCursor.cursor,
+			controlEventMidLine: restoredCursor.midLine,
+			controlEventOversizedLines: 0,
+			controlEventMalformedLines: 0,
 			nestedChildren: run.nestedChildren,
 		};
 	};
@@ -152,13 +181,13 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			const startedFromTail = savedCursor === undefined && stat.size > CONTROL_EVENT_SCAN_WINDOW_BYTES;
 			if (startedFromTail) cursor = stat.size - CONTROL_EVENT_SCAN_WINDOW_BYTES;
 			if (stat.size <= cursor) return;
-			const scanEnd = Math.min(stat.size, cursor + CONTROL_EVENT_SCAN_WINDOW_BYTES);
 			const handleLine = (line: string) => {
 				if (!line.trim()) return;
 				let parsed: unknown;
 				try {
 					parsed = JSON.parse(line);
 				} catch (error) {
+					job.controlEventMalformedLines = (job.controlEventMalformedLines ?? 0) + 1;
 					console.error(`Ignoring malformed async control event in '${eventsPath}':`, error);
 					return;
 				}
@@ -200,47 +229,16 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 					});
 				}
 			};
-			let readCursor = cursor;
-			let lastCompleteCursor = cursor;
-			let lineParts: Buffer[] = [];
-			let lineBytes = 0;
-			let skippingOversizedLine = startedFromTail;
-			const appendLineSegment = (segment: Buffer) => {
-				if (segment.length === 0 || skippingOversizedLine) return;
-				if (lineBytes + segment.length > MAX_CONTROL_EVENT_LINE_BYTES) {
-					lineParts = [];
-					lineBytes = 0;
-					skippingOversizedLine = true;
-					return;
-				}
-				lineParts.push(segment);
-				lineBytes += segment.length;
-			};
-			while (readCursor < scanEnd) {
-				const toRead = Math.min(CONTROL_EVENT_READ_CHUNK_BYTES, scanEnd - readCursor);
-				const buffer = Buffer.alloc(toRead);
-				const bytesRead = fs.readSync(fd, buffer, 0, toRead, readCursor);
-				if (bytesRead <= 0) break;
-				const chunk = bytesRead === buffer.length ? buffer : buffer.subarray(0, bytesRead);
-				let lineStart = 0;
-				for (let index = 0; index < chunk.length; index++) {
-					if (chunk[index] !== 0x0a) continue;
-					appendLineSegment(chunk.subarray(lineStart, index));
-					if (!skippingOversizedLine && lineBytes > 0) {
-						handleLine(Buffer.concat(lineParts, lineBytes).toString("utf-8"));
-					}
-					lineParts = [];
-					lineBytes = 0;
-					skippingOversizedLine = false;
-					lastCompleteCursor = readCursor + index + 1;
-					lineStart = index + 1;
-				}
-				appendLineSegment(chunk.subarray(lineStart));
-				readCursor += bytesRead;
-				if (skippingOversizedLine) job.controlEventCursor = readCursor;
-			}
-			if (lastCompleteCursor > cursor) job.controlEventCursor = lastCompleteCursor;
-			else if (scanEnd < stat.size || startedFromTail) job.controlEventCursor = scanEnd;
+			const scan = scanControlEventLines({
+				fd,
+				size: stat.size,
+				cursor,
+				midLine: startedFromTail || job.controlEventMidLine === true,
+				onLine: handleLine,
+			});
+			job.controlEventCursor = scan.cursor;
+			job.controlEventMidLine = scan.midLine;
+			job.controlEventOversizedLines = (job.controlEventOversizedLines ?? 0) + scan.oversizedLines;
 		} catch (error) {
 			console.error(`Failed to read async control events for '${job.asyncDir}':`, error);
 		} finally {
@@ -414,6 +412,9 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			deadlineAt: info.deadlineAt,
 			turnBudget: info.turnBudget,
 			controlEventCursor: 0,
+			controlEventMidLine: false,
+			controlEventOversizedLines: 0,
+			controlEventMalformedLines: 0,
 		});
 		rememberFleetJob(state, state.asyncJobs.get(info.id)!);
 		ensurePoller();
