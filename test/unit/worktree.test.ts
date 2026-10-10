@@ -669,3 +669,42 @@ setTimeout(() => {
 		}
 	});
 });
+
+// ── Untracked scratch does not block isolation ────────────────────────
+//
+// The guard rejected a dirty tree while counting untracked files. A worktree is
+// created from committed HEAD, so untracked content never carries into it and
+// cannot affect its base. Counting it made unrelated tool scratch (a stray
+// `.omo/`) fail every parallel worktree launch -- the whole batch, not just the
+// affected task. The fix lived only in the deployed runtime copy until a deploy
+// recovered it into the checkout.
+
+it("createWorktrees isolates past untracked scratch", () => {
+	const repoDir = createRepo("pi-worktree-scratch-");
+	let setup: WorktreeSetup | undefined;
+	try {
+		fs.mkdirSync(path.join(repoDir, ".omo"), { recursive: true });
+		fs.writeFileSync(path.join(repoDir, ".omo", "scratch.md"), "unrelated tool scratch\n", "utf-8");
+		setup = createWorktrees(repoDir, "scratch", 1);
+		assert.equal(setup.worktrees.length, 1);
+		assert.ok(fs.existsSync(setup.worktrees[0]!.path));
+	} finally {
+		if (setup) cleanupWorktrees(setup);
+		cleanupRepo(repoDir);
+	}
+});
+
+it("createWorktrees still refuses in-flight tracked work", () => {
+	// The defect the guard exists for: a modification to a tracked file is work
+	// the worktree would be silently missing.
+	const repoDir = createRepo("pi-worktree-tracked-");
+	try {
+		fs.writeFileSync(path.join(repoDir, "tracked.txt"), "changed in flight\n", "utf-8");
+		assert.throws(
+			() => createWorktrees(repoDir, "inflight", 1),
+			/worktree isolation requires a clean git working tree/i,
+		);
+	} finally {
+		cleanupRepo(repoDir);
+	}
+});

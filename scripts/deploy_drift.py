@@ -18,7 +18,15 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-EXCLUDES = (".git", "node_modules", "tmp", ".deployed-commit", ".deploy.lock")
+# `.pi-subagents/` holds runtime-generated run artifacts (oracle inputs/outputs,
+# transcripts) written while the extension runs. `deployable_from`'s own contract
+# says this content is "copied to the runtime on every deploy ... not drift",
+# but the check compared file-by-file against the checkout, so every artifact a
+# session produced blocked the next deploy with "1 file(s) were edited in the
+# runtime" -- even though nothing a human wrote had changed. The repo carries 21
+# such saved drift patches. gitignored, regenerated, and outside the stamped
+# commit, so it is excluded on both sides of the comparison.
+EXCLUDES = (".git", "node_modules", "tmp", ".deployed-commit", ".deploy.lock", ".pi-subagents")
 TREE_STAMP_RE = re.compile(r"^tree: sha256:([0-9a-f]{64})$", re.MULTILINE)
 COMMIT_STAMP_RE = re.compile(r"^commit:\s*([0-9a-f]{7,64})\s*$", re.MULTILINE)
 

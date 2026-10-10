@@ -100,7 +100,14 @@ function resolveRepoState(cwd: string): RepoState {
 	const cwdRelative = resolveRepoCwdRelative(cwd);
 	const toplevel = runGitChecked(cwd, ["rev-parse", "--show-toplevel"]).trim();
 
-	const status = runGitChecked(toplevel, ["status", "--porcelain"]);
+	// A worktree is created from committed HEAD, so untracked files are never
+	// carried into it and cannot affect its base. Only modifications to TRACKED
+	// files (staged or unstaged) represent in-flight work that would be silently
+	// absent from the worktree, so those are what this guard must reject.
+	// Counting untracked files here made unrelated tool scratch (e.g. `.omo/`)
+	// block every parallel worktree launch, and it failed the whole batch rather
+	// than the affected task.
+	const status = runGitChecked(toplevel, ["status", "--porcelain", "--untracked-files=no"]);
 	if (status.trim().length > 0) {
 		throw new Error("worktree isolation requires a clean git working tree. Commit or stash changes first.");
 	}
