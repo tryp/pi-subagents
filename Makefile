@@ -22,12 +22,17 @@ SMOKE_TIMEOUT ?= 90
 # Runtime-only files and directories. node_modules is installed separately in
 # the deployed copy so the source checkout and runtime dependencies remain
 # independent.
+# `.pi-subagents/` holds runtime-generated run artifacts. Excluded on BOTH sides:
+# the drift guard ignores it (it is regenerated and gitignored), and rsync must
+# not `--delete` it, because every deploy was deleting run records a live session
+# had just written while leaving the checkout's own copies in place.
 RSYNC_EXCLUDES := \
 	--exclude '.git/' \
 	--exclude 'node_modules/' \
 	--exclude 'tmp/' \
 	--exclude '.deployed-commit' \
-	--exclude '.deploy.lock'
+	--exclude '.deploy.lock' \
+	--exclude '.pi-subagents/'
 
 .PHONY: deploy deploy-locked drift verify smoke-test deployed-commit
 
