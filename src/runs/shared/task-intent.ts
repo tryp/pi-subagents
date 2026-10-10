@@ -159,8 +159,21 @@ export function expectsImplementationMutation(agent: string, task: string): bool
 	return classifyTaskMutationIntent(agent, task).kind === "implementation";
 }
 
-/** Bare write verbs that make a task write-capable for acceptance inference. */
-const MAY_MUTATE_VERB_PATTERN = /\b(?:fix|implement|update|write|edit|modify|migrate|delete|remove|refactor|commit)\b/i;
+/**
+ * Bare write verbs that make a task write-capable for acceptance inference.
+ *
+ * The implementation classifier's worker vocabulary includes add, replace and
+ * create. When this set omitted them, a task written in the vocabulary a real
+ * parallel batch used -- "Add relevant_paths field ... Emit as a trailing field
+ * ... Convert ..." -- read as read-only here, and the acceptance check that
+ * consumes this did not require a mutation. The two vocabularies disagree by
+ * design (one blocks completion, one raises evidence gates), but they must not
+ * disagree in that direction: a task the guard calls an implementation task must
+ * never be one this one calls read-only. The verbs below are the union of that
+ * vocabulary with the original set; the read-only deliverables above are what
+ * keeps the broadened verbs from turning "produce a summary" into a writer task.
+ */
+const MAY_MUTATE_VERB_PATTERN = /\b(?:fix|implement|update|write|edit|modify|migrate|delete|remove|refactor|commit|add|replace|create|extend|convert|emit|split|generate|produce|wire)\b/i;
 
 /**
  * Whether the task could plausibly change files. Blanket prohibitions win;
@@ -168,9 +181,27 @@ const MAY_MUTATE_VERB_PATTERN = /\b(?:fix|implement|update|write|edit|modify|mig
  * phrase ("write a summary report") do not count; any other bare write verb
  * does.
  */
+/**
+ * Read-only objects the added write verbs can name, local to this function.
+ *
+ * Broadening the verb set means "create a report" would otherwise read as a
+ * writer task. `READ_ONLY_DELIVERABLE_PATTERNS` cannot be reused for that
+ * because it also feeds the shared classifier's fallback, where extending it
+ * would move `unknown` verdicts to `read-only` -- a semantic change to the
+ * guard, made here by accident once already.
+ */
+const MAY_MUTATE_READ_ONLY_OBJECT_PATTERNS = [
+	/\b(?:create|generate|produce|emit|compose|prepare|draft|write)\s+(?:(?:a|an|the)\s+)?(?:github\s+)?(?:issue|bug report|proposal|plan|report|summary|findings?|analysis|recommendations?|memo|note)\b/i,
+];
+
 export function taskMayMutate(task: string): boolean {
 	const taskText = stripPatterns(stripFrameworkInstructions(task), SCOPED_NO_EDIT_CONSTRAINT_PATTERNS);
 	const prohibitions = analyzeNoEditProhibitions(taskText);
 	if (prohibitions.blanket) return false;
-	return MAY_MUTATE_VERB_PATTERN.test(stripPatterns(prohibitions.strippedText, READ_ONLY_DELIVERABLE_PATTERNS));
+	return MAY_MUTATE_VERB_PATTERN.test(
+		stripPatterns(
+			stripPatterns(prohibitions.strippedText, READ_ONLY_DELIVERABLE_PATTERNS),
+			MAY_MUTATE_READ_ONLY_OBJECT_PATTERNS,
+		),
+	);
 }

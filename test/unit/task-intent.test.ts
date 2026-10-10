@@ -79,4 +79,54 @@ describe("taskMayMutate", () => {
 		assert.equal(taskMayMutate("Do not modify tests but implement the fix"), true);
 		assert.equal(taskMayMutate("Do not modify tests; update the parser"), true);
 	});
+
+	// Regression: a real parallel-batch worker task was inferred read-only by
+	// this function, so its acceptance check did not require a mutation and a
+	// worker that landed nothing could still be reported as done. The task's
+	// imperative vocabulary was add/emit/extend/convert -- none of which the
+	// verb pattern knew -- and the only reason the full text passed was an
+	// incidental use of the word "commit".
+	it("treats the imperative verbs real worker tasks use as write-capable", () => {
+		for (const task of [
+			"Add relevant_paths field to the Check record and emit it.",
+			"Add relevant_paths field (tree-scope hook checks only) + new validator.",
+			"Emit as a TRAILING field AFTER critical_path_s; extend split_entry to split both off the end.",
+			"Convert lint-artifact-pins, lint-leg-artifact-writers, lint-abi-inventory.",
+			"Extend the triage partition to 4 classes.",
+			"Create the new runner script and wire it into the hook.",
+			"Replace the fixed delay with a per-server wait bound.",
+			"Split entry parsing into two fields.",
+		]) {
+			assert.equal(taskMayMutate(task), true, task);
+		}
+	});
+
+	it("still reads read-only deliverables as read-only when the verb is added", () => {
+		// The negative control for the broadened verb set: broadening it must not
+		// turn "produce a summary" into a writer task.
+		for (const task of [
+			"Create a report on the API",
+			"Generate a summary of the change",
+			"Produce a plan for the migration",
+			"Draft findings for the review",
+			"Create the summary of findings and return it",
+		]) {
+			assert.equal(taskMayMutate(task), false, task);
+		}
+	});
+
+	it("agrees with the implementation classifier on the worker vocabulary", () => {
+		// The two functions use different vocabularies on purpose (one blocks
+		// completion, one raises evidence gates). They must not disagree in the
+		// direction that matters: a task the guard calls an implementation task
+		// must never be one the acceptance layer calls read-only.
+		for (const task of [
+			"Add relevant_paths field to the Check record and emit it.",
+			"Create the new runner script and wire it into the hook.",
+			"Replace the fixed delay with a per-server wait bound.",
+		]) {
+			assert.equal(expectsImplementationMutation("worker", task), true, task);
+			assert.equal(taskMayMutate(task), true, task);
+		}
+	});
 });
