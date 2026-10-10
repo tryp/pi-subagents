@@ -480,7 +480,13 @@ def preflight(args: argparse.Namespace) -> int:
         link_extra, link_changed = symlink_diff(baseline, runtime)
         typed = set(retype_drift(runtime, created + retyped))
         extra = filter_extra(source, runtime, sorted((set(extra) | set(link_extra)) - typed))
-        modified = sorted(set(modified) | set(link_changed) | typed)
+        # Modified files are filtered the same way extra files are. `deployable_from`
+        # is the risk test: a runtime file is only at risk when the checkout would
+        # write something *different* from what the runtime already holds. Without
+        # this, a runtime file that matches the checkout is still reported as
+        # "would be overwritten", which blocked a deploy whose only change was a fix
+        # already recovered from the runtime into the checkout.
+        modified = filter_extra(source, runtime, sorted(set(modified) | set(link_changed) | typed))
         artifacts: dict[str, str] = {}
         if args.save_drift and (extra or modified):
             artifacts = save_drift(args.save_drift, baseline, runtime, extra, modified, raw, baseline_label)
