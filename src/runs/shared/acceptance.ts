@@ -100,8 +100,25 @@ function inferLevel(input: {
 	const inferredReadOnly = readOnlyTask || (input.acceptanceRole === "read-only" && !taskMayWrite);
 	const roleResolvesReadOnly = input.acceptanceRole !== undefined && inferredReadOnly;
 	const keywordRiskReadOnly = input.acceptanceRole === undefined ? intent.kind === "read-only" : inferredReadOnly;
-	const risky = Boolean(input.async && writeTask)
-		|| (Boolean(input.dynamic) && !roleResolvesReadOnly)
+	// `input.async` is deliberately NOT part of the risk predicate.
+	//
+	// It was, and the predicate then reduced to `writeTask`, because async is
+	// the default for every step: `async-execution.ts` passes `async: true`
+	// unconditionally (its own default resolution returns `asyncByDefault ??
+	// true`), so "async && write" is true for every write-capable task in the
+	// corpus. The effect is measurable out of the run artifacts: 59% of all
+	// steps carry `async write-capable or risky run`, 0% carry the
+	// `write-capable worker/task` that the non-async branch of this function is
+	// the only source of, and 77% of rejections happened at effective level
+	// `reviewed` while a reviewer result exists for 6% of them -- the gate was
+	// applied to everything and enforced for almost nothing.
+	//
+	// Keeping the term would have made the middle rung unreachable by
+	// construction, which is a different failure from "the rung is wrong": a
+	// taxonomy with one reachable rung cannot be tuned. The risk signal that
+	// remains is the one that actually varies: dynamic fanout and the
+	// release/migration/security keywords.
+	const risky = Boolean(input.dynamic && !roleResolvesReadOnly)
 		|| (Boolean(input.dynamicGroup) && !roleResolvesReadOnly)
 		|| (!keywordRiskReadOnly && /\b(?:release|migration|migrate|security|data[- ]loss|destructive|post-review|fix pass)\b/.test(task));
 

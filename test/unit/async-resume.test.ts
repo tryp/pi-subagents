@@ -39,14 +39,14 @@ describe("async recovery descriptor acceptance", () => {
 			const resolved = resolveEffectiveAcceptance({
 				explicit: "checked",
 				agentName: "worker",
-				task: "Implement the fix",
+				task: "Implement the migration",
 				mode: "single",
 				async: true,
 			});
 			const asyncDir = writeRecoveryDescriptor(root, resolved);
 
 			assert.deepEqual(readAsyncRecoveryDescriptor(asyncDir)?.acceptance, JSON.parse(JSON.stringify(resolved)));
-			assert.equal(resolved.level, "reviewed", "async writer inference must produce the resolved-only reviewed level");
+			assert.equal(resolved.level, "reviewed", "explicit checked under a risk-inferred reviewed level must stay the resolved-only reviewed level");
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -73,7 +73,7 @@ describe("async recovery descriptor acceptance", () => {
 					stopRules: ["Do not widen scope"],
 				},
 			},
-			{ label: "inferred async review", input: undefined, task: "Implement the fix", async: true },
+			{ label: "inferred keyword review", input: undefined, task: "Implement the migration", async: true },
 		];
 		try {
 			for (const { label, input, task, async } of inputs) {
@@ -89,7 +89,7 @@ describe("async recovery descriptor acceptance", () => {
 				const recovered = readAsyncRecoveryDescriptor(asyncDir)?.acceptance;
 				assert.deepEqual(recovered, JSON.parse(JSON.stringify(resolved)), label);
 				assert.equal(recovered?.level, resolved.level, `${label} effective level`);
-				if (label === "inferred async review") assert.equal(recovered?.level, "reviewed");
+				if (label === "inferred keyword review") assert.equal(recovered?.level, "reviewed");
 			}
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
@@ -221,7 +221,9 @@ describe("async recovery descriptor acceptance", () => {
 	});
 
 	it("converts resolved acceptance back to its input-compatible execution form", () => {
-		const resolved = resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single", async: true });
+		// A keyword-risky task, so the inference lands at `reviewed` and the
+		// round-trip covers the level an input cannot name directly.
+		const resolved = resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the migration", mode: "single", async: true });
 		assert.equal(resolved.level, "reviewed");
 		const input = acceptanceInputFromResolved(resolved);
 		assert.equal(input.level, resolved.level);
@@ -229,7 +231,7 @@ describe("async recovery descriptor acceptance", () => {
 		assert.deepEqual(input.evidence, resolved.evidence);
 		assert.equal(Object.hasOwn(input, "explicit"), false);
 		assert.equal(Object.hasOwn(input, "inferredReason"), false);
-		assert.equal(resolveEffectiveAcceptance({ explicit: input, agentName: "worker", task: "Implement the fix", mode: "single", async: true }).level, resolved.level);
+		assert.equal(resolveEffectiveAcceptance({ explicit: input, agentName: "worker", task: "Implement the migration", mode: "single", async: true }).level, resolved.level);
 	});
 
 	it("keeps resolved-only fields and reviewed level invalid for genuine input", () => {

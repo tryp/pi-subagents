@@ -47,10 +47,13 @@ function tempRepo(): string {
 }
 
 describe("acceptance gates", () => {
-	it("infers different policies for reviewer, writer, async writer, and dynamic contexts", () => {
+	it("infers different policies for reviewer, writer, and dynamic contexts", () => {
 		assert.equal(resolveEffectiveAcceptance({ agentName: "reviewer", task: "Review-only. Do not edit.", mode: "single" }).level, "attested");
 		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single" }).level, "checked");
-		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single", async: true }).level, "reviewed");
+		// Not "async writer": async is the default for every step, so it carries
+		// no signal and must not escalate a write task to `reviewed`. See the
+		// risky predicate in acceptance.ts.
+		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single", async: true }).level, "checked");
 		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Fix each item", mode: "chain", dynamic: true }).level, "reviewed");
 	});
 
@@ -81,7 +84,7 @@ describe("acceptance gates", () => {
 			task: "Patch src/auth.ts",
 			mode: "single",
 			async: true,
-		}).level, "reviewed");
+		}).level, "checked");
 		assert.equal(resolveEffectiveAcceptance({
 			agentName: "worker",
 			acceptanceRole: "read-only",
@@ -100,7 +103,7 @@ describe("acceptance gates", () => {
 			task: "Handle the authentication flow",
 			mode: "single",
 			async: true,
-		}).level, "reviewed");
+		}).level, "checked");
 		assert.equal(resolveEffectiveAcceptance({
 			agentName: "worker",
 			acceptanceRole: "read-only",
@@ -172,7 +175,9 @@ describe("acceptance gates", () => {
 	});
 
 	it("includes every required resolved criterion in report examples", () => {
-		const inferred = resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single", async: true });
+		// A keyword-risky task, so the inference lands at `reviewed` and emits
+		// both criteria. The async flag no longer escalates anything.
+		const inferred = resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the migration", mode: "single", async: true });
 		const inferredExample = formatAcceptancePrompt(inferred).match(/```acceptance-report\n([\s\S]*?)\n```/);
 		assert.ok(inferredExample?.[1]);
 		assert.deepEqual(
@@ -677,7 +682,7 @@ describe("acceptance gates", () => {
 			for (const explicit of ["auto", { level: "auto" }] as const) {
 				const acceptance = resolveEffectiveAcceptance({
 					agentName: "worker",
-					task: "Implement the async fix",
+					task: "Implement the security fix",
 					async: true,
 					explicit,
 				});
@@ -936,21 +941,27 @@ describe("acceptance gates", () => {
 		}
 
 		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Inspect the failure and implement the fix" }).level, "checked");
-		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Inspect the failure and implement the fix", async: true }).level, "reviewed");
-		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Do not modify tests; implement the fix", async: true }).level, "reviewed");
-		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Do not modify tests but implement the fix", async: true }).level, "reviewed");
-		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Do not modify tests and implement the fix", async: true }).level, "reviewed");
+		// Write tasks land on the middle rung whether or not the default async
+		// shape is used; the old `reviewed` here was async alone doing the work.
+		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Inspect the failure and implement the fix", async: true }).level, "checked");
+		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Do not modify tests; implement the fix", async: true }).level, "checked");
+		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Do not modify tests but implement the fix", async: true }).level, "checked");
+		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Do not modify tests and implement the fix", async: true }).level, "checked");
 		for (const task of [
 			"Do not modify tests - implement the fix",
 			"Do not modify tests – implement the fix",
 			"Do not modify tests — implement the fix",
 		]) {
 			assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task }).level, "checked", task);
-			assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task, async: true }).level, "reviewed", task);
+			assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task, async: true }).level, "checked", task);
 		}
 	});
 
-	it("bare write verbs keep their reviewed gate for async tasks on any agent", () => {
+	it("bare write verbs reach the checked rung, and keyword risk still reaches reviewed", () => {
+		// The middle rung used to be unreachable for any write task, because
+		// async is the default and `async && writeTask` was the whole premise
+		// of `reviewed`. These verbs are now reachable, which is what makes the
+		// taxonomy tunable at all; keyword risk keeps the top rung truthful.
 		const tasks = [
 			"Write the code",
 			"Commit the changes",
@@ -959,8 +970,24 @@ describe("acceptance gates", () => {
 			"Update dependencies",
 		];
 		for (const task of tasks) {
+			assert.equal(resolveEffectiveAcceptance({ agentName: "delegate", task, async: true }).level, "checked", task);
+		}
+		for (const task of ["Release the package", "Migrate the schema", "Harden the security posture"]) {
 			assert.equal(resolveEffectiveAcceptance({ agentName: "delegate", task, async: true }).level, "reviewed", task);
 		}
+	});
+
+	it("async alone never escalates a write task, because it is the default", () => {
+		// The corpus fact this protects: `input.async` is true for every
+		// background step, so `async && writeTask` made `reviewed` the default
+		// for every write task and left the `write-capable worker/task` rung
+		// with zero occurrences across all runs.
+		const withoutAsync = resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single" });
+		const withAsync = resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single", async: true });
+		assert.deepEqual(withAsync.inferredReason, withoutAsync.inferredReason);
+		assert.equal(withAsync.level, "checked");
+		assert.equal(withAsync.review, undefined);
+		assert.deepEqual(withAsync.inferredReason, ["write-capable worker/task"]);
 	});
 
 	it("explicit levels are honored over a read-only inference without silent escalation", () => {

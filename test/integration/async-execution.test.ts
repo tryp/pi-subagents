@@ -1181,7 +1181,10 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			maxSubagentDepth: 2,
 		});
 		const patchPayload = await readAsyncPayload(patchId);
-		assert.equal(patchPayload.results[0]?.acceptance?.effectiveAcceptance?.level, "reviewed");
+		// A read-only-role worker whose task is write-shaped: write-capable, but
+		// no keyword risk and no dynamic fanout, so the middle rung. (Async used
+		// to escalate this on its own; see the risky predicate.)
+		assert.equal(patchPayload.results[0]?.acceptance?.effectiveAcceptance?.level, "checked");
 
 		const reviewId = `async-role-task-template-review-${Date.now().toString(36)}`;
 		executeAsyncChain(reviewId, {
