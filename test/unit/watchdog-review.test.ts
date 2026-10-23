@@ -59,11 +59,14 @@ function createCtx(input: {
 	models?: Model<any>[];
 	authenticated?: string[];
 	thinkingLevel?: string;
+	sessionId?: string | null;
+	authHeaders?: Record<string, string>;
 }) {
 	const allModels = input.models ?? (input.current ? [input.current] : []);
 	const authenticated = new Set(input.authenticated ?? allModels.map((entry) => `${entry.provider}/${entry.id}`));
 	return {
 		cwd: "/tmp/watchdog-review",
+		sessionManager: { getSessionId: () => input.sessionId === undefined ? "parent-session-1" : input.sessionId },
 		model: input.current,
 		...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}),
 		signal: undefined,
@@ -73,7 +76,7 @@ function createCtx(input: {
 			find: (provider: string, id: string) => allModels.find((entry) => entry.provider === provider && entry.id === id),
 			hasConfiguredAuth: (entry: Model<any>) => authenticated.has(`${entry.provider}/${entry.id}`),
 			getApiKeyAndHeaders: async (entry: Model<any>) => authenticated.has(`${entry.provider}/${entry.id}`)
-				? { ok: true as const, apiKey: `key-${entry.provider}-${entry.id}`, headers: { "x-model": entry.id }, env: { WATCHDOG_PROVIDER: entry.provider } }
+				? { ok: true as const, apiKey: `key-${entry.provider}-${entry.id}`, headers: input.authHeaders ?? { "x-model": entry.id }, env: { WATCHDOG_PROVIDER: entry.provider } }
 				: { ok: false as const, error: `No auth for ${entry.provider}/${entry.id}` },
 		},
 	} as never;
@@ -127,9 +130,9 @@ describe("main watchdog review adapter", () => {
 	});
 
 	it("records watchdog_warn emissions through the runtime seam", async () => {
-		const current = model("openai", "gpt-warning");
+		const current = model("opencode", "gpt-warning");
 		const ctx = createCtx({ current });
-		const { streamFn } = createStreamFn([
+		const { streamFn, calls } = createStreamFn([
 			fauxAssistantMessage(fauxToolCall("watchdog_warn", {
 				severity: "blocker",
 				category: "correctness",
@@ -145,6 +148,8 @@ describe("main watchdog review adapter", () => {
 		await createMainWatchdogReview(ctx, { streamFn })(request(enabledConfig(), warnings));
 
 		assert.equal(warnings.length, 1);
+		assert.equal(calls[0]?.options?.sessionId, "parent-session-1");
+		assert.equal(calls[1]?.options?.sessionId, "parent-session-1");
 		assert.deepEqual(warnings[0], {
 			severity: "blocker",
 			category: "correctness",
@@ -274,6 +279,68 @@ describe("main watchdog review adapter", () => {
 			() => resolveWatchdogReviewModel(ctx, enabledConfig({ model: "anthropic/missing-watchdog" })),
 			/was not found.*anthropic\/missing-watchdog/s,
 		);
+	});
+
+	it("passes OpenCode session attribution to every auxiliary stream without leaking it to unrelated providers", async () => {
+		const warnings: WatchdogWarning[] = [];
+		const openCode = model("opencode", "review");
+		const customOpenCode = model("custom", "review", { baseUrl: "https://opencode.ai/v1" });
+		const unrelated = model("custom", "review", { baseUrl: "https://not-opencode.ai/v1" });
+		for (const selected of [openCode, customOpenCode, unrelated]) {
+			const { streamFn, calls } = createStreamFn([fauxAssistantMessage("done", { stopReason: "stop" })]);
+			const ctx = createCtx({ current: selected, sessionId: "stable-session" });
+			await createMainWatchdogReview(ctx, { streamFn })(request(enabledConfig(), warnings));
+			const options = calls[0]?.options;
+			if (selected === unrelated) {
+				assert.equal(options?.sessionId, undefined);
+				assert.equal(Object.keys(options?.headers ?? {}).some((name) => name.toLowerCase() === "x-opencode-session"), false);
+			} else {
+				assert.equal(options?.sessionId, "stable-session");
+				assert.equal(options?.headers?.["x-opencode-session"], "stable-session");
+				assert.equal(options?.headers?.["x-opencode-client"], "pi");
+			}
+		}
+	});
+
+	it("uses the current session for each review, omits absent identity, and honors case-insensitive auth header overrides", async () => {
+		const current = model("opencode-go", "review");
+		const warnings: WatchdogWarning[] = [];
+		const { streamFn, calls } = createStreamFn([
+			fauxAssistantMessage("done", { stopReason: "stop" }),
+			fauxAssistantMessage("done", { stopReason: "stop" }),
+		]);
+		const ctx = createCtx({ current, sessionId: "session-one", authHeaders: { "X-OpenCode-Session": "auth-override", "X-OpenCode-Client": "auth-client" } });
+		await createMainWatchdogReview(ctx, { streamFn })(request(enabledConfig(), warnings));
+		(ctx as any).sessionManager.getSessionId = () => "session-two";
+		await createMainWatchdogReview(ctx, { streamFn })(request(enabledConfig(), warnings));
+		assert.equal(calls[0]?.options?.sessionId, "session-one");
+		assert.equal(calls[0]?.options?.headers?.["X-OpenCode-Session"], "auth-override");
+		assert.equal(calls[0]?.options?.headers?.["X-OpenCode-Client"], "auth-client");
+		assert.equal(Object.keys(calls[0]?.options?.headers ?? {}).filter((key) => key.toLowerCase() === "x-opencode-session").length, 1);
+		assert.equal(Object.keys(calls[0]?.options?.headers ?? {}).filter((key) => key.toLowerCase() === "x-opencode-client").length, 1);
+		assert.equal(calls[1]?.options?.sessionId, "session-two");
+
+		const noSessionCtx = createCtx({ current, sessionId: null });
+		const noSession = createStreamFn([fauxAssistantMessage("done", { stopReason: "stop" })]);
+		await createMainWatchdogReview(noSessionCtx, { streamFn: noSession.streamFn })(request(enabledConfig(), warnings));
+		assert.equal(noSession.calls[0]?.options?.sessionId, undefined);
+		assert.equal(Object.keys(noSession.calls[0]?.options?.headers ?? {}).some((name) => name.toLowerCase() === "x-opencode-session"), false);
+
+		const modelHeaderModel = model("opencode", "model-header", { headers: { "X-OpenCode-Session": "model-override", "X-OpenCode-Client": "model-client" } });
+		const modelHeader = createStreamFn([fauxAssistantMessage("done", { stopReason: "stop" })]);
+		const modelHeaderCtx = createCtx({
+			current: modelHeaderModel,
+			authHeaders: { "x-OPENCode-session": "auth-model-override", "x-OPENCode-client": "auth-model-client" },
+		});
+		await createMainWatchdogReview(modelHeaderCtx, { streamFn: modelHeader.streamFn })(request(enabledConfig(), warnings));
+		assert.equal(modelHeader.calls[0]?.options?.sessionId, "parent-session-1");
+		assert.notEqual(modelHeader.calls[0]?.model, modelHeaderModel);
+		assert.equal(modelHeader.calls[0]?.model.headers, undefined);
+		assert.deepEqual(modelHeaderModel.headers, { "X-OpenCode-Session": "model-override", "X-OpenCode-Client": "model-client" });
+		assert.equal(modelHeader.calls[0]?.options?.headers?.["x-OPENCode-session"], "auth-model-override");
+		assert.equal(modelHeader.calls[0]?.options?.headers?.["x-OPENCode-client"], "auth-model-client");
+		assert.equal(Object.keys(modelHeader.calls[0]?.options?.headers ?? {}).filter((key) => key.toLowerCase() === "x-opencode-session").length, 1);
+		assert.equal(Object.keys(modelHeader.calls[0]?.options?.headers ?? {}).filter((key) => key.toLowerCase() === "x-opencode-client").length, 1);
 	});
 
 	it("falls back to the current session model and thinking when no watchdog model is configured", async () => {

@@ -4,6 +4,7 @@ import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Model } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 import { resolveModelCandidate } from "../runs/shared/model-fallback.ts";
+import { isOpenCodeModel, withOpenCodeSession } from "../shared/opencode-session-headers.ts";
 import { resolveEffectiveThinking, splitKnownThinkingSuffix, THINKING_LEVELS, toModelInfo } from "../shared/model-info.ts";
 import type { WatchdogReviewFunction, WatchdogReviewRequest } from "./runtime.ts";
 import {
@@ -252,13 +253,20 @@ export function createMainWatchdogReview(provider: WatchdogContextProvider, opti
 		});
 		if (ctx.signal?.aborted || request.signal?.aborted) return { stopReason: "aborted" };
 		const auth = selection.auth;
+		const sessionId = ctx.sessionManager.getSessionId() ?? undefined;
 		const baseStreamFn = options.streamFn ?? streamSimple;
-		const streamFn: StreamFn = (model, context, streamOptions) => baseStreamFn(model, context, {
-			...streamOptions,
-			...(auth.apiKey ? { apiKey: auth.apiKey } : {}),
-			env: auth.env || streamOptions?.env ? { ...(auth.env ?? {}), ...(streamOptions?.env ?? {}) } : undefined,
-			headers: { ...(streamOptions?.headers ?? {}), ...(auth.headers ?? {}) },
-		});
+		const streamFn: StreamFn = (model, context, streamOptions) => {
+			const requestOptions = withOpenCodeSession(model, sessionId, {
+				...streamOptions,
+				...(auth.apiKey ? { apiKey: auth.apiKey } : {}),
+				env: auth.env || streamOptions?.env ? { ...(auth.env ?? {}), ...(streamOptions?.env ?? {}) } : undefined,
+				headers: { ...(streamOptions?.headers ?? {}), ...(auth.headers ?? {}) },
+			});
+			// The compat provider separately merges model.headers and options.headers case-sensitively.
+			// We already merged them case-insensitively, so avoid reintroducing duplicate wire headers.
+			const requestModel = sessionId && isOpenCodeModel(model) ? { ...model, headers: undefined } : model;
+			return baseStreamFn(requestModel, context, requestOptions);
+		};
 		const tools = [
 			...(options.createReadOnlyTools ?? createReadOnlyTools)(ctx.cwd).filter((tool) => WATCHDOG_ALLOWED_TOOL_NAMES.has(tool.name) && tool.name !== "watchdog_warn"),
 			createWatchdogWarnTool(request),
