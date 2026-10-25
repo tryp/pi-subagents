@@ -1512,7 +1512,9 @@ describe("subagent_wait tool", () => {
 		try {
 			const asyncRoot = path.join(root, "runs");
 			const state = makeState("sess-1");
-			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999, mode: "parallel", steps: [
+				{ agent: "alpha", status: "running" }, { agent: "beta", status: "pending" },
+			] });
 			writeStepResult(asyncRoot, "run-a", 0, "ALPHA");
 			const deps = baseDeps(root, state, { sleep: async () => {} });
 
@@ -1528,13 +1530,59 @@ describe("subagent_wait tool", () => {
 			assert.deepEqual(stepResultsOf(second).map((view) => view.stepIndex), [1]);
 
 			// Both children have been reported; a third call reports nothing and says so.
-			writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1" });
+			writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1", mode: "parallel", steps: [
+				{ agent: "alpha", status: "complete" }, { agent: "beta", status: "complete" },
+			] });
 			const third = await waitForSubagents({ runId: "run-a", until: "first-result" }, undefined, deps);
 			assert.equal(third.isError, undefined);
+			assert.equal(state.consumedCompletionRuns?.has("run-a"), true);
 			assert.match(textOf(third), /no unconsumed per-child results/i);
 			assert.deepEqual(stepResultsOf(third), []);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("marks a complete run consumed only when every terminal result was returned inline", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-consumed-completion-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1", mode: "parallel", steps: [
+				{ agent: "alpha", status: "complete" }, { agent: "beta", status: "complete" },
+			] });
+			writeStepResult(asyncRoot, "run-a", 0, "ALPHA");
+			writeStepResult(asyncRoot, "run-a", 1, "BETA");
+
+			const result = await waitForSubagents({ runId: "run-a", barrier: "consume-result" }, undefined, baseDeps(root, state));
+
+			assert.match(textOf(result), /ALPHA/);
+			assert.match(textOf(result), /BETA/);
+			assert.equal(state.consumedCompletionRuns?.has("run-a"), true);
+			assert.equal(state.fullyDeliveredStepResults?.size, 2);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not consume completion when terminal results are incomplete, failed, or too large to inline", async () => {
+		for (const scenario of ["missing", "failed", "truncated"] as const) {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), `pi-wait-incomplete-${scenario}-`));
+			try {
+				const asyncRoot = path.join(root, "runs");
+				const state = makeState("sess-1");
+				writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1", mode: "parallel", steps: [
+					{ agent: "alpha", status: "complete" }, { agent: "beta", status: scenario === "failed" ? "failed" : "complete" },
+				] });
+				writeStepResult(asyncRoot, "run-a", 0, scenario === "truncated" ? "x".repeat(9000) : "ALPHA");
+				if (scenario !== "missing") writeStepResult(asyncRoot, "run-a", 1, "BETA", scenario === "failed" ? { state: "failed" } : {});
+
+				await waitForSubagents({ runId: "run-a", barrier: "consume-result" }, undefined, baseDeps(root, state));
+
+				assert.notEqual(state.consumedCompletionRuns?.has("run-a"), true, scenario);
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
 		}
 	});
 

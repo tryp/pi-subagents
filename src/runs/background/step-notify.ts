@@ -1,5 +1,6 @@
 /** Bounded, interactive-only notifications for newly-published child results. */
 import * as fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AsyncJobState, SubagentState } from "../../shared/types.ts";
 import { SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_FOREGROUND_COMPLETE_EVENT, SUBAGENT_STEP_RESULT_EVENT } from "../../shared/types.ts";
@@ -52,6 +53,8 @@ export interface StepNotifyDetails {
 
 export interface StepNotifyEnvelope {
 	version: 1;
+	/** Exact queue identity used to retire bookkeeping when this message is consumed. */
+	queueKey?: string;
 	notifications: StepNotifyDetails[];
 }
 
@@ -74,6 +77,19 @@ export interface RegisterStepNotifyOptions {
 	fileExists?: (file: string) => boolean;
 	now?: () => number;
 	logSuppression?: (runId: string, stepIndex: number, reason: string) => void;
+}
+
+function recordStepNotificationTelemetry(
+	pi: { appendEntry?: (customType: string, data?: unknown) => void },
+	event: string,
+	runId: string,
+	count = 1,
+): void {
+	try {
+		pi.appendEntry?.("subagent_notification_telemetry", { version: 1, channel: "step", event, runId, count });
+	} catch {
+		// Telemetry must never interfere with notification delivery.
+	}
 }
 
 function artifactOutput(artifact: StepResultArtifact<StepResultPresentation>): string {
@@ -164,7 +180,7 @@ function unref(handle: unknown): void {
  * discovery, hold-until-idle, per-run coalescing, and bounded delivery.
  */
 export function registerStepNotifications(
-	pi: Pick<ExtensionAPI, "sendMessage" | "events">,
+	pi: Pick<ExtensionAPI, "sendMessage" | "events" | "on" | "appendEntry">,
 	state: SubagentState,
 	enabled: boolean,
 	options: RegisterStepNotifyOptions = {},
@@ -187,7 +203,67 @@ export function registerStepNotifications(
 	const deferredItems = new Map<string, StepNotifyItem[]>();
 	const suppressed = new Set<string>();
 	const batchers = new Map<string, CompletionBatcher<StepNotifyItem>>();
+	const queuedMessages = new Map<string, StepNotifyItem[]>();
+	const globalStore = globalThis as Record<string, unknown>;
+	const queuedMessagesStoreKey = "__pi_subagents_step_queued_messages__";
+	const messageStartHandlerStoreKey = "__pi_subagents_step_message_start_handler__";
+	globalStore[queuedMessagesStoreKey] = queuedMessages;
+	const queueGeneration = randomUUID();
+	let nextQueueKey = 0;
 	let disposed = false;
+
+	const sendQueuedReceipt = (runId: string, items: StepNotifyItem[]) => {
+		if (items.length === 0 || disposed) return;
+		const receipt = renderReceipt(items, fileExists);
+		const queueKey = `subagent-step:${state.currentSessionId ?? "unknown"}:${runId}:${queueGeneration}:${++nextQueueKey}`;
+		const sendMessage = pi.sendMessage as unknown as (
+			message: Parameters<ExtensionAPI["sendMessage"]>[0],
+			options: { triggerTurn: boolean; queueKey: string },
+		) => void;
+		sendMessage({
+			customType: "subagent-step-notify",
+			content: receipt.content,
+			display: true,
+			details: { version: 1, queueKey, notifications: receipt.details } satisfies StepNotifyEnvelope,
+		}, { triggerTurn: true, queueKey });
+		queuedMessages.set(queueKey, items);
+	};
+
+	const cancelPendingStepNotifications = (runId: string, stepIndexes: number[]) => {
+		const cancelQueuedMessage = (pi as unknown as { cancelQueuedMessage?: (queueKey: string) => boolean }).cancelQueuedMessage;
+		const fullyDelivered = state.fullyDeliveredStepResults ?? new Set<string>();
+		const consumedIndexes = new Set(stepIndexes);
+		for (const [queueKey, items] of queuedMessages) {
+			if (!items.some((item) => item.runId === runId && consumedIndexes.has(item.details.stepIndex))) continue;
+			if (typeof cancelQueuedMessage !== "function") {
+				queuedMessages.delete(queueKey);
+				recordStepNotificationTelemetry(pi, "cancel-unavailable", runId);
+				continue;
+			}
+			if (!cancelQueuedMessage.call(pi, queueKey)) {
+				queuedMessages.delete(queueKey);
+				recordStepNotificationTelemetry(pi, "cancel-miss", runId);
+				continue;
+			}
+			queuedMessages.delete(queueKey);
+			recordStepNotificationTelemetry(pi, "cancelled", runId);
+			const remaining = items.filter((item) => !fullyDelivered.has(stepResultKey(item.runId, item.details.stepIndex)) && !(item.runId === runId && consumedIndexes.has(item.details.stepIndex)));
+			if (remaining.length > 0) {
+				recordStepNotificationTelemetry(pi, "rebuilt", runId, remaining.length);
+				sendQueuedReceipt(runId, remaining);
+			}
+		}
+	};
+	state.cancelPendingStepNotifications = cancelPendingStepNotifications;
+	if (typeof globalStore[messageStartHandlerStoreKey] !== "function" && typeof pi.on === "function") {
+		pi.on("message_start", (event) => {
+			if (event.message.role !== "custom" || event.message.customType !== "subagent-step-notify") return;
+			const envelope = event.message.details as StepNotifyEnvelope | undefined;
+			const pending = globalStore[queuedMessagesStoreKey] as Map<string, StepNotifyItem[]> | undefined;
+			if (envelope?.queueKey) pending?.delete(envelope.queueKey);
+		});
+		globalStore[messageStartHandlerStoreKey] = true;
+	}
 
 	const emit = (runId: string, items: StepNotifyItem[]) => {
 		pendingRuns.delete(runId);
@@ -205,13 +281,7 @@ export function registerStepNotifications(
 			pendingRuns.add(runId);
 			return;
 		}
-		const receipt = renderReceipt(items, fileExists);
-		pi.sendMessage({
-			customType: "subagent-step-notify",
-			content: receipt.content,
-			display: true,
-			details: { version: 1, notifications: receipt.details } satisfies StepNotifyEnvelope,
-		}, { triggerTurn: true });
+		sendQueuedReceipt(runId, items);
 		sentCount.set(runId, (sentCount.get(runId) ?? 0) + 1);
 	};
 
@@ -233,8 +303,15 @@ export function registerStepNotifications(
 		const runId = runIdFromCompletion(payload);
 		if (!runId) return;
 		completionRuns.add(runId);
-		// Run completion already carries joined output; discard any queued step
+		// Run completion already carries joined output; cancel any queued step
 		// receipt so it cannot arrive afterward and duplicate that content.
+		for (const [queueKey, items] of queuedMessages) {
+			if (!items.some((item) => item.runId === runId)) continue;
+			const cancel = (pi as unknown as { cancelQueuedMessage?: (queueKey: string) => boolean }).cancelQueuedMessage;
+			const cancelled = typeof cancel === "function" && cancel.call(pi, queueKey);
+			queuedMessages.delete(queueKey);
+			recordStepNotificationTelemetry(pi, cancelled ? "cancelled-by-completion" : "cancel-miss-by-completion", runId);
+		}
 		batchers.get(runId)?.dispose();
 		batchers.delete(runId);
 		deferredItems.delete(runId);
@@ -292,9 +369,12 @@ export function registerStepNotifications(
 					hasPendingNotification: pending,
 				});
 				if (!decision.notify) {
-					if (decision.reason === "per-run-cap" && !suppressed.has(key)) {
+					if ((decision.reason === "already-consumed" || decision.reason === "completion-already-sent" || decision.reason === "per-run-cap") && !suppressed.has(key)) {
 						suppressed.add(key);
-						(options.logSuppression ?? ((id, index, reason) => console.info(`Suppressed step notification ${id}:${index}: ${reason}`)))(run.asyncId, artifact.stepIndex, decision.reason);
+						recordStepNotificationTelemetry(pi, `suppressed-${decision.reason}`, run.asyncId);
+						if (decision.reason === "per-run-cap") {
+							(options.logSuppression ?? ((id, index, reason) => console.info(`Suppressed step notification ${id}:${index}: ${reason}`)))(run.asyncId, artifact.stepIndex, decision.reason);
+						}
 					}
 					continue;
 				}
@@ -323,6 +403,11 @@ export function registerStepNotifications(
 		batchers.clear();
 		deferredItems.clear();
 		pendingRuns.clear();
+		queuedMessages.clear();
+		if (globalStore[queuedMessagesStoreKey] === queuedMessages) delete globalStore[queuedMessagesStoreKey];
 		for (const unsubscribe of unsubscribers) unsubscribe();
+		if (state.cancelPendingStepNotifications === cancelPendingStepNotifications) {
+			delete state.cancelPendingStepNotifications;
+		}
 	};
 }

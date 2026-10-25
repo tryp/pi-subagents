@@ -64,6 +64,7 @@ import {
 	consumedStepResultSet,
 	listStepResultArtifacts,
 	markStepResultConsumed,
+	markStepResultFullyDelivered,
 	stepResultArtifactPath,
 	stepResultKey,
 	type StepResultArtifact,
@@ -436,13 +437,57 @@ function availableStepResults(
  * so a later `until: "first-result"` call reports the NEXT child instead of
  * repeating one the parent has already seen.
  */
+function waitResultsFullySurfaced(views: WaitStepResultView[]): boolean {
+	if (views.length === 0) return false;
+	let bytes = 512;
+	let lines = 4;
+	for (const view of views) {
+		if (!view.success || view.error) return false;
+		const output = view.output || "(no output)";
+		const outputBytes = Buffer.byteLength(output, "utf8");
+		const outputLines = output.split("\n").length;
+		if (outputBytes > WAIT_STEP_RESULT_MAX.bytes - 256 || outputLines > WAIT_STEP_RESULT_MAX.lines - 2) return false;
+		bytes += outputBytes + 256;
+		lines += outputLines + 2;
+	}
+	return bytes <= WAIT_STEP_RESULTS_TOTAL_MAX.bytes && lines <= WAIT_STEP_RESULTS_TOTAL_MAX.lines;
+}
+
 function consumeStepResultViews(runs: AsyncRunSummary[], deps: SubagentWaitDeps): WaitStepResultView[] {
 	const consumed = consumedStepResultSet(deps.state);
 	const available = availableStepResults(runs, consumed);
+	const views = available.map((entry) => entry.view);
 	for (const entry of available) {
 		markStepResultConsumed(deps.state, entry.run.id, entry.view.stepIndex);
 	}
-	return available.map((entry) => entry.view);
+	if (waitResultsFullySurfaced(views)) {
+		const indexesByRun = new Map<string, number[]>();
+		for (const view of views) {
+			markStepResultFullyDelivered(deps.state, view.runId, view.stepIndex);
+			const indexes = indexesByRun.get(view.runId) ?? [];
+			indexes.push(view.stepIndex);
+			indexesByRun.set(view.runId, indexes);
+		}
+		for (const [runId, indexes] of indexesByRun) {
+			deps.state.cancelPendingStepNotifications?.(runId, indexes);
+		}
+	}
+	const fullyDelivered = deps.state.fullyDeliveredStepResults;
+	const consumedCompletions = deps.state.consumedCompletionRuns ??= new Set();
+	for (const run of runs) {
+		if (ACTIVE_STATES.includes(run.state)) continue;
+		const artifacts = listStepResultArtifacts(run.asyncDir, { runId: run.id });
+		if (artifacts.length > 0 && artifacts.length === run.steps.length && artifacts.every((artifact) => consumed.has(stepResultKey(run.id, artifact.stepIndex)) && fullyDelivered?.has(stepResultKey(run.id, artifact.stepIndex)))) {
+			consumedCompletions.add(run.id);
+			deps.state.cancelPendingCompletionNotifications?.(run.id);
+			while (consumedCompletions.size > 512) {
+				const oldest = consumedCompletions.values().next().value;
+				if (oldest === undefined) break;
+				consumedCompletions.delete(oldest);
+			}
+		}
+	}
+	return views;
 }
 
 /** Wait result that carries the child results it is reporting. */

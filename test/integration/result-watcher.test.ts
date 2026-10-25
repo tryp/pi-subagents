@@ -4,6 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { createResultWatcher } from "../../src/runs/background/result-watcher.ts";
+import registerSubagentNotify from "../../src/runs/background/notify.ts";
+import { waitForSubagents } from "../../src/runs/background/subagent-wait.ts";
+import { writeStepResultArtifact } from "../../src/runs/shared/step-results.ts";
+import { SUBAGENT_ASYNC_COMPLETE_EVENT } from "../../src/shared/types.ts";
 import { createNestedRoute, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
 import type { SubagentState } from "../../src/shared/types.ts";
 
@@ -28,6 +32,90 @@ function createState(): SubagentState {
 }
 
 describe("result watcher", () => {
+	it("does not notify a completion published after wait already returned all terminal output", async () => {
+		const root = fs.mkdtempSync(path.join(process.cwd(), "tmp", "completion-wait-race-"));
+		const resultsDir = path.join(root, "results");
+		const asyncDir = path.join(root, "runs", "run-after-wait");
+		fs.mkdirSync(resultsDir, { recursive: true });
+		fs.mkdirSync(asyncDir, { recursive: true });
+		try {
+			const listeners = new Map<string, Set<(payload: unknown) => void>>();
+			const emitted: Array<{ event: string; data: unknown }> = [];
+			const sent: Array<{ message: unknown; options?: { queueKey?: string } }> = [];
+			const queued = new Map<string, unknown>();
+			const pi = {
+				events: {
+					on(event: string, handler: (payload: unknown) => void) {
+						const handlers = listeners.get(event) ?? new Set();
+						handlers.add(handler);
+						listeners.set(event, handlers);
+						return () => handlers.delete(handler);
+					},
+					emit(event: string, data: unknown) {
+						emitted.push({ event, data });
+						for (const handler of listeners.get(event) ?? []) handler(data);
+					},
+				},
+				sendMessage(message: unknown, options?: { queueKey?: string }) {
+				sent.push({ message, options });
+				if (options?.queueKey) queued.set(options.queueKey, message);
+			},
+			cancelQueuedMessage(queueKey: string) { return queued.delete(queueKey); },
+			};
+			const state = createState();
+			state.currentSessionId = "session-race";
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId: "run-after-wait", mode: "single", state: "complete", sessionId: "session-race",
+				startedAt: Date.now() - 1000, endedAt: Date.now(),
+				steps: [{ agent: "worker", status: "complete" }],
+			}), "utf-8");
+			assert.ok(writeStepResultArtifact({
+				asyncDir, runId: "run-after-wait", stepIndex: 0, agent: "worker", state: "complete",
+				startedAt: Date.now() - 1000, endedAt: Date.now(), durationMs: 1000,
+				result: { success: true, output: "already delivered output" },
+			}));
+
+			const disposeNotify = registerSubagentNotify(pi as never, state, { batchConfig: { enabled: false } });
+			pi.events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+				id: "run-after-wait", runId: "run-after-wait", sessionId: "session-race",
+				agent: "worker", success: true, summary: "already delivered output", timestamp: Date.now(),
+			});
+			assert.equal(queued.size, 1, "completion event must enqueue before wait consumes it");
+			const waited = await waitForSubagents({ runId: "run-after-wait", barrier: "consume-result" }, undefined, {
+				state, asyncDirRoot: path.join(root, "runs"), resultsDir,
+				kill: () => true,
+			});
+			assert.match(waited.content.map((item) => "text" in item ? item.text : "").join(""), /already delivered output/);
+			assert.equal(state.consumedCompletionRuns?.has("run-after-wait"), true);
+			assert.equal(queued.size, 0, "wait must cancel the already-enqueued completion");
+
+			// The runner writes terminal status before its run-level result JSON. Model
+			// that ordering: wait has returned the step artifact before the watcher sees
+			// the later completion publication.
+			const resultPath = path.join(resultsDir, "run-after-wait.json");
+			fs.writeFileSync(resultPath, JSON.stringify({
+				id: "run-after-wait", sessionId: "session-race", success: true,
+				summary: "already delivered output", timestamp: Date.now(),
+			}), "utf-8");
+			const watcher = createResultWatcher(pi, state, resultsDir, 60_000);
+			try {
+				watcher.primeExistingResults();
+				await new Promise((resolve) => setTimeout(resolve, 100));
+			} finally {
+				watcher.stopResultWatcher();
+				disposeNotify();
+			}
+
+			assert.equal(emitted.filter((entry) => entry.event === "subagent:async-complete").length, 2, "both the pre-wait and watcher completion events are observed");
+			const drained = [...queued.values()];
+			queued.clear();
+			assert.equal(drained.length, 0, "no stale completion remains for host queue drain");
+			assert.equal(sent.filter((entry) => entry.options?.queueKey).length, 1, "only the initial completion was ever enqueued");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("processes deferred session-scoped results after session identity is restored", async () => {
 		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-session-"));
 		try {
@@ -466,7 +554,7 @@ describe("result watcher", () => {
 			assert.equal(eventData.mode, "parallel");
 			assert.equal(eventData.status, "failed");
 			const message = String(eventData.message ?? "");
-			assert.match(message, /Revive child: subagent\(\{ action: "resume", id: "async-1", index: 0, message: "\.\.\." \}\)/);
+			assert.match(message, /Revive child: subagent\(\{ action: "resume", runId: "run-123", childIndex: 0, message: "\.\.\." \}\)/);
 			assert.ok(message.includes(`Session: ${firstSession}`));
 			assert.equal(message.includes(missingSession), false);
 			assert.equal(emitted.some((entry) => entry.event === "subagent:async-complete"), true);

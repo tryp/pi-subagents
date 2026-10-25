@@ -1123,6 +1123,13 @@ export interface SubagentState {
 	 * one. Mirrors `completionSeen`'s dedupe role for the run-level notification.
 	 */
 	consumedStepResults?: Set<string>;
+	/** Per-step keys whose complete output was returned inline by wait. */
+	fullyDeliveredStepResults?: Set<string>;
+	/** Async run ids whose terminal child outputs have already been returned by wait. */
+	consumedCompletionRuns?: Set<string>;
+	/** Cancels queued notification messages when wait returns their corresponding output. */
+	cancelPendingCompletionNotifications?: (runId: string) => void;
+	cancelPendingStepNotifications?: (runId: string, stepIndexes: number[]) => void;
 	/** Per-child keys queued or delivered by bounded step notifications. */
 	stepNotifiedResults?: Set<string>;
 	watcher: FSWatcher | null;

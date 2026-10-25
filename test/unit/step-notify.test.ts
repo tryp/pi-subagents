@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { resolveStepNotifyConfig, STEP_NOTIFY_ENABLED_ENV } from "../../src/runs/background/step-notify-config.ts";
+import { waitForSubagents } from "../../src/runs/background/subagent-wait.ts";
 import {
 	MAX_STEP_NOTIFICATIONS_PER_RUN,
 	STEP_NOTIFY_MESSAGE_MAX_BYTES,
@@ -17,7 +18,7 @@ import { SUBAGENT_ASYNC_COMPLETE_EVENT, type SubagentState } from "../../src/sha
 
 interface SentMessage {
 	message: { customType: string; content: string; details?: unknown };
-	options?: { triggerTurn?: boolean };
+	options?: { triggerTurn?: boolean; queueKey?: string };
 }
 
 class FakeTimers {
@@ -50,6 +51,8 @@ function makeHarness(options: { idle?: boolean; hasUI?: boolean; jobs?: number; 
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "step-notify-test-"));
 	const timers = new FakeTimers();
 	const messages: SentMessage[] = [];
+	const queued = new Map<string, SentMessage["message"]>();
+	const telemetry: Array<{ type: string; data: unknown }> = [];
 	const handlers = new Map<string, Set<(data: unknown) => void>>();
 	let subscriptions = 0;
 	const events = {
@@ -80,7 +83,10 @@ function makeHarness(options: { idle?: boolean; hasUI?: boolean; jobs?: number; 
 		events,
 		sendMessage(message: SentMessage["message"], sendOptions?: SentMessage["options"]) {
 			messages.push({ message, options: sendOptions });
+			if (sendOptions?.queueKey) queued.set(sendOptions.queueKey, message);
 		},
+		cancelQueuedMessage(queueKey: string) { return queued.delete(queueKey); },
+		appendEntry(type: string, data: unknown) { telemetry.push({ type, data }); },
 	};
 	const registrationOptions: RegisterStepNotifyOptions = {
 		timers,
@@ -90,7 +96,7 @@ function makeHarness(options: { idle?: boolean; hasUI?: boolean; jobs?: number; 
 	const suppressions: string[] = [];
 	const dispose = registerStepNotifications(pi as any, state, true, registrationOptions);
 	return {
-		root, timers, messages, events, state, jobs, suppressions, dispose,
+		root, timers, messages, queued, telemetry, events, state, jobs, suppressions, dispose,
 		setIdle(value: boolean) { idle = value; },
 		get subscriptions() { return subscriptions; },
 		addArtifact(runId: string, stepIndex: number, output = `output-${stepIndex}`, stateName: "complete" | "failed" | "paused" | "stopped" = "complete") {
@@ -189,6 +195,70 @@ describe("step notification ticker", () => {
 		} finally { h.cleanup(); }
 	});
 
+	it("cancels a queued step receipt when wait returns that child's full output", async () => {
+		const h = makeHarness();
+		try {
+			const runId = "run-0";
+			const job = h.jobs.get(runId)!;
+			h.addArtifact(runId, 0);
+			h.timers.poll();
+			h.timers.flushTimeouts();
+			assert.equal(h.queued.size, 1);
+			const statusPath = path.join(job.asyncDir, "status.json");
+			fs.writeFileSync(statusPath, JSON.stringify({
+				runId, sessionId: "session-1", mode: "single", state: "complete",
+				startedAt: 1, endedAt: 1001, steps: [{ agent: "agent-0", status: "complete" }],
+			}), "utf8");
+
+			const waited = await waitForSubagents({ runId, barrier: "consume-result" }, undefined, {
+				state: h.state,
+				asyncDirRoot: h.root,
+				resultsDir: path.join(h.root, "results"),
+				kill: () => true,
+			});
+
+			assert.match(waited.content.map((item) => "text" in item ? item.text : "").join(""), /output-0/);
+			assert.equal(h.queued.size, 0);
+			assert.ok(h.telemetry.some((entry) => (entry.data as { event?: string }).event === "cancelled"));
+		} finally { h.cleanup(); }
+	});
+
+	it("does not rebuild siblings when step receipt cancellation misses", () => {
+		const h = makeHarness();
+		try {
+			h.addArtifact("run-0", 0, "known output");
+			h.addArtifact("run-0", 1, "unseen output");
+			h.timers.poll();
+			h.timers.flushTimeouts();
+			const [queueKey] = h.queued.keys();
+			assert.ok(queueKey);
+			h.queued.delete(queueKey);
+			h.state.cancelPendingStepNotifications?.("run-0", [0]);
+			assert.equal(h.messages.length, 1, "a cancel miss must not re-enqueue any siblings");
+			assert.ok(h.telemetry.some((entry) => (entry.data as { event?: string }).event === "cancel-miss"));
+		} finally { h.cleanup(); }
+	});
+
+	it("rebuilds a canceled step receipt with only unseen siblings", () => {
+		const h = makeHarness();
+		try {
+			h.addArtifact("run-0", 0, "known output");
+			h.addArtifact("run-0", 1, "unseen output");
+			h.timers.poll();
+			h.timers.flushTimeouts();
+			assert.equal(h.queued.size, 1);
+			markStepResultConsumed(h.state, "run-0", 0);
+			h.state.cancelPendingStepNotifications?.("run-0", [0]);
+			assert.equal(h.queued.size, 1);
+			assert.equal(h.messages.length, 2);
+			assert.ok(h.telemetry.some((entry) => (entry.data as { event?: string }).event === "rebuilt"));
+			const replacement = h.messages[1]!.message.details as StepNotifyEnvelope;
+			assert.equal(replacement.notifications.length, 1);
+			assert.match(replacement.notifications[0]!.preview, /unseen output/);
+			assert.doesNotMatch(replacement.notifications[0]!.preview, /known output/);
+		} finally { h.cleanup(); }
+	});
+
 	it("does not notify an already-consumed artifact", () => {
 		const h = makeHarness();
 		try {
@@ -197,6 +267,7 @@ describe("step notification ticker", () => {
 			h.timers.poll();
 			h.timers.flushTimeouts();
 			assert.equal(h.messages.length, 0);
+			assert.ok(h.telemetry.some((entry) => (entry.data as { event?: string }).event === "suppressed-already-consumed"));
 		} finally { h.cleanup(); }
 	});
 

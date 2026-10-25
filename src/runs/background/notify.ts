@@ -8,6 +8,7 @@
  * signals are never delayed.
  */
 
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildCompletionKey, getGlobalSeenMap, markSeenWithTtl } from "./completion-dedupe.ts";
 import {
@@ -46,6 +47,8 @@ export interface SubagentNotifyDetails {
 /** Versioned persisted details for a subagent completion notification. */
 export interface SubagentNotifyEnvelope {
 	version: 1;
+	/** Exact queue identity used to retire bookkeeping when this message is consumed. */
+	queueKey?: string;
 	completions: SubagentNotifyDetails[];
 }
 
@@ -169,20 +172,36 @@ export function formatGroupedCompletion(details: SubagentNotifyDetails[]): strin
 	return blocks.join("\n").trimEnd();
 }
 
-function sendCompletion(pi: Pick<ExtensionAPI, "sendMessage">, details: SubagentNotifyDetails[]): void {
+type QueueAwareNotifyApi = Pick<ExtensionAPI, "sendMessage"> & {
+	cancelQueuedMessage?: (queueKey: string) => boolean;
+};
+
+function recordNotificationTelemetry(pi: Pick<ExtensionAPI, "appendEntry">, event: string, runId: string, count = 1): void {
+	try {
+		pi.appendEntry("subagent_notification_telemetry", { version: 1, channel: "completion", event, runId, count });
+	} catch {
+		// Telemetry must never interfere with notification delivery.
+	}
+}
+
+function sendCompletion(pi: Pick<ExtensionAPI, "sendMessage">, details: SubagentNotifyDetails[], queueKey: string): void {
 	if (details.length === 0) return;
 	const content = details.length === 1
 		? formatSingleCompletion(details[0]!)
 		: formatGroupedCompletion(details);
-	const envelope: SubagentNotifyEnvelope = { version: 1, completions: details };
-	pi.sendMessage(
+	const envelope: SubagentNotifyEnvelope = { version: 1, queueKey, completions: details };
+	const sendMessage = pi.sendMessage as unknown as (
+		message: Parameters<ExtensionAPI["sendMessage"]>[0],
+		options: { triggerTurn: boolean; queueKey: string },
+	) => void;
+	sendMessage(
 		{
 			customType: "subagent-notify",
 			content,
 			display: true,
 			details: envelope,
 		},
-		{ triggerTurn: true },
+		{ triggerTurn: true, queueKey },
 	);
 }
 
@@ -235,7 +254,7 @@ export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDe
 
 export default function registerSubagentNotify(
 	pi: ExtensionAPI,
-	state: Pick<SubagentState, "currentSessionId">,
+	state: Pick<SubagentState, "currentSessionId" | "consumedCompletionRuns" | "cancelPendingCompletionNotifications">,
 	options: RegisterSubagentNotifyOptions = {},
 ): () => void {
 	const unsubscribeStoreKey = "__pi_subagents_notify_unsubscribe__";
@@ -258,12 +277,49 @@ export default function registerSubagentNotify(
 		}
 	}
 
+	const queuedMessagesStoreKey = "__pi_subagents_notify_queued_messages__";
+	const messageStartHandlerStoreKey = "__pi_subagents_notify_message_start_handler__";
 	const seen = getGlobalSeenMap("__pi_subagents_notify_seen__");
 	const ttlMs = 10 * 60 * 1000;
 	const nowFn = options.now ?? Date.now;
 	const batchConfig = resolveCompletionBatchConfig(options.batchConfig);
 	const batchers = new Map<string, CompletionBatcher<SubagentNotifyDetails>>();
+	const queuedMessages = new Map<string, SubagentNotifyDetails[]>();
+	globalStore[queuedMessagesStoreKey] = queuedMessages;
+	const queueGeneration = randomUUID();
+	let nextQueueKey = 0;
 	let disposed = false;
+
+	const sendQueuedCompletion = (details: SubagentNotifyDetails[]) => {
+		if (details.length === 0) return;
+		const queueKey = `subagent-completion:${state.currentSessionId ?? "unknown"}:${queueGeneration}:${++nextQueueKey}`;
+		sendCompletion(pi, details, queueKey);
+		queuedMessages.set(queueKey, details);
+	};
+	const cancelQueuedCompletions = (runId: string) => {
+		for (const [queueKey, details] of queuedMessages) {
+			if (!details.some((detail) => detail.runId === runId)) continue;
+			const cancelQueuedMessage = (pi as QueueAwareNotifyApi).cancelQueuedMessage;
+			if (typeof cancelQueuedMessage !== "function") {
+				queuedMessages.delete(queueKey);
+				recordNotificationTelemetry(pi, "cancel-unavailable", runId);
+				continue;
+			}
+			if (!cancelQueuedMessage.call(pi, queueKey)) {
+				queuedMessages.delete(queueKey);
+				recordNotificationTelemetry(pi, "cancel-miss", runId);
+				continue;
+			}
+			queuedMessages.delete(queueKey);
+			recordNotificationTelemetry(pi, "cancelled", runId);
+			const remaining = details.filter((detail) => !detail.runId || !state.consumedCompletionRuns?.has(detail.runId));
+			if (remaining.length > 0) {
+				recordNotificationTelemetry(pi, "rebuilt", runId, remaining.length);
+				sendQueuedCompletion(remaining);
+			}
+		}
+	};
+	state.cancelPendingCompletionNotifications = cancelQueuedCompletions;
 
 	const handleComplete = (data: unknown) => {
 		if (disposed) return;
@@ -275,15 +331,25 @@ export default function registerSubagentNotify(
 
 		const details = buildCompletionDetails(result);
 		if (result.source === "foreground") {
-			sendCompletion(pi, [details]);
+			sendQueuedCompletion([details]);
 			return;
 		}
 		const batchKey = completionBatchKey(result);
+		const sendUnconsumed = (items: SubagentNotifyDetails[]) => {
+			const pending = items.filter((item) => item.source === "foreground" || !item.runId || !state.consumedCompletionRuns?.has(item.runId));
+			const suppressedByRun = new Map<string, number>();
+			for (const item of items) {
+				if (pending.includes(item) || !item.runId) continue;
+				suppressedByRun.set(item.runId, (suppressedByRun.get(item.runId) ?? 0) + 1);
+			}
+			for (const [runId, count] of suppressedByRun) recordNotificationTelemetry(pi, "consumed-suppressed", runId, count);
+			sendQueuedCompletion(pending);
+		};
 		let batcher = batchers.get(batchKey);
 		if (!batcher) {
 			batcher = createCompletionBatcher<SubagentNotifyDetails>({
 				config: batchConfig,
-				emit: (items) => sendCompletion(pi, items),
+				emit: sendUnconsumed,
 				...(options.timers ? { timers: options.timers } : {}),
 				now: nowFn,
 			});
@@ -294,11 +360,21 @@ export default function registerSubagentNotify(
 			// successes for the same owner first so they are not stranded
 			// behind this signal, then emit the non-completion result immediately.
 			batcher.flush();
-			sendCompletion(pi, [details]);
+			sendUnconsumed([details]);
 			return;
 		}
 		batcher.push(details);
 	};
+
+	if (typeof globalStore[messageStartHandlerStoreKey] !== "function" && typeof pi.on === "function") {
+		pi.on("message_start", (event) => {
+			if (event.message.role !== "custom" || event.message.customType !== "subagent-notify") return;
+			const envelope = event.message.details as SubagentNotifyEnvelope | undefined;
+			const pending = globalStore[queuedMessagesStoreKey] as Map<string, SubagentNotifyDetails[]> | undefined;
+			if (envelope?.queueKey) pending?.delete(envelope.queueKey);
+		});
+		globalStore[messageStartHandlerStoreKey] = true;
+	}
 
 	const unsubscribers = [
 		pi.events.on(SUBAGENT_ASYNC_COMPLETE_EVENT, handleComplete),
@@ -329,6 +405,11 @@ export default function registerSubagentNotify(
 		}
 		if (globalStore[batcherStoreKey] === batcherRegistration) {
 			delete globalStore[batcherStoreKey];
+		}
+		queuedMessages.clear();
+		if (globalStore[queuedMessagesStoreKey] === queuedMessages) delete globalStore[queuedMessagesStoreKey];
+		if (state.cancelPendingCompletionNotifications === cancelQueuedCompletions) {
+			delete state.cancelPendingCompletionNotifications;
 		}
 	}
 

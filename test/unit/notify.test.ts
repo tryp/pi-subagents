@@ -10,7 +10,7 @@ import registerSubagentNotify, {
 	type RegisterSubagentNotifyOptions,
 	type SubagentNotifyDetails,
 } from "../../src/runs/background/notify.ts";
-import { SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_FOREGROUND_COMPLETE_EVENT } from "../../src/shared/types.ts";
+import { SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_FOREGROUND_COMPLETE_EVENT, type SubagentState } from "../../src/shared/types.ts";
 
 function createEventBus() {
 	const emitter = new EventEmitter();
@@ -33,8 +33,13 @@ function createPi(currentSessionId = "session-1", registerOptions: RegisterSubag
 	const sent: Array<{ message: unknown; options: unknown }> = [];
 	const pi = {
 		events,
-		sendMessage(message: unknown, options: unknown) {
-			sent.push({ message, options });
+		sendMessage(message: unknown, options: { triggerTurn?: boolean; queueKey?: string }) {
+			const { queueKey: _queueKey, ...displayOptions } = options;
+			if (message && typeof message === "object" && "details" in message && message.details && typeof message.details === "object") {
+				const { queueKey: _detailsQueueKey, ...details } = message.details as Record<string, unknown>;
+				message = { ...message, details };
+			}
+			sent.push({ message, options: displayOptions });
 		},
 	};
 
@@ -45,21 +50,27 @@ function createPi(currentSessionId = "session-1", registerOptions: RegisterSubag
 	return { events, sent, dispose };
 }
 
-function createBatchingPi(clock: ReturnType<typeof createFakeClock>, currentSessionId = "session-a") {
+function createBatchingPi(clock: ReturnType<typeof createFakeClock>, currentSessionId = "session-a", consumedCompletionRuns?: Set<string>) {
 	const events = createEventBus();
 	const sent: Array<{ message: unknown; options: unknown }> = [];
+	const queued = new Map<string, unknown>();
+	const telemetry: Array<{ type: string; data: unknown }> = [];
+	const state = { currentSessionId, consumedCompletionRuns } as Pick<SubagentState, "currentSessionId" | "consumedCompletionRuns" | "cancelPendingCompletionNotifications">;
 	const pi = {
 		events,
-		sendMessage(message: unknown, options: unknown) {
+		sendMessage(message: unknown, options: { queueKey?: string }) {
 			sent.push({ message, options });
+			if (options.queueKey) queued.set(options.queueKey, message);
 		},
+		cancelQueuedMessage(queueKey: string) { return queued.delete(queueKey); },
+		appendEntry(type: string, data: unknown) { telemetry.push({ type, data }); },
 	};
-	const dispose = registerSubagentNotify(pi as never, { currentSessionId }, {
+	const dispose = registerSubagentNotify(pi as never, state, {
 		batchConfig: { enabled: true, debounceMs: 150, maxWaitMs: 1000, stragglerDebounceMs: 75, stragglerMaxWaitMs: 400, stragglerWindowMs: 2000 },
 		timers: clock.api,
 		now: clock.now,
 	});
-	return { events, sent, dispose };
+	return { events, sent, queued, telemetry, state, dispose };
 }
 
 interface FakeJob {
@@ -311,7 +322,71 @@ describe("registerSubagentNotify", () => {
 		assert.match(content, /^Background tasks completed \(3\): \*\*alpha\*\*, \*\*beta\*\*, \*\*gamma\*\*/);
 		assert.match(content, /1\. alpha\nalpha done/);
 		assert.match(content, /3\. gamma\ngamma done/);
-		assert.deepEqual(sent[0]!.options, { triggerTurn: true });
+		assert.equal((sent[0]!.options as { triggerTurn?: boolean }).triggerTurn, true);
+		assert.match((sent[0]!.options as { queueKey: string }).queueKey, /^subagent-completion:/);
+	});
+
+	it("suppresses a consumed completion if wait returns output before delayed batch flush", () => {
+		const clock = createFakeClock();
+		const consumedCompletionRuns = new Set<string>();
+		const { events, sent, queued, telemetry } = createBatchingPi(clock, "session-a", consumedCompletionRuns);
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "completion-suppress-a", runId: "run-a", summary: "already returned" }));
+		assert.equal(sent.length, 0);
+		consumedCompletionRuns.add("run-a");
+		clock.advance(150);
+		assert.equal(sent.length, 0);
+		assert.equal(queued.size, 0);
+		assert.ok(telemetry.some((entry) => (entry.data as { event?: string }).event === "consumed-suppressed"));
+	});
+
+	it("cancels an already-enqueued completion when wait consumes it", () => {
+		const clock = createFakeClock();
+		const consumedCompletionRuns = new Set<string>();
+		const { events, sent, queued, telemetry, state } = createBatchingPi(clock, "session-a", consumedCompletionRuns);
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "completion-cancel-a", runId: "run-a", summary: "already returned" }));
+		clock.advance(2000);
+		assert.equal(sent.length, 1);
+		assert.equal(queued.size, 1);
+		consumedCompletionRuns.add("run-a");
+		state.cancelPendingCompletionNotifications?.("run-a");
+		assert.equal(queued.size, 0);
+		assert.ok(telemetry.some((entry) => (entry.data as { event?: string }).event === "cancelled"));
+	});
+
+	it("does not re-send siblings when a queued completion cancellation misses", () => {
+		const clock = createFakeClock();
+		const consumedCompletionRuns = new Set<string>();
+		const { events, sent, queued, telemetry, state } = createBatchingPi(clock, "session-a", consumedCompletionRuns);
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "completion-miss-a", runId: "run-a", summary: "already delivered" }));
+		clock.advance(2000);
+		const [queueKey] = queued.keys();
+		assert.ok(queueKey);
+		queued.delete(queueKey);
+		consumedCompletionRuns.add("run-a");
+		state.cancelPendingCompletionNotifications?.("run-a");
+		assert.equal(sent.length, 1, "a cancel miss must not re-enqueue delivered siblings");
+		assert.ok(telemetry.some((entry) => (entry.data as { event?: string }).event === "cancel-miss"));
+	});
+
+	it("rebuilds a canceled completion batch with only unseen sibling runs", () => {
+		const clock = createFakeClock();
+		const consumedCompletionRuns = new Set<string>();
+		const { events, sent, queued, telemetry, state } = createBatchingPi(clock, "session-a", consumedCompletionRuns);
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "completion-rebuild-a", runId: "run-a", agent: "alpha", summary: "already returned" }));
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "completion-rebuild-b", runId: "run-b", agent: "beta", summary: "still unseen" }));
+		clock.advance(150);
+		assert.equal(queued.size, 1);
+		assert.deepEqual((sent[0]!.message as { details: { completions: Array<{ runId?: string }> } }).details.completions.map((detail) => detail.runId), ["run-a", "run-b"]);
+		consumedCompletionRuns.add("run-a");
+		state.cancelPendingCompletionNotifications?.("run-a");
+		assert.equal(queued.size, 1);
+		assert.equal(sent.length, 2);
+		assert.ok(telemetry.some((entry) => (entry.data as { event?: string }).event === "rebuilt"));
+		const replacement = sent[1]!.message as { content: string };
+		assert.match(replacement.content, /still unseen/);
+		assert.doesNotMatch(replacement.content, /already returned/);
 	});
 
 	it("ignores successes from other sessions instead of grouping them", () => {

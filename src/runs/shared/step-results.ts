@@ -43,6 +43,16 @@ export function markStepResultConsumed(state: { consumedStepResults?: Set<string
 	}
 }
 
+export function markStepResultFullyDelivered(state: { fullyDeliveredStepResults?: Set<string> }, runId: string, stepIndex: number): void {
+	const delivered = state.fullyDeliveredStepResults ??= new Set();
+	delivered.add(stepResultKey(runId, stepIndex));
+	while (delivered.size > CONSUMED_STEP_RESULTS_MAX) {
+		const oldest = delivered.values().next().value;
+		if (oldest === undefined) break;
+		delivered.delete(oldest);
+	}
+}
+
 /** States a child can be in once it will never produce another result. */
 export type StepResultState = "complete" | "failed" | "paused" | "stopped";
 
