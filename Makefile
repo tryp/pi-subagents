@@ -34,7 +34,17 @@ RSYNC_EXCLUDES := \
 	--exclude '.deploy.lock' \
 	--exclude '.pi-subagents/'
 
-.PHONY: deploy deploy-locked drift verify smoke-test deployed-commit
+.PHONY: deploy deploy-locked drift verify smoke-test deployed-commit test-invocation-model mutcheck-invocation-model
+
+# Focused model-default regression suite: real executor + mock child processes.
+test-invocation-model:
+	node --experimental-strip-types --test --test-force-exit test/unit/invocation-model.test.ts test/unit/parallel-batch-model.test.ts
+	node --import ./test/support/register-loader.mjs --test --test-force-exit test/integration/invocation-model.test.ts
+	node --import ./test/support/register-loader.mjs --test --test-force-exit --test-name-pattern='uses the batch model before parallel fork-thinking preflight' test/integration/fork-context-execution.test.ts
+
+mutcheck-invocation-model:
+	python3 -B -m unittest discover -s scripts -p test_mutcheck_invocation_model.py
+	python3 scripts/mutcheck_invocation_model.py $(ARGS)
 
 deploy:  ## Mirror this checkout, verify it, and smoke-test the deployed extension
 	@test -z "$$(git status --porcelain)" || { echo "ERROR: commit source changes before deploying" >&2; git status --short >&2; exit 1; }
