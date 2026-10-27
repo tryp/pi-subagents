@@ -73,6 +73,7 @@ import { resolveSubagentRunId, type ResolvedSubagentRunId } from "../background/
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
 import { inspectSubagentStatus } from "../background/run-status.ts";
 import { applyForceTopLevelAsyncOverride } from "../background/top-level-async.ts";
+import { applyInvocationModelDefaults } from "../shared/invocation-model.ts";
 import {
 	cleanupWorktrees,
 	createWorktrees,
@@ -3589,7 +3590,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				return steerAsyncRun({ state: deps.state, runId: resolved.id, message, index: paramsWithResolvedCwd.index, kill: deps.kill, location: resolved.location, signal, recover: ({ absoluteDeadlineAt, ...limits }) => resumeAsyncRun({ params: { ...limits, action: "resume", id: resolved!.id, message }, requestCwd, ctx, deps, absoluteDeadlineAt }) });
 			}
 			if (action === "append-step") {
-				return appendStepToAsyncChain({ params: paramsWithResolvedCwd, requestCwd, ctx, deps });
+				return appendStepToAsyncChain({ params: applyInvocationModelDefaults(paramsWithResolvedCwd), requestCwd, ctx, deps });
 			}
 			if (action === "schedule" || action === "schedule-list" || action === "schedule-status" || action === "schedule-cancel") {
 				if (!deps.handleScheduledRunAction) {
@@ -3719,7 +3720,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		if (normalized.error) return normalized.error;
 		const normalizedTimeouts = normalizeItemTimeouts(normalized.params!);
 		if (normalizedTimeouts.error) return normalizedTimeouts.error;
-		const normalizedParams = normalizedTimeouts.params!;
+		const normalizedParams = applyInvocationModelDefaults(normalizedTimeouts.params!);
 
 		const explicitAsyncRequest = normalizedParams.async === true;
 		let effectiveParams = applyForceTopLevelAsyncOverride(

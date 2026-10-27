@@ -112,7 +112,7 @@ const TaskItem = Type.Object({
 	outputMode: Type.Optional(OutputModeOverride),
 	reads: Type.Optional(ReadsOverride),
 	progress: Type.Optional(Type.Boolean({ description: "Enable progress.md tracking for this task" })),
-	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'openai-codex/gpt-5.6-luna'). Bare names auto-resolve across providers. Omit to inherit parent session model." })),
+	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'openai-codex/gpt-5.6-luna'). Bare names auto-resolve across providers. Omit to use the invocation model, then agent/parent defaults; 'inherit' explicitly requests the parent model." })),
 	skill: Type.Optional(SkillOverride),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	rlimits: Type.Optional(RlimitsOverride),
@@ -311,7 +311,7 @@ const SubagentParamsSchema = Type.Object({
 	})),
 	outputMode: Type.Optional(OutputModeOverride),
 	skill: Type.Optional(SkillOverride),
-	model: Type.Optional(Type.String({ description: "Override model (e.g. 'openai-codex/gpt-5.6-luna'). Bare names auto-resolve across providers. Omit to inherit parent session model. Use list/models actions to discover." })),
+	model: Type.Optional(Type.String({ description: "Override model (e.g. 'openai-codex/gpt-5.6-luna'). In PARALLEL/CHAIN execution and append-step, supplies the default for tasks/steps without their own model; explicit entry models (including 'inherit') win. Bare names auto-resolve across providers. When omitted, existing agent/parent defaults apply. Use list/models actions to discover." })),
 	acceptance: Type.Optional(AcceptanceOverride),
 });
 

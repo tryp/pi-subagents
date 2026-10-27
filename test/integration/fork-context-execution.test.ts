@@ -666,6 +666,31 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		assert.equal(args[args.indexOf("--model") + 1], "anthropic/claude-sonnet-4-5:off");
 	});
 
+	it("uses the batch model before parallel fork-thinking preflight", async () => {
+		const manager = makeSignedThinkingSessionManager(path.join(tempDir, "fork-batch-model.jsonl"));
+		const executor = makeExecutorWithDiscoverAgents(() => ({
+			agents: [{ name: "worker", description: "Worker", defaultContext: "fork", model: "anthropic/claude-sonnet-4-5:high", thinking: "high", systemPromptMode: "replace", inheritProjectContext: false, inheritSkills: false, systemPrompt: "Return a short response.", source: "project", filePath: path.join(tempDir, "worker.md") }],
+			projectAgentsDir: null,
+		}));
+		const ctx = {
+			...makeCtx(manager),
+			modelRegistry: { getAvailable: () => [
+				{ provider: "anthropic", id: "claude-sonnet-4-5", api: "anthropic-messages", reasoning: true },
+				{ provider: "openai-codex", id: "gpt-6-luna", api: "openai-responses", reasoning: true },
+			] },
+		};
+		const result = await executor.execute("id", {
+			model: "openai-codex/gpt-6-luna:high", async: false,
+			tasks: [{ agent: "worker", task: "Return a short response" }],
+		}, new AbortController().signal, undefined, ctx);
+		assert.equal(result.isError, undefined);
+		const args = readCallArgs();
+		assert.equal(args[args.indexOf("--model") + 1], "openai-codex/gpt-6-luna:high");
+		const thinkingIndex = args.indexOf("--thinking");
+		assert.ok(thinkingIndex === -1 || args[thinkingIndex + 1] === "high", "fork preflight must not force thinking off");
+		assert.doesNotMatch(result.content.map((block) => block.text ?? "").join("\n"), /fork context forced thinking off/);
+	});
+
 	it("classifies empty parallel model overrides as parent inheritance", async () => {
 		const childSessionFile = path.join(tempDir, "fork-empty-parallel-model.jsonl");
 		const manager = makeSignedThinkingSessionManager(childSessionFile);

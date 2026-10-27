@@ -3,15 +3,14 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 import { buildAsyncRunnerSteps } from "../../src/runs/background/async-execution.ts";
 import type { AgentConfig } from "../../src/agents/agents.ts";
-import type { ChainStep } from "../../src/shared/settings.ts";
+import type { ParallelTaskItem } from "../../src/shared/settings.ts";
 import { resolveEffectiveSubagentModel } from "../../src/runs/shared/model-fallback.ts";
 
-// Pins that a per-task `model` override in a parallel batch reaches the spawned
-// child independently per task — the reported "overrides ignored in a parallel
-// batch" regression. The batch build seam (buildAsyncRunnerSteps) is shared by
-// the chain-embedded parallel shape; the foreground parallel path composes the
-// same resolveEffectiveSubagentModel precedence, which is also pinned directly
-// below.
+// Negative control: per-task model overrides already propagated correctly.
+// The reported loss was a top-level model alongside tasks[], not tasks[].model;
+// invocation-model.test.ts and its integration suite pin that normalization.
+// This batch build seam also covers chain-embedded parallel entries, while the
+// resolver assertions below pin the existing explicit > agent > parent order.
 
 const availableModels = [
 	{ provider: "openai-codex", id: "gpt-6-luna", fullId: "openai-codex/gpt-6-luna" },
@@ -47,9 +46,9 @@ type ParallelChild = {
 	modelCandidates?: string[];
 };
 
-function buildParallelBatch(tasks: Array<Record<string, unknown>>, agents: AgentConfig[], ctxOverride?: Record<string, unknown>): ParallelChild[] {
+function buildParallelBatch(tasks: ParallelTaskItem[], agents: AgentConfig[], ctxOverride?: Record<string, unknown>): ParallelChild[] {
 	const result = buildAsyncRunnerSteps("run-parallel-model", {
-		chain: [{ parallel: tasks }] as ChainStep[],
+		chain: [{ parallel: tasks }],
 		agents,
 		ctx: (ctxOverride ?? ctx) as never,
 		availableModels,

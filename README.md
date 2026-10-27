@@ -185,6 +185,12 @@ For one run, put the override in the command:
 /run reviewer[model=anthropic/claude-sonnet-4:high] "Review this diff"
 ```
 
+With the `subagent` tool, top-level `model` also supplies the invocation default for parallel `tasks[]` and `chain[]` entries (including embedded parallel tasks and dynamic templates). An entry's own `model` wins, including `"inherit"` to request the parent model. Without a top-level override, existing agent/parent defaults are unchanged. The same precedence applies to the chain step supplied with `action: "append-step"`; this uses the append request's `model`, not the original launch's default. For example:
+
+```json
+{"model":"openai-codex/gpt-6-luna","tasks":[{"agent":"reviewer","task":"Review the diff"},{"agent":"scout","task":"Explore tests","model":"inherit"}]}
+```
+
 For a persistent override, edit settings. This example pins the reviewer everywhere, adds a backup model for provider failures, and keeps the other builtins on your normal default model:
 
 ```json
