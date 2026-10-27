@@ -16,17 +16,25 @@ import sys
 import tarfile
 import tempfile
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, NoReturn
 
-# `.pi-subagents/` holds runtime-generated run artifacts (oracle inputs/outputs,
-# transcripts) written while the extension runs. `deployable_from`'s own contract
-# says this content is "copied to the runtime on every deploy ... not drift",
-# but the check compared file-by-file against the checkout, so every artifact a
-# session produced blocked the next deploy with "1 file(s) were edited in the
-# runtime" -- even though nothing a human wrote had changed. The repo carries 21
-# such saved drift patches. gitignored, regenerated, and outside the stamped
-# commit, so it is excluded on both sides of the comparison.
-EXCLUDES = (".git", "node_modules", "tmp", ".deployed-commit", ".deploy.lock", ".pi-subagents")
+# `EXCLUDES` names are dropped everywhere by name; `EXCLUDE_PATHS` are dropped
+# only at those exact paths. `.pi-subagents/artifacts/` holds runtime-generated
+# run artifacts (oracle inputs/outputs, transcripts) written while the extension
+# runs: gitignored, regenerated, and outside the stamped commit, so it is
+# excluded on both sides of the comparison. The rest of `.pi-subagents/` is NOT
+# excluded: a runtime file there whose checkout counterpart changed or was
+# dropped is exactly the content the next deploy would overwrite, and that risk
+# test (deployable_from) is what protects it. Excluding the whole directory
+# (8d6c2fc5) silenced that test and hid real overwrite risk.
+EXCLUDES = (".git", "node_modules", "tmp", ".deployed-commit", ".deploy.lock")
+EXCLUDE_PATHS = (".pi-subagents/artifacts",)
+
+
+def is_excluded_path(relative: str) -> bool:
+    """True when a runtime-relative path is inside an EXCLUDE_PATHS subtree."""
+    posix = relative.replace("\\", "/")
+    return any(posix == excluded or posix.startswith(f"{excluded}/") for excluded in EXCLUDE_PATHS)
 TREE_STAMP_RE = re.compile(r"^tree: sha256:([0-9a-f]{64})$", re.MULTILINE)
 COMMIT_STAMP_RE = re.compile(r"^commit:\s*([0-9a-f]{7,64})\s*$", re.MULTILINE)
 
@@ -52,6 +60,8 @@ def scan_symlinks(root: Path) -> dict[str, str]:
                 if entry.name in EXCLUDES:
                     continue
                 child = Path(entry.name) if str(relative) == "." else relative / entry.name
+                if is_excluded_path(child.as_posix()):
+                    continue
                 if entry.is_symlink():
                     found[child.as_posix()] = os.readlink(entry.path)
                 elif entry.is_dir(follow_symlinks=False):
@@ -100,10 +110,11 @@ def tree_hash(runtime: Path) -> str:
     for root, dirs, files in os.walk(runtime, followlinks=False, onerror=raise_walk_error):
         root_path = Path(root)
         rel_root = root_path.relative_to(runtime)
-        if rel_root == Path("."):
-            dirs[:] = [name for name in dirs if name not in EXCLUDES]
-        else:
-            dirs[:] = [name for name in dirs if name not in EXCLUDES]
+        dirs[:] = [
+            name
+            for name in dirs
+            if name not in EXCLUDES and not is_excluded_path((rel_root / name).as_posix())
+        ]
         # A symlink to a directory is listed under `dirs`, not `files`, so it
         # has to be hashed here or a retargeted link would not change the
         # stamp at all.
@@ -111,7 +122,7 @@ def tree_hash(runtime: Path) -> str:
         for name in list(dirs):
             path = root_path / name
             rel_path = path.relative_to(runtime).as_posix()
-            if rel_path.split("/", 1)[0] in EXCLUDES:
+            if rel_path.split("/", 1)[0] in EXCLUDES or is_excluded_path(rel_path):
                 continue
             try:
                 if stat.S_ISLNK(path.lstat().st_mode):
@@ -124,7 +135,7 @@ def tree_hash(runtime: Path) -> str:
             path = root_path / name
             rel_path = path.relative_to(runtime).as_posix()
             first_segment = rel_path.split("/", 1)[0]
-            if first_segment in EXCLUDES:
+            if first_segment in EXCLUDES or is_excluded_path(rel_path):
                 continue
             try:
                 mode = path.lstat().st_mode
@@ -185,6 +196,8 @@ def rsync_diff(source: Path, runtime: Path) -> tuple[list[str], list[str], list[
     ]
     for excluded in EXCLUDES:
         command.extend(("--exclude", f"{excluded}/" if excluded in (".git", "node_modules", "tmp") else excluded))
+    for excluded in EXCLUDE_PATHS:
+        command.extend(("--exclude", f"/{excluded}"))
     command.extend((f"{source}/", f"{runtime}/"))
     try:
         result = subprocess.run(command, check=False, text=True, capture_output=True)
@@ -278,6 +291,8 @@ def _git_patch(source: Path, runtime: Path, label: str) -> tuple[str, str]:
     command.append(".")
     command.extend((f":!{excluded}/**" for excluded in EXCLUDES[:3]))
     command.extend((f":!{excluded}" for excluded in EXCLUDES[3:]))
+    for excluded in EXCLUDE_PATHS:
+        command.extend((f":!{excluded}", f":!{excluded}/**"))
     try:
         result = subprocess.run(command, cwd=source, check=False, text=True, capture_output=True)
     except FileNotFoundError:
@@ -299,17 +314,25 @@ def _fallback_patch(source: Path, runtime: Path) -> str:
     all_paths: set[str] = set()
     for root, dirs, files in os.walk(runtime, followlinks=False):
         rel_root = Path(root).relative_to(runtime)
-        dirs[:] = [name for name in dirs if name not in EXCLUDES]
+        dirs[:] = [
+            name
+            for name in dirs
+            if name not in EXCLUDES and not is_excluded_path((rel_root / name).as_posix())
+        ]
         for name in files:
             rel = (rel_root / name).as_posix()
-            if rel.split("/", 1)[0] not in EXCLUDES:
+            if rel.split("/", 1)[0] not in EXCLUDES and not is_excluded_path(rel):
                 all_paths.add(rel)
     for root, dirs, files in os.walk(source, followlinks=False):
         rel_root = Path(root).relative_to(source)
-        dirs[:] = [name for name in dirs if name not in EXCLUDES]
+        dirs[:] = [
+            name
+            for name in dirs
+            if name not in EXCLUDES and not is_excluded_path((rel_root / name).as_posix())
+        ]
         for name in files:
             rel = (rel_root / name).as_posix()
-            if rel.split("/", 1)[0] not in EXCLUDES:
+            if rel.split("/", 1)[0] not in EXCLUDES and not is_excluded_path(rel):
                 all_paths.add(rel)
 
     for rel in sorted(all_paths):
@@ -390,7 +413,10 @@ def deployable_from(source: Path, runtime: Path, relative: str) -> bool:
             return False
         return os.readlink(source_path) == os.readlink(runtime_path)
     if source_path.is_dir():
-        return True
+        # The checkout still provides the subtree, but only as a directory: a
+        # runtime object of any other kind at this path is overwrite risk
+        # (rsync -a cannot turn a file back into the deployed directory).
+        return runtime_path.is_dir()
     if not source_path.is_file() or not runtime_path.is_file():
         return False
     try:
@@ -586,7 +612,7 @@ def check_stamp(args: argparse.Namespace) -> int:
 
 
 class DriftArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> NoReturn:
         self.print_usage(sys.stderr)
         self.exit(1, f"{self.prog}: error: {message}\n")
 
