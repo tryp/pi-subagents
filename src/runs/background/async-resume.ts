@@ -38,6 +38,8 @@ export type AsyncResumeTarget = {
 	sessionFile?: string;
 	model?: string;
 	thinking?: string;
+	/** Fallback chain restored from the source run's status (used model first). */
+	modelCandidates?: string[];
 	recoveryDescriptor?: SteeringRecoveryDescriptor;
 };
 
@@ -53,7 +55,7 @@ interface AsyncResultFile {
 	sessionFile?: string;
 	model?: string;
 	thinking?: string;
-	results?: Array<{ agent?: string; success?: boolean; sessionFile?: string; intercomTarget?: string; model?: string; thinking?: string }>;
+	results?: Array<{ agent?: string; success?: boolean; sessionFile?: string; intercomTarget?: string; model?: string; thinking?: string; attemptedModels?: string[] }>;
 }
 
 export interface AsyncRunLocation {
@@ -80,6 +82,14 @@ function validateOptionalString(value: Record<string, unknown>, field: string, s
 	return fieldValue;
 }
 
+function validateAttemptedModels(value: unknown, source: string, displayField: string): string[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || !entry.trim())) {
+		throw new Error(`Invalid async result file '${source}': ${displayField} must contain non-empty strings.`);
+	}
+	return value as string[];
+}
+
 function validateResultFile(value: unknown, resultPath: string): AsyncResultFile {
 	const data = ensureObject(value, resultPath);
 	const resultsValue = data.results;
@@ -93,9 +103,10 @@ function validateResultFile(value: unknown, resultPath: string): AsyncResultFile
 			const intercomTarget = validateOptionalString(child, "intercomTarget", resultPath, `results[${index}].intercomTarget`);
 			const model = validateOptionalString(child, "model", resultPath, `results[${index}].model`);
 			const thinking = validateOptionalString(child, "thinking", resultPath, `results[${index}].thinking`);
+			const attemptedModels = validateAttemptedModels(child.attemptedModels, resultPath, `results[${index}].attemptedModels`);
 			const success = child.success;
 			if (success !== undefined && typeof success !== "boolean") throw new Error(`Invalid async result file '${resultPath}': results[${index}].success must be a boolean.`);
-			return { agent, sessionFile, intercomTarget, model, thinking, ...(typeof success === "boolean" ? { success } : {}) };
+			return { agent, sessionFile, intercomTarget, model, thinking, ...(attemptedModels ? { attemptedModels } : {}), ...(typeof success === "boolean" ? { success } : {}) };
 		});
 	}
 	const success = data.success;
@@ -247,6 +258,7 @@ function validateStatusForResume(status: AsyncStatus | null, source: string): vo
 			if (stepRecord.sessionFile !== undefined && typeof stepRecord.sessionFile !== "string") throw new Error(`Invalid async status '${source}': steps[${index}].sessionFile must be a string.`);
 			if (stepRecord.model !== undefined && typeof stepRecord.model !== "string") throw new Error(`Invalid async status '${source}': steps[${index}].model must be a string.`);
 			if (stepRecord.thinking !== undefined && typeof stepRecord.thinking !== "string") throw new Error(`Invalid async status '${source}': steps[${index}].thinking must be a string.`);
+			if (stepRecord.attemptedModels !== undefined && (!Array.isArray(stepRecord.attemptedModels) || stepRecord.attemptedModels.some((entry) => typeof entry !== "string" || !entry.trim()))) throw new Error(`Invalid async status '${source}': steps[${index}].attemptedModels must contain non-empty strings.`);
 		});
 	}
 }
@@ -446,6 +458,18 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 	const resolvedSessionFile = sessionFile ? validateResumeSessionFile(runId, sessionFile) : undefined;
 	const stepModel = statusSteps[index]?.model ?? resultSteps[index]?.model ?? (stepCount === 1 ? result?.model : undefined);
 	const stepThinking = statusSteps[index]?.thinking ?? resultSteps[index]?.thinking ?? (stepCount === 1 ? result?.thinking : undefined);
+	// Restore the fallback chain the run was spawned with. The runner persists the
+	// candidate list per step (attemptedModels); without this, a revived child
+	// rebuilds candidates from the CURRENT agent config and silently loses the
+	// original chain whenever the agent file changed, moved, or was deleted since
+	// the first attempt. The model the child actually ran on leads the restored
+	// chain, so a revived run does not re-try a primary that already failed.
+	const attempted = (statusSteps[index]?.attemptedModels ?? resultSteps[index]?.attemptedModels)?.filter((entry) => entry.trim());
+	const modelCandidates = stepModel && attempted?.length
+		? [stepModel, ...attempted.filter((entry) => entry !== stepModel)]
+		: attempted?.length
+			? [...attempted]
+			: undefined;
 
 	return {
 		kind: "revive",
@@ -458,6 +482,7 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 		...(resolvedSessionFile ? { sessionFile: resolvedSessionFile } : {}),
 		...(stepModel ? { model: stepModel } : {}),
 		...(stepThinking ? { thinking: stepThinking } : {}),
+		...(modelCandidates ? { modelCandidates } : {}),
 		...(recoveryDescriptor ? { recoveryDescriptor } : {}),
 	};
 }

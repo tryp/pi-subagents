@@ -761,3 +761,122 @@ describe("async resume lookup", () => {
 		assert.match(task, /Follow-up:\nWhat changed\?/);
 	});
 });
+
+describe("async resume restores the spawned model fallback chain", () => {
+	const rootSetup = () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-candidates-"));
+		const asyncRoot = path.join(root, "runs");
+		const sessionFile = path.join(root, "child.jsonl");
+		fs.writeFileSync(sessionFile, "", "utf-8");
+		return { root, asyncRoot, sessionFile };
+	};
+
+	it("restores attemptedModels with the used model first, original order after", () => {
+		const { root, asyncRoot, sessionFile } = rootSetup();
+		try {
+			writeJson(path.join(asyncRoot, "run-candidates", "status.json"), {
+				runId: "run-candidates",
+				mode: "single",
+				state: "failed",
+				startedAt: 100,
+				lastUpdate: 200,
+				steps: [{
+					agent: "worker",
+					status: "failed",
+					sessionFile,
+					// The primary failed; the child ran (and failed) on the first fallback.
+					model: "zai/glm-5.3-flash",
+					attemptedModels: ["openai-codex/gpt-6-luna", "zai/glm-5.3-flash", "openai-codex/gpt-6.1-terra"],
+				}],
+			});
+
+			const target = resolveAsyncResumeTarget({ id: "run-candidates" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") });
+			assert.equal(target.kind, "revive");
+			assert.equal(target.model, "zai/glm-5.3-flash");
+			// The revived child must not re-try a primary that already failed: the
+			// used model leads, and the rest of the spawned chain follows in order.
+			assert.deepEqual(target.modelCandidates, ["zai/glm-5.3-flash", "openai-codex/gpt-6-luna", "openai-codex/gpt-6.1-terra"]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("falls back to the result file's attemptedModels when the status has none", () => {
+		const { root, asyncRoot, sessionFile } = rootSetup();
+		try {
+			writeJson(path.join(asyncRoot, "run-result-candidates", "status.json"), {
+				runId: "run-result-candidates",
+				mode: "parallel",
+				state: "complete",
+				startedAt: 100,
+				lastUpdate: 200,
+				steps: [{ agent: "worker", status: "complete", sessionFile }],
+			});
+			writeJson(path.join(root, "results", "run-result-candidates.json"), {
+				id: "run-result-candidates",
+				runId: "run-result-candidates",
+				mode: "parallel",
+				state: "complete",
+				success: true,
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: root,
+				results: [{
+					agent: "worker",
+					success: true,
+					sessionFile,
+					model: "zai/glm-5.3-flash",
+					attemptedModels: ["openai-codex/gpt-6-luna", "zai/glm-5.3-flash"],
+				}],
+			});
+
+			const target = resolveAsyncResumeTarget({ id: "run-result-candidates" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") });
+			assert.equal(target.kind, "revive");
+			assert.deepEqual(target.modelCandidates, ["zai/glm-5.3-flash", "openai-codex/gpt-6-luna"]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("omits modelCandidates when the run never recorded attempted models", () => {
+		const { root, asyncRoot, sessionFile } = rootSetup();
+		try {
+			writeJson(path.join(asyncRoot, "run-no-candidates", "status.json"), {
+				runId: "run-no-candidates",
+				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				lastUpdate: 200,
+				steps: [{ agent: "worker", status: "complete", sessionFile, model: "zai/glm-5.3-flash" }],
+			});
+
+			const target = resolveAsyncResumeTarget({ id: "run-no-candidates" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") });
+			assert.equal(target.kind, "revive");
+			assert.equal(target.model, "zai/glm-5.3-flash");
+			assert.equal(target.modelCandidates, undefined);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects malformed attemptedModels loudly instead of resuming with a broken chain", () => {
+		const { root, asyncRoot, sessionFile } = rootSetup();
+		try {
+			writeJson(path.join(asyncRoot, "run-bad-candidates", "status.json"), {
+				runId: "run-bad-candidates",
+				mode: "single",
+				state: "failed",
+				startedAt: 100,
+				lastUpdate: 200,
+				steps: [{ agent: "worker", status: "failed", sessionFile, attemptedModels: ["openai-codex/gpt-6-luna", ""] }],
+			});
+
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-bad-candidates" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") }),
+				/steps\[0\]\.attemptedModels must contain non-empty strings/,
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+});

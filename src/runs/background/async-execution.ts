@@ -180,6 +180,13 @@ interface AsyncSingleParams {
 	outputMode?: "inline" | "file-only";
 	outputBaseDir?: string;
 	modelOverride?: string;
+	/**
+	 * Full candidate list restored from the source run's status (used model
+	 * first). Replaces the agent-config rebuild so a revived child keeps the
+	 * fallback chain it was spawned with, even if the agent file changed since.
+	 * Callers must not set this together with a fresh modelOverride.
+	 */
+	modelCandidatesOverride?: string[];
 	thinkingOverride?: AgentConfig["thinking"];
 	availableModels?: AvailableModelInfo[];
 	maxSubagentDepth: number;
@@ -1219,9 +1226,11 @@ export function executeAsyncSingle(
 						cwd: runnerCwd,
 						model,
 						thinking: resolveEffectiveThinking(model, effectiveThinking),
-						modelCandidates: buildModelCandidates(primaryModel, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope }).map((candidate) =>
-							applyThinkingSuffix(candidate, effectiveThinking, params.thinkingOverride !== undefined),
-						),
+						modelCandidates: (params.modelCandidatesOverride
+							?? buildModelCandidates(primaryModel, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope })
+						)
+							.map((candidate) => applyThinkingSuffix(candidate, effectiveThinking, params.thinkingOverride !== undefined))
+							.filter((candidate): candidate is string => candidate !== undefined),
 						tools: agentConfig.tools,
 						extensions: agentConfig.extensions,
 						subagentOnlyExtensions: agentConfig.subagentOnlyExtensions,

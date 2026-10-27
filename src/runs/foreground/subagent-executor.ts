@@ -498,7 +498,7 @@ function resolveForegroundResumeTarget(params: SubagentParamsLike, state: Subage
 }
 
 type AsyncResumeSourceTarget = ReturnType<typeof resolveAsyncResumeTarget> & { source: "async" };
-type ForegroundResumeSourceTarget = NonNullable<ReturnType<typeof resolveForegroundResumeTarget>> & { kind: "revive"; source: "foreground" };
+type ForegroundResumeSourceTarget = NonNullable<ReturnType<typeof resolveForegroundResumeTarget>> & { kind: "revive"; source: "foreground"; modelCandidates?: string[] };
 type NestedResumeSourceTarget = {
 	kind: "revive";
 	source: "nested";
@@ -508,6 +508,7 @@ type NestedResumeSourceTarget = {
 	index: number;
 	cwd?: string;
 	sessionFile: string;
+	modelCandidates?: string[];
 };
 type ResumeSourceTarget = AsyncResumeSourceTarget | ForegroundResumeSourceTarget | NestedResumeSourceTarget;
 
@@ -1304,6 +1305,12 @@ async function resumeAsyncRun(input: {
 		},
 		modelOverride: input.params.model ?? recoveryDescriptor?.model ?? target.model,
 		thinkingOverride: input.params.model ? undefined : recoveryDescriptor?.thinking ?? target.thinking,
+		// A resume without a fresh model choice keeps the source run's fallback
+		// chain (restored from its status file) instead of rebuilding from the
+		// current agent config, which may have changed since the first attempt.
+		...(input.params.model === undefined && recoveryDescriptor === undefined && target.modelCandidates
+			? { modelCandidatesOverride: [...target.modelCandidates] }
+			: {}),
 		outputBaseDir: resolveSingleRunOutputBaseDir(input.deps, artifactsDir, runId),
 		maxSubagentDepth: recoveryDescriptor?.maxSubagentDepth ?? resolveCurrentMaxSubagentDepth(input.deps.config.maxSubagentDepth),
 		waitToolEnabled: input.deps.waitToolEnabled,
