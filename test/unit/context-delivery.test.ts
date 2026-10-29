@@ -7,6 +7,7 @@ import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../../src/agents/agents.ts";
 import { prepareContextDelivery, writeContextDeliveryReceipt } from "../../src/runs/shared/context-delivery.ts";
 import { runSync } from "../../src/runs/foreground/execution.ts";
+import { executeAsyncSingle } from "../../src/runs/background/async-execution.ts";
 
 async function withTempDir(run: (dir: string) => void | Promise<void>): Promise<void> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-context-"));
@@ -51,6 +52,22 @@ test("runSync rejects required context and deleted cwd before child startup", as
 	});
 	assert.equal(result.exitCode, 1);
 	assert.match(result.error ?? "", /working directory .* is unavailable/);
+});
+
+test("async single preflights cwd and required context before creating recovery artifacts", async () => {
+	await withTempDir((cwd) => {
+		const runId = `context-preflight-${process.pid}-${Date.now()}`;
+		const result = executeAsyncSingle(runId, {
+			agent: "worker",
+			agentConfig: { name: "worker" } as AgentConfig,
+			ctx: { cwd, currentSessionId: "parent" } as never,
+			cwd,
+			task: "task",
+			contextFiles: { required: ["missing.md"] },
+		} as never);
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /required context file 'missing.md' is missing/);
+	});
 });
 
 test("required oversized or binary context fails; optional unsupported context is recorded without inclusion", async () => {
