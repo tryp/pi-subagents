@@ -1107,7 +1107,7 @@ async function runSingleStep(
 	if (ctx.outputs) task = resolveOutputReferences(task, ctx.outputs);
 	let contextDelivery: ReturnType<typeof prepareContextDelivery>;
 	try {
-		contextDelivery = prepareContextDelivery(step.cwd ?? ctx.cwd, step.contextFiles);
+		contextDelivery = prepareContextDelivery(step.cwd ?? ctx.cwd, step.contextFiles, { runId: ctx.id, childId: `${ctx.flatIndex}:${step.agent}`, task });
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return { agent: step.agent, output: message, exitCode: 1, error: message };
@@ -1127,7 +1127,7 @@ async function runSingleStep(
 		const index = ctx.flatStepCount > 1 ? ctx.flatIndex : undefined;
 		artifactPaths = getArtifactPaths(ctx.artifactsDir, ctx.id, step.agent, index);
 		fs.mkdirSync(ctx.artifactsDir, { recursive: true });
-		writeContextDeliveryReceipt(path.join(path.dirname(artifactPaths.metadataPath), "context-receipt.json"), contextDelivery.receipt);
+		writeContextDeliveryReceipt(artifactPaths.metadataPath.replace(/_meta\.json$/, `_${contextDelivery.receipt.attemptId}_context-receipt.json`), contextDelivery.receipt);
 		if (ctx.artifactConfig?.includeInput !== false) {
 			fs.writeFileSync(artifactPaths.inputPath, `# Task for ${step.agent}\n\n${task}`, "utf-8");
 		}

@@ -1249,7 +1249,7 @@ export async function runSync(
 	const shareEnabled = options.share === true;
 	let contextDelivery: ReturnType<typeof prepareContextDelivery>;
 	try {
-		contextDelivery = prepareContextDelivery(options.cwd ?? runtimeCwd, options.contextFiles);
+		contextDelivery = prepareContextDelivery(options.cwd ?? runtimeCwd, options.contextFiles, { runId: options.runId, childId: `${agentName}:${options.index ?? "single"}`, task });
 	} catch (error) {
 		return { agent: agentName, task, exitCode: 1, messages: [], usage: emptyUsage(), error: error instanceof Error ? error.message : String(error) };
 	}
@@ -1317,7 +1317,7 @@ export async function runSync(
 	if (options.artifactsDir && options.artifactConfig?.enabled !== false) {
 		artifactPathsResult = getArtifactPaths(options.artifactsDir, options.runId, agentName, options.index);
 		ensureArtifactsDir(options.artifactsDir);
-		writeContextDeliveryReceipt(path.join(path.dirname(artifactPathsResult.metadataPath), "context-receipt.json"), contextDelivery.receipt);
+		writeContextDeliveryReceipt(artifactPathsResult.metadataPath.replace(/_meta\.json$/, `_${contextDelivery.receipt.attemptId}_context-receipt.json`), contextDelivery.receipt);
 		if (options.artifactConfig?.includeInput !== false) {
 				writeArtifact(artifactPathsResult.inputPath, `# Task for ${agentName}\n\n${taskWithAcceptance}`);
 		}

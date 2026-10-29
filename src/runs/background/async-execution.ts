@@ -54,6 +54,7 @@ import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
 import { validateRlimitsConfig, rlimitsEnforceabilityError } from "../shared/rlimits.ts";
 import type { ImportedAsyncRoot } from "./chain-root-attachment.ts";
 import type { SessionLeaseRequest } from "../shared/session-lease.ts";
+import { prepareContextDelivery } from "../shared/context-delivery.ts";
 
 const require = createRequire(import.meta.url);
 const piPackageRoot = resolvePiPackageRoot();
@@ -1099,6 +1100,11 @@ export function executeAsyncSingle(
 	} = params;
 	const task = params.task ?? "";
 	const runnerCwd = resolveChildCwd(ctx.cwd, cwd);
+	try {
+		prepareContextDelivery(runnerCwd, params.contextFiles, { runId: id, childId: `${agent}:single`, task });
+	} catch (error) {
+		return formatAsyncStartError("single", error instanceof Error ? error.message : String(error));
+	}
 	const skillNames = params.skills ?? agentConfig.skills ?? [];
 	const availableModels = params.availableModels;
 	const { resolved: resolvedSkills, missing: missingSkills } = resolveSkillsWithFallback(

@@ -792,9 +792,9 @@ fallbackModels:
 
 ### Explicit launch context
 
-Single, parallel, and chain task entries may specify `contextFiles: { required: [...], optional: [...] }`. Paths resolve relative to that child task's cwd (absolute paths are accepted). Required files are checked for existence/readability before launch; a missing required file fails with a corrective message. Optional files are included when present and silently omitted otherwise. Available file contents are supplied in the child prompt. Existing `reads` and `defaultReads` behavior is unchanged and remains optional.
+Single, parallel, and chain task entries may specify `contextFiles: { required: [...], optional: [...] }`. Paths resolve relative to that child task's cwd (absolute paths are accepted). Required files are checked for existence/readability before launch; required content must be UTF-8 text no larger than 1 MiB or launch fails with a corrective message. Optional missing, unreadable, or unsupported files are silently omitted and classified in the receipt. Available file contents are supplied in the child prompt. Existing `reads` and `defaultReads` behavior is unchanged and remains optional.
 
-When artifacts are enabled, each run records `context-receipt.json` with prepared file availability. It does not attest that Pi's project context loader ran in the child or that prompt content survived model-context truncation: both fields are explicitly `unknown` because the child loader does not expose that inventory to this extension. This bounded receipt is not a general session/resource lifecycle guarantee.
+When artifacts are enabled, each child attempt records a uniquely named `*_context-receipt.json` with prepared file availability, cwd, best-effort Git revision, task hash, and run/child/attempt identity. Its lifecycle is `prepared`; model delivery, Pi's project context loader inventory, and prompt truncation remain explicitly `unknown`. It does not claim what the model actually received. This bounded receipt is not a general session/resource lifecycle guarantee.
 
 Important fields:
 
