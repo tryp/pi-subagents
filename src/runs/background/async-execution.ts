@@ -162,6 +162,7 @@ interface AsyncChainParams {
 interface AsyncSingleParams {
 	agent: string;
 	task?: string;
+	contextFiles?: { required?: string[]; optional?: string[] };
 	/** Raw caller-facing goal used only by the started event. */
 	goal?: string;
 	agentConfig: AgentConfig;
@@ -659,6 +660,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			label: s.label,
 			outputName: s.as,
 			structured: Boolean(s.outputSchema),
+			contextFiles: s.contextFiles,
 			cwd: stepCwd,
 			model,
 			thinking: resolveEffectiveThinking(model, effectiveThinking),
@@ -1174,6 +1176,7 @@ export function executeAsyncSingle(
 	const recoveryDescriptor: SteeringRecoveryDescriptor = {
 		version: 1,
 		sourceRunId: id,
+		contextFiles: params.contextFiles,
 		agent,
 		...(sessionFile ? { sessionFile } : {}),
 		cwd: runnerCwd,
@@ -1223,6 +1226,7 @@ export function executeAsyncSingle(
 						parentSessionId: ctx.parentSessionId ?? ctx.currentSessionId,
 						agent,
 						task: taskWithOutputInstruction,
+						contextFiles: params.contextFiles,
 						cwd: runnerCwd,
 						model,
 						thinking: resolveEffectiveThinking(model, effectiveThinking),

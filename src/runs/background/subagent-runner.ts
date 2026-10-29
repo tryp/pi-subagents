@@ -63,6 +63,7 @@ import { RLIMITS_ENV, decodeRlimitsEnv, resourceLimitExceededMessage, resourceLi
 import { outputEntryFromAsyncResult, resolveOutputReferences } from "../shared/chain-outputs.ts";
 import { createStructuredOutputRuntime, readStructuredOutput } from "../shared/structured-output.ts";
 import { readChildToolDiagnosticError } from "../shared/tool-availability.ts";
+import { prepareContextDelivery, writeContextDeliveryReceipt } from "../shared/context-delivery.ts";
 import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelStep, validateDynamicCollection } from "../shared/dynamic-fanout.ts";
 import { nestedSummaryFromAsyncStatus, projectNestedEvents, resolveNestedAsyncDir, writeNestedEvent } from "../shared/nested-events.ts";
 import { formatModelAttemptNote, isRetryableModelFailure } from "../shared/model-fallback.ts";
@@ -1104,6 +1105,14 @@ async function runSingleStep(
 	const placeholderRegex = new RegExp(ctx.placeholder.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
 	let task = step.task.replace(placeholderRegex, () => ctx.previousOutput);
 	if (ctx.outputs) task = resolveOutputReferences(task, ctx.outputs);
+	let contextDelivery: ReturnType<typeof prepareContextDelivery>;
+	try {
+		contextDelivery = prepareContextDelivery(step.cwd ?? ctx.cwd, step.contextFiles);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return { agent: step.agent, output: message, exitCode: 1, error: message };
+	}
+	if (contextDelivery.prompt) task = `${contextDelivery.prompt}\n\n${task}`;
 	const taskForCompletionGuard = task;
 	if (step.effectiveAcceptance) {
 		const acceptancePrompt = formatAcceptancePrompt(step.effectiveAcceptance);
@@ -1118,6 +1127,7 @@ async function runSingleStep(
 		const index = ctx.flatStepCount > 1 ? ctx.flatIndex : undefined;
 		artifactPaths = getArtifactPaths(ctx.artifactsDir, ctx.id, step.agent, index);
 		fs.mkdirSync(ctx.artifactsDir, { recursive: true });
+		writeContextDeliveryReceipt(path.join(path.dirname(artifactPaths.metadataPath), "context-receipt.json"), contextDelivery.receipt);
 		if (ctx.artifactConfig?.includeInput !== false) {
 			fs.writeFileSync(artifactPaths.inputPath, `# Task for ${step.agent}\n\n${task}`, "utf-8");
 		}

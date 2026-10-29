@@ -54,6 +54,7 @@ import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
 import { RLIMITS_ENV, decodeRlimitsEnv, resourceLimitExceededMessage, resourceLimitKindForSignal } from "../shared/rlimits.ts";
 import { readStructuredOutput } from "../shared/structured-output.ts";
+import { prepareContextDelivery, writeContextDeliveryReceipt } from "../shared/context-delivery.ts";
 import { readChildToolDiagnosticError } from "../shared/tool-availability.ts";
 import { captureSingleOutputSnapshot, extractChildWrittenOutput, formatSavedOutputReference, injectOutputPathSystemPrompt, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import {
@@ -1246,6 +1247,12 @@ export async function runSync(
 	}
 
 	const shareEnabled = options.share === true;
+	let contextDelivery: ReturnType<typeof prepareContextDelivery>;
+	try {
+		contextDelivery = prepareContextDelivery(options.cwd ?? runtimeCwd, options.contextFiles);
+	} catch (error) {
+		return { agent: agentName, task, exitCode: 1, messages: [], usage: emptyUsage(), error: error instanceof Error ? error.message : String(error) };
+	}
 	const effectiveAcceptance = resolveEffectiveAcceptance({
 		explicit: options.acceptance,
 		agentName,
@@ -1257,7 +1264,8 @@ export async function runSync(
 		dynamicGroup: options.acceptanceContext?.dynamicGroup,
 	});
 	const acceptancePrompt = formatAcceptancePrompt(effectiveAcceptance);
-	const taskWithAcceptance = acceptancePrompt ? `${task}\n${acceptancePrompt}` : task;
+	const taskWithContext = contextDelivery.prompt ? `${contextDelivery.prompt}\n\n${task}` : task;
+	const taskWithAcceptance = acceptancePrompt ? `${taskWithContext}\n${acceptancePrompt}` : taskWithContext;
 	const sessionEnabled = Boolean(options.sessionFile || options.sessionDir) || shareEnabled;
 	const skillNames = options.skills ?? agent.skills ?? [];
 	const skillCwd = options.cwd ?? runtimeCwd;
@@ -1309,6 +1317,7 @@ export async function runSync(
 	if (options.artifactsDir && options.artifactConfig?.enabled !== false) {
 		artifactPathsResult = getArtifactPaths(options.artifactsDir, options.runId, agentName, options.index);
 		ensureArtifactsDir(options.artifactsDir);
+		writeContextDeliveryReceipt(path.join(path.dirname(artifactPathsResult.metadataPath), "context-receipt.json"), contextDelivery.receipt);
 		if (options.artifactConfig?.includeInput !== false) {
 				writeArtifact(artifactPathsResult.inputPath, `# Task for ${agentName}\n\n${taskWithAcceptance}`);
 		}

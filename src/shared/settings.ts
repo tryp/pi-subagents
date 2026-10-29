@@ -48,6 +48,7 @@ export interface SequentialStep {
 	label?: string;
 	as?: string;
 	outputSchema?: JsonSchemaObject;
+	contextFiles?: { required?: string[]; optional?: string[] };
 	cwd?: string;
 	output?: string | false;
 	outputMode?: OutputMode;
@@ -69,6 +70,7 @@ export interface ParallelTaskItem {
 	label?: string;
 	as?: string;
 	outputSchema?: JsonSchemaObject;
+	contextFiles?: { required?: string[]; optional?: string[] };
 	cwd?: string;
 	count?: number;
 	output?: string | false;

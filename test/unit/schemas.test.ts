@@ -308,7 +308,7 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.ok(SubagentParams, "SubagentParams schema should exist");
 		const schema = SubagentParams as unknown as JsonSchemaNode;
 		const serialized = JSON.stringify(schema);
-		assert.ok(serialized.length < 15_000, `expected compact schema under 15k chars, got ${serialized.length}`);
+		assert.ok(serialized.length < 16_000, `expected compact schema under 16k chars, got ${serialized.length}`);
 		assert.equal(serialized.includes('"$ref"'), false);
 		assert.equal(serialized.includes('"$defs"'), false);
 		assert.equal(serialized.split("Optional acceptance policy.").length - 1, 1);

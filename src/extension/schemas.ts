@@ -96,6 +96,11 @@ const ToolBudgetOverride = Type.Object({
 // process-count are deliberately absent: they cannot be bounded this way for a
 // Node child (RLIMIT_AS/RLIMIT_DATA abort V8 at startup, RLIMIT_RSS is a no-op,
 // RLIMIT_NPROC is per user ID). Those are rejected with an explanatory error.
+const ContextFilesOverride = Type.Object({
+	required: Type.Optional(Type.Array(Type.String())),
+	optional: Type.Optional(Type.Array(Type.String())),
+}, { additionalProperties: false });
+
 const RlimitsOverride = Type.Object({
 	cpuSeconds: Type.Optional(Type.Integer({ minimum: 1, description: "Per-process CPU-time ceiling in seconds." })),
 	fileSizeMb: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum size in MiB of any single file the child may write." })),
@@ -124,6 +129,7 @@ const TaskItem = Type.Object({
 export const ParallelTaskSchema = Type.Object({
 	agent: Type.String(),
 	task: Type.Optional(Type.String({ description: "Task template with {task}, {previous}, {chain_dir} variables. Defaults to {previous}." })),
+	contextFiles: Type.Optional(ContextFilesOverride),
 	phase: Type.Optional(Type.String({ description: "Optional phase/group label for status and graph rendering." })),
 	label: Type.Optional(Type.String({ description: "Optional user-facing label for this parallel task." })),
 	as: Type.Optional(Type.String({ description: "Optional safe identifier used as {outputs.name} in later chain steps." })),
@@ -156,6 +162,7 @@ export const DynamicExpandSchema = Type.Object({
 export const DynamicParallelTemplateSchema = Type.Object({
 	agent: Type.String(),
 	task: Type.Optional(Type.String({ description: "Task template with {item}, {item.path}, {task}, {previous}, {chain_dir}, and {outputs.name} variables." })),
+	contextFiles: Type.Optional(ContextFilesOverride),
 	phase: Type.Optional(Type.String({ description: "Optional phase/group label for status and graph rendering." })),
 	label: Type.Optional(Type.String({ description: "Optional user-facing label; item templates are supported." })),
 	outputSchema: Type.Optional(JsonSchemaObject),
@@ -183,6 +190,7 @@ export const ChainItem = Type.Object({
 	task: Type.Optional(Type.String({
 		description: "Task template with variables: {task}=original request, {previous}=prior step's text response, {chain_dir}=shared folder, {outputs.name}=prior named output. Required for first step, defaults to '{previous}' for subsequent steps."
 	})),
+	contextFiles: Type.Optional(ContextFilesOverride),
 	phase: Type.Optional(Type.String({ description: "Optional phase/group label for status and graph rendering." })),
 	label: Type.Optional(Type.String({ description: "Optional user-facing label for this chain step." })),
 	as: Type.Optional(Type.String({ description: "Optional safe identifier used as {outputs.name} in later chain steps." })),
@@ -235,6 +243,7 @@ const ControlOverrides = Type.Object({
 const SubagentParamsSchema = Type.Object({
 	agent: Type.Optional(Type.String({ description: "Agent name (SINGLE mode) or target for management get/update/delete" })),
 	task: Type.Optional(Type.String({ description: "Task (SINGLE mode, optional for self-contained agents)" })),
+	contextFiles: Type.Optional(ContextFilesOverride),
 	// Management action (when present, tool operates in management mode)
 	action: Type.Optional(Type.String({
 		description: "Management/control action only. Must be omitted for execution mode (single, parallel, or chain)."

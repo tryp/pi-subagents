@@ -790,6 +790,12 @@ fallbackModels:
   - anthropic/claude-sonnet-4
 ```
 
+### Explicit launch context
+
+Single, parallel, and chain task entries may specify `contextFiles: { required: [...], optional: [...] }`. Paths resolve relative to that child task's cwd (absolute paths are accepted). Required files are checked for existence/readability before launch; a missing required file fails with a corrective message. Optional files are included when present and silently omitted otherwise. Available file contents are supplied in the child prompt. Existing `reads` and `defaultReads` behavior is unchanged and remains optional.
+
+When artifacts are enabled, each run records `context-receipt.json` with prepared file availability. It does not attest that Pi's project context loader ran in the child or that prompt content survived model-context truncation: both fields are explicitly `unknown` because the child loader does not expose that inventory to this extension. This bounded receipt is not a general session/resource lifecycle guarantee.
+
 Important fields:
 
 | Field | Notes |
@@ -808,7 +814,7 @@ Important fields:
 | `skills` | Selects specific skills for the child, regardless of `inheritSkills`. |
 | `skillPath` | Invocation-private skill files or discovery directories. Relative paths resolve from the agent definition file. Local matches take precedence, while unresolved or unreadable matches fall back to normal skill discovery. This field discovers candidates only; `skills` still selects what the child receives. |
 | `output` | Default single-agent output file. |
-| `defaultReads` | Files to read before running in chain/parallel behavior. |
+| `defaultReads` | Legacy optional files to read before running in chain/parallel behavior. Missing files remain backward-compatible and do not block launch. |
 | `defaultProgress` | Maintain `progress.md`. |
 | `async` | Default a single-agent launch to background (`true`) or foreground (`false`) when the call omits `async`. Explicit call values and `forceTopLevelAsync` win. |
 | `timeoutMs` | Positive integer default runtime deadline in milliseconds for single-agent launches. An explicit `timeoutMs` wins. |

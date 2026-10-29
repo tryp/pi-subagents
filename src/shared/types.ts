@@ -308,6 +308,7 @@ export interface SteeringNotice {
 export interface SteeringRecoveryDescriptor {
 	version: 1;
 	sourceRunId: string;
+	contextFiles?: { required?: string[]; optional?: string[] };
 	agent: string;
 	sessionFile?: string;
 	cwd: string;
@@ -1243,6 +1244,7 @@ export interface RunSyncOptions {
 		outputPath: string;
 	};
 	acceptance?: AcceptanceInput;
+	contextFiles?: { required?: string[]; optional?: string[] };
 	acceptanceContext?: {
 		mode?: SubagentRunMode;
 		async?: boolean;

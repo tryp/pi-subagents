@@ -13,6 +13,7 @@ export interface RunnerSubagentStep {
 	label?: string;
 	outputName?: string;
 	structured?: boolean;
+	contextFiles?: { required?: string[]; optional?: string[] };
 	cwd?: string;
 	/** Isolate this single step in a dedicated git worktree, created and cleaned up by the runner. */
 	worktree?: boolean;

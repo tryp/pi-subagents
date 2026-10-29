@@ -128,6 +128,7 @@ const MUTATING_MANAGEMENT_ACTIONS = new Set(["create", "update", "delete", "ejec
 interface TaskParam {
 	agent: string;
 	task: string;
+	contextFiles?: { required?: string[]; optional?: string[] };
 	cwd?: string;
 	count?: number;
 	output?: string | boolean;
@@ -143,6 +144,7 @@ interface TaskParam {
 }
 
 export interface SubagentParamsLike {
+	contextFiles?: { required?: string[]; optional?: string[] };
 	action?: string;
 	id?: string;
 	runId?: string;
@@ -1279,6 +1281,7 @@ async function resumeAsyncRun(input: {
 		agent: target.agent,
 		task: buildRevivedAsyncTask(target, followUp),
 		goal: followUp,
+		contextFiles: input.params.contextFiles ?? recoveryDescriptor?.contextFiles,
 		agentConfig: recoveryAgentConfig,
 		ctx: {
 			pi: input.deps.pi,
@@ -2565,6 +2568,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			modelScope: input.modelScope,
 			skills: effectiveSkills === false ? [] : effectiveSkills,
 			acceptance: task.acceptance,
+			contextFiles: task.contextFiles,
 			acceptanceContext: { mode: "parallel" },
 			...resolveChildDeadline(input.timeoutMs, input.deadlineAt, task.timeoutMs),
 			turnBudget: input.turnBudget,
@@ -3105,6 +3109,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 				agent: params.agent!,
 				task: shouldForkAgent(contextPolicy, params.agent!) ? wrapForkTask(task) : task,
 				goal: task,
+				contextFiles: params.contextFiles,
 				agentConfig,
 				ctx: asyncCtx,
 				availableModels,
@@ -3226,6 +3231,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		modelScope: data.modelScope,
 		skills: effectiveSkills,
 		acceptance: params.acceptance,
+		contextFiles: params.contextFiles,
 		acceptanceContext: { mode: "single" },
 		onDetachedExit: (result) => updateRememberedForegroundChild(deps.state, { runId, mode: "single", cwd: effectiveCwd, sessionId: data.parentSessionId, index: 0, result, events: deps.pi.events }),
 		timeoutMs: data.timeoutMs,
