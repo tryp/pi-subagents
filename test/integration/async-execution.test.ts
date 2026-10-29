@@ -3345,8 +3345,8 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		});
 
 		assert.equal(singleResult.isError, true);
-		assert.match(singleResult.content[0]?.text ?? "", /Failed to start async run/);
-		assert.match(singleResult.content[0]?.text ?? "", /cwd does not exist/);
+		assert.match(singleResult.content[0]?.text ?? "", /Cannot start subagent: working directory .* is unavailable/);
+		assert.match(singleResult.content[0]?.text ?? "", /Choose an existing cwd and retry/);
 
 		const chainId = `async-missing-cwd-chain-${Date.now().toString(36)}`;
 		const chainResult = executeAsyncChain(chainId, {
