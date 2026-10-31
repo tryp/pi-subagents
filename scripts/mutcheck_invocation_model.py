@@ -66,6 +66,9 @@ def mutant_caught(label: str, returncode: int, output: str) -> bool:
     return returncode != 0 and EXPECTED_FAILURES[label].issubset(assertion_failures(output))
 
 
+BASELINE_TESTS = 20  # `# tests N` for TESTS; fewer means results were lost, not a valid survivor.
+
+
 def run(cwd: Path, args: list[str], log: Path) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(args, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     log.write_text(result.stdout)
@@ -73,8 +76,15 @@ def run(cwd: Path, args: list[str], log: Path) -> subprocess.CompletedProcess[st
 
 
 def test(cwd: Path, log: Path) -> subprocess.CompletedProcess[str]:
-    return run(cwd, ["node", "--import", "./test/support/register-loader.mjs", "--test",
-                     "--test-force-exit", "--test-reporter=tap", *TESTS], log)
+    result = run(cwd, ["node", "--import", "./test/support/register-loader.mjs", "--test",
+                       "--test-reporter=tap", *TESTS], log)
+    reported = re.search(r"^# tests (\d+)$", result.stdout, re.MULTILINE)
+    count = int(reported.group(1)) if reported else 0
+    if count < BASELINE_TESTS:
+        raise RuntimeError(
+            f"the runner reported {count} of {BASELINE_TESTS} tests ({log}); results were lost, so "
+            "neither a pass nor a survivor can be concluded from this run")
+    return result
 
 
 def diagnostics(text: str) -> Counter[str]:
