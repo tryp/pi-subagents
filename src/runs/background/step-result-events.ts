@@ -39,7 +39,10 @@ export interface StepResultEventBridgeDeps {
 	runs: () => Iterable<StepResultEventSource>;
 	events: { emit(channel: string, payload: unknown): void };
 	fs?: {
-		readFileSync(file: string, encoding: "utf8"): string;
+		openSync(file: string, flags: string): number;
+		fstatSync(fd: number): { size: number };
+		readSync(fd: number, buffer: Buffer, offset: number, length: number, position: number): number;
+		closeSync(fd: number): void;
 		existsSync(file: string): boolean;
 	};
 	timers?: TimerApi;
@@ -50,6 +53,8 @@ export interface StepResultEventBridgeDeps {
 export interface StepResultEventBridge {
 	/** Read new lines now. Exposed so tests need no timers. */
 	tick(): void;
+	/** Actual bytes read during the most recent tick. */
+	bytesReadPerTick(): number;
 	dispose(): void;
 }
 
@@ -70,6 +75,7 @@ export function createStepResultEventBridge(deps: StepResultEventBridgeDeps): St
 	const fsApi = deps.fs ?? fs;
 	const cursors = new Map<string, Cursor>();
 	let disposed = false;
+	let bytesReadThisTick = 0;
 
 	const emitLine = (run: StepResultEventSource, line: string) => {
 		const trimmed = line.trim();
@@ -106,6 +112,7 @@ export function createStepResultEventBridge(deps: StepResultEventBridgeDeps): St
 
 	const tick = () => {
 		if (disposed) return;
+		bytesReadThisTick = 0;
 		const seen = new Set<string>();
 		for (const run of deps.runs()) {
 			// Every run still in the map is read, terminal runs included. The runner
@@ -118,33 +125,37 @@ export function createStepResultEventBridge(deps: StepResultEventBridgeDeps): St
 			// `subagent.step.result.completed` in the unread remainder.
 			seen.add(run.asyncId);
 			const file = path.join(run.asyncDir, EVENTS_FILE_NAME);
-			let content: string;
-			try {
-				if (!fsApi.existsSync(file)) continue;
-				content = fsApi.readFileSync(file, "utf8");
-			} catch (error) {
-				deps.logError?.(`Failed to read ${file}`, error);
-				continue;
-			}
-			// Reading the whole file and slicing keeps the common case (a small, actively
-			// appended log) simple; the cursor bounds repeated work to what is new. Safety
-			// does not depend on the cursor: consumers dedupe, and the artifact scan
-			// remains the reconciliation path if this ever misses a line.
 			let cursor = cursors.get(run.asyncId);
 			if (!cursor) {
 				cursor = { offset: 0 };
 				cursors.set(run.asyncId, cursor);
 			}
-			if (content.length < cursor.offset) {
-				// The file was truncated or replaced; re-read from the start.
-				cursor.offset = 0;
+			let fd: number | undefined;
+			let fresh: Buffer;
+			try {
+				if (!fsApi.existsSync(file)) continue;
+				fd = fsApi.openSync(file, "r");
+				const size = fsApi.fstatSync(fd).size;
+				if (size < cursor.offset) {
+					// The file was truncated or replaced; re-read from the start.
+					cursor.offset = 0;
+				}
+				const length = size - cursor.offset;
+				if (length === 0) continue;
+				fresh = Buffer.alloc(length);
+				const actual = fsApi.readSync(fd, fresh, 0, length, cursor.offset);
+				bytesReadThisTick += actual;
+				fresh = fresh.subarray(0, actual);
+			} catch (error) {
+				deps.logError?.(`Failed to read ${file}`, error);
+				continue;
+			} finally {
+				if (fd !== undefined) fsApi.closeSync(fd);
 			}
-			if (content.length === cursor.offset) continue;
-			const fresh = content.slice(cursor.offset);
-			const lastNewline = fresh.lastIndexOf("\n");
+			const lastNewline = fresh.lastIndexOf(0x0a);
 			if (lastNewline === -1) continue; // no complete line yet
 			cursor.offset += lastNewline + 1;
-			for (const line of fresh.slice(0, lastNewline).split("\n")) {
+			for (const line of fresh.subarray(0, lastNewline).toString("utf8").split("\n")) {
 				emitLine(run, line);
 			}
 		}
@@ -162,6 +173,7 @@ export function createStepResultEventBridge(deps: StepResultEventBridgeDeps): St
 
 	return {
 		tick,
+		bytesReadPerTick: () => bytesReadThisTick,
 		dispose: () => {
 			if (disposed) return;
 			disposed = true;

@@ -67,6 +67,47 @@ describe("step result event bridge", () => {
 		}
 	});
 
+	it("reads only appended bytes on repeated ticks for a large event log", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-step-events-bounded-"));
+		try {
+			const asyncDir = path.join(root, "run-a");
+			fs.mkdirSync(asyncDir, { recursive: true });
+			const eventsFile = path.join(asyncDir, "events.jsonl");
+			const prefilledLine = `${JSON.stringify({ type: "unrelated", padding: "x".repeat(2 * 1024 * 1024) })}\n`;
+			fs.writeFileSync(eventsFile, prefilledLine);
+			let totalBytesRead = 0;
+			const bridge = createStepResultEventBridge({
+				runs: () => [{ ...RUN, asyncDir }],
+				events: { emit: () => {} },
+				fs: {
+					existsSync: fs.existsSync,
+					openSync: fs.openSync,
+					fstatSync: fs.fstatSync,
+					readSync: (...args) => {
+						const read = fs.readSync(...args);
+						totalBytesRead += read;
+						return read;
+					},
+					closeSync: fs.closeSync,
+				},
+				timers: { setInterval: () => 1, clearInterval: () => {} },
+			});
+			bridge.tick(); // establish the starting cursor at the end of the pre-filled file
+			totalBytesRead = 0;
+			const appendedBytes = [0, 1, 2].map((stepIndex) => {
+				const line = `${JSON.stringify(stepLine(stepIndex))}\n`;
+				fs.appendFileSync(eventsFile, line);
+				bridge.tick();
+				return Buffer.byteLength(line);
+			}).reduce((sum, bytes) => sum + bytes, 0);
+			assert.ok(totalBytesRead >= appendedBytes, `expected at least ${appendedBytes} bytes, got ${totalBytesRead}`);
+			assert.ok(totalBytesRead <= appendedBytes + 8, `expected only appended bytes, got ${totalBytesRead}`);
+			bridge.dispose();
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("emits each publication once and only the new ones", () => {
 		const f = fixture();
 		try {
@@ -88,6 +129,9 @@ describe("step result event bridge", () => {
 	});
 
 	it("ignores other event types and a half-written trailing line", () => {
+		// The first tick observes only bytes that exist at its open; the next tick must
+		// resume at the prior incomplete-line offset. Re-reading from byte zero instead
+		// replays step 0, which is why the expected sequence below is exactly [0, 2].
 		const f = fixture();
 		try {
 			f.publish({ type: "subagent.steering.notice", runId: "run-a", ts: 1 });
