@@ -37,6 +37,12 @@ describe("registered subagent tool description", () => {
 		assert.match(description, /use \{ action: "list" \} to inspect configured agents\/chains/i);
 		assert.match(description, /listed, enabled/i);
 		assert.doesNotMatch(description, /executable\/non-disabled/i);
+		// The `models` line used to promise a per-builtin effective-model mapping.
+		// No-agent `models` now lists requestable ids by provider, so the promise has
+		// to move with the behaviour: a description that outlives what it describes
+		// is the same defect as the "Executable agents:" header this change removed.
+		assert.match(description, /\{ action: "models".*requestable model ids by provider/i);
+		assert.doesNotMatch(description, /runtime-loaded builtin subagent model mapping/i);
 		assert.match(description, /proactive skill subagent suggestions/i);
 		assert.doesNotMatch(description, /disabled builtins/i);
 		assert.match(description, /output\?,reads\?,progress\?/i);
