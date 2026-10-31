@@ -252,7 +252,12 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string,
 	});
 }
 
-class JsonRpcLspClient {
+/**
+ * Exported so the closed-pipe guarantee can be driven directly: a language
+ * server that goes away mid-session must settle its requests, not raise an
+ * uncaught EPIPE in the host process.
+ */
+export class JsonRpcLspClient {
 	private nextId = 1;
 	private stdoutBuffer = Buffer.alloc(0);
 	private readonly pending = new Map<JsonRpcId, { resolve(value: unknown): void; reject(error: Error): void }>();
@@ -272,6 +277,20 @@ class JsonRpcLspClient {
 			this.exited = true;
 			this.rejectPending(error);
 			this.resolveExitWaiters();
+		});
+		// A language server that dies between requests leaves a half-closed pipe;
+		// the next write fails with EPIPE. Without a handler that surfaces as an
+		// uncaught exception in the host process -- the request that caused it is
+		// never settled, and in a test run it is attributed to whichever test
+		// happened to be writing. Treat it as the exit it is.
+		child.stdin.on("error", (error) => {
+			if (this.exited) return;
+			this.exited = true;
+			this.rejectPending(error instanceof Error ? error : new Error(String(error)));
+			this.resolveExitWaiters();
+			// Nothing can be written to a server that closed its own input, so
+			// stop it rather than leaving it running unobserved.
+			this.child.kill("SIGTERM");
 		});
 		child.on("exit", (code, signal) => {
 			this.exited = true;
@@ -315,7 +334,12 @@ class JsonRpcLspClient {
 	private send(payload: JsonRpcMessage): void {
 		if (this.exited) throw new Error("language server already exited");
 		const body = JSON.stringify(payload);
-		this.child.stdin.write(`Content-Length: ${Buffer.byteLength(body, "utf-8")}\r\n\r\n${body}`);
+		const stdin = this.child.stdin;
+		if (stdin.destroyed || stdin.writableEnded) {
+			this.exited = true;
+			throw new Error("language server stdin is closed");
+		}
+		stdin.write(`Content-Length: ${Buffer.byteLength(body, "utf-8")}\r\n\r\n${body}`);
 	}
 
 	private handleStdout(chunk: Buffer): void {
