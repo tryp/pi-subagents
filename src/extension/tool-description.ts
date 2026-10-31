@@ -80,26 +80,24 @@ export const COMPACT_SUBAGENT_TOOL_DESCRIPTION = `Delegate to subagents or manag
 
 EXECUTE:
 • Before execution, call { action: "list" }; run only listed, enabled agents/chains.
-• SINGLE {agent, task?}; PARALLEL {tasks:[{agent,task,count?,output?,reads?,progress?}], concurrency?, worktree?}; CHAIN {chain:[{agent,task?},{parallel:[...]}]}.
-• context can be "fresh" or "fork"; omitted uses each agent defaultContext, otherwise fresh. timeoutMs applies to foreground and async/background runs.
-• rlimits can set cpuSeconds, fileSizeMb, openFiles, and coreSizeMb; Linux only, no memory/process-count bound, inherited by nested agents (which can only lower them). A configured limit on macOS/Windows is rejected, not ignored.
-• Chain templates may use {task}, {previous}, {chain_dir}, and named outputs. Parallel worktree isolation requires a clean git repo.
-• Chain example: { chain: [{agent:"agent-a", task:"Analyze {task}"}, {parallel: [{agent:"agent-b", task:"Check {previous}", count: 3}]}] }
-• If list shows proactive skill subagent suggestions, use a small fresh-context fanout only when the task is broad enough.
+• SINGLE {agent,task?}; PARALLEL {tasks:[{agent,task,count?,output?,reads?,progress?}],concurrency?,worktree?}; CHAIN {chain:[{agent,task?},{parallel:[...]}]}.
+• context "fresh"/"fork"; omitted uses each agent's defaultContext. timeoutMs caps runtime. rlimits: cpuSeconds,fileSizeMb,openFiles,coreSizeMb (Linux only; no memory/process cap; inherited, only reducible; macOS/Windows limits are rejected).
+• turnBudget {maxTurns,graceTurns?} caps assistant turns: at maxTurns the child is asked to wrap up; after graceTurns more turns it is aborted with partial output.
+• toolBudget {soft,hard,block?} caps tool calls: soft nudges; hard blocks named tools (default read/grep/find/ls, or "*" for all) so the child can finalize.
+• syncWakeMs is an interactive parent wake/checkpoint while child work continues, not a runtime limit. Chain templates: {task}, {previous}, {chain_dir}; parallel worktree isolation requires a clean git repo.
+• Chain example: { chain: [{agent:"agent-a", task:"Analyze {task}"}, {parallel: [{agent:"agent-b", task:"Check {previous}", count: 3}]}] }. Use proactive skill suggestions for broad tasks where they materially help.
 
-MANAGE / CONTROL:
+MANAGE:
 • Use action without execution fields: list, get, models, create, update, delete, eject, disable, enable, reset, grant-spawn-budget, doctor, watchdog.status, watchdog.check, watchdog.recommend-model, watchdog.configure.
-• Agent acceptanceRole (read-only or writer) affects inferred acceptance only, never tools. Explicit task intent wins; omission keeps name heuristics. Update with false or an empty string to clear it.
-• Async control actions: status, interrupt, stop, resume, steer, append-step. Use stop with an id for current-session top-level async runs. Use status view:"fleet" for active-run overview, view:"transcript" to tail child output, steer for acknowledged top-level live async guidance, and resume for paused/completed/failed revival or a routed nested follow-up. Stopped runs are non-resumable. Steering delivery means Pi accepted the correlated user input, not model compliance; use index for a specific child.
-• Opt-in schedule actions: schedule, schedule-list, schedule-status, schedule-cancel. Schedule only explicit delayed runs the user asked for.
+• get reads full agent config; models lists requestable provider IDs and effective model resolution. watchdog.configure accepts model, scope?, target?, agent?, thinking?.
+• create config keys include name, package, systemPrompt, systemPromptMode, inheritProjectContext, inheritSkills, defaultContext, acceptance, acceptanceRole; update merges. acceptanceRole (read-only/writer) affects inferred acceptance, never tools; explicit task intent wins; omission keeps name heuristics. Update with false/empty string clears it.
+• eject/disable/enable/reset accept agentScope?; chain operations use chainName. grant-spawn-budget takes additional and requires user confirmation.
+• CONTROL actions: status, interrupt, stop, resume, steer, append-step. status takes id and optional view:"fleet" or view:"transcript" (index?,lines?); resume/steer take message and optional index; append-step takes chain. Stop only current-session top-level async runs; stopped runs cannot resume. Steering confirms Pi accepted input, not model compliance.
+• Opt-in SCHEDULE actions: schedule, schedule-list, schedule-status, schedule-cancel; requires scheduledRuns.enabled. schedule takes agent, task?, schedule, scheduleName? and also tasks[]/chain[]. Only schedule explicit delayed runs the user asked for.
+• doctor is a read-only runtime/discovery/session/intercom report. If list shows proactive skill suggestions, use a small fresh-context fanout only for broad tasks where a skill helps.
 
-ASYNC / WAIT:
-• async defaults to true (background) in interactive and RPC sessions, and stays inline in a single-shot 'pi -p' run where a detached result has nowhere to land; prefer one parallel batch to serial launches and pass async:false only when you need the result inline. Do not sleep or poll just to wait; until:"next-event" sleeps until anything changes. In an interactive session, normally return control to the user and let Pi wake you on completion; call subagent_wait when you need a result now - it returns the first finished child by default, so you can act on a partial batch instead of blocking for all of it, and repeating it drains the rest. Use until:"all-terminal" or barrier:"integration" when the whole batch must be done first. Non-interactive runs (pi -p) auto-drain current-session work at agent_end, so early returns never abandon children.
-• Status and artifacts live under asyncId/asyncDir with status.json, events.jsonl, output logs, session files, and { action:"status", id:"..." }.
-
-SAFETY:
-• Ordinary child subagents are not orchestrators and must not run subagents. Only explicit fanout children may use child-safe subagent, still bounded by depth/session limits.
-• Keep one writer per cwd/worktree. Use fresh read-only review/validation fanout, then synthesize and apply fixes from the parent unless isolated worktrees were intentionally requested.`;
+ASYNC:
+• async defaults true in interactive/RPC sessions and stays inline in single-shot 'pi -p'; async:false blocks only when an inline result is needed. Do not sleep/poll to wait: subagent_wait can return the first child result or until:"all-terminal"/barrier:"integration" when all work is required. Interactive runs can return control; Non-interactive runs (pi -p) auto-drain current-session work at agent_end. Status/artifacts use asyncId/asyncDir, status.json, events.jsonl, output logs, session files, and {action:"status",id:"..."}.`;
 
 function isToolDescriptionMode(value: unknown): value is ToolDescriptionMode {
 	return value === "full" || value === "compact" || value === "custom";
@@ -204,11 +202,11 @@ function withMandatorySafetyGuidance(description: string): string {
 
 export function buildSubagentToolDescription(config: Pick<ExtensionConfig, "toolDescriptionMode"> = {}, options?: ToolDescriptionOptions): string {
 	const mode = resolveToolDescriptionMode(config, options);
-	if (mode === "compact") return COMPACT_SUBAGENT_TOOL_DESCRIPTION;
+	if (mode === "compact") return withMandatorySafetyGuidance(COMPACT_SUBAGENT_TOOL_DESCRIPTION);
 	if (mode === "custom") {
 		const custom = loadCustomToolDescription(options);
 		if (custom) return withMandatorySafetyGuidance(custom);
 		warn(options, `${CUSTOM_TOOL_DESCRIPTION_FILE} was not found or valid for toolDescriptionMode "custom"; using full description.`);
 	}
-	return FULL_SUBAGENT_TOOL_DESCRIPTION;
+	return withMandatorySafetyGuidance(FULL_SUBAGENT_TOOL_DESCRIPTION);
 }

@@ -19,6 +19,33 @@ function escapeRegex(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function extractListedActions(description: string): Set<string> {
+	const actions = new Set<string>();
+	for (const line of description.split("\n")) {
+		const actionField = line.indexOf("action:");
+		if (actionField >= 0) {
+			const actionText = line.slice(actionField);
+			const direct = actionText.match(/action:\s*"([a-z][a-z0-9.-]*)"((?:\s*\|\s*"[a-z][a-z0-9.-]*")*)/i);
+			if (direct) {
+				for (const match of direct[0].matchAll(/"([a-z][a-z0-9.-]*)"/gi)) actions.add(match[1]);
+			}
+		}
+		const listMarker = line.match(/(?:actions:|Use action without execution fields:)/i);
+		if (listMarker) {
+			const list = line.slice(line.indexOf(listMarker[0]) + listMarker[0].length);
+			for (const item of list.split(",")) {
+				const action = item.trim().match(/^([a-z][a-z0-9.-]*[a-z0-9])/i)?.[1];
+				if (action) actions.add(action);
+			}
+		}
+	}
+	return actions;
+}
+
+function extractCamelCaseTerms(description: string): Set<string> {
+	return new Set(description.match(/\b[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*\b/g) ?? []);
+}
+
 function parentToolEnv(agentDir?: string): NodeJS.ProcessEnv {
 	const env = { ...process.env };
 	delete env[SUBAGENT_CHILD_ENV];
@@ -95,8 +122,10 @@ describe("registered subagent tool description", () => {
 	it("offers a compact mode that keeps safety-critical guidance", () => {
 		const description = buildSubagentToolDescription({ toolDescriptionMode: "compact" });
 
-		assert.equal(description, COMPACT_SUBAGENT_TOOL_DESCRIPTION);
-		assert.ok(description.length < FULL_SUBAGENT_TOOL_DESCRIPTION.length * 0.8, "compact mode should be materially shorter than full mode");
+		assert.equal(description.split(SUBAGENT_SAFETY_GUIDANCE).length - 1, 1);
+		assert.ok(description.endsWith(SUBAGENT_SAFETY_GUIDANCE), "compact mode must append mandatory safety guidance exactly once");
+		const full = buildSubagentToolDescription({ toolDescriptionMode: "full" });
+		assert.ok(description.length <= full.length * 0.6, `compact mode (${description.length} chars) must be at most 60% of full (${full.length} chars)`);
 		assert.match(description, /SINGLE/);
 		assert.match(description, /PARALLEL/);
 		assert.match(description, /CHAIN/);
@@ -115,10 +144,10 @@ describe("registered subagent tool description", () => {
 		assert.match(description, /eject/);
 		assert.match(description, /disable/);
 		assert.match(description, /grant-spawn-budget/);
-		assert.match(description, /acceptanceRole.*affects inferred acceptance only/i);
+		assert.match(description, /acceptanceRole.*affects inferred acceptance, never tools/i);
 		assert.match(description, /Explicit task intent wins/i);
 		assert.match(description, /omission keeps name heuristics/i);
-		assert.match(description, /false or an empty string to clear it/i);
+		assert.match(description, /false\/empty string clears it/i);
 		assert.match(description, /status\.json/);
 		assert.match(description, /events\.jsonl/);
 		// Compact mode keeps a chain quick-reference too (#417)
@@ -126,6 +155,29 @@ describe("registered subagent tool description", () => {
 		assert.match(description, /\{previous\}/);
 		assert.match(description, /parallel:/);
 		assert.match(description, /count:/);
+		for (const parameter of ["turnBudget", "toolBudget", "timeoutMs", "rlimits", "acceptanceRole", "worktree"]) {
+			assert.ok(description.includes(parameter), `compact mode must mention ${parameter}`);
+		}
+	});
+
+	it("keeps every full-mode action and parameter visible in compact mode", () => {
+		const fullActions = extractListedActions(FULL_SUBAGENT_TOOL_DESCRIPTION);
+		const compactActions = extractListedActions(COMPACT_SUBAGENT_TOOL_DESCRIPTION);
+		// No full-mode action should become undiscoverable in compact mode.
+		const intentionallyFullOnlyActions: string[] = [];
+		const missingActions = [...fullActions].filter(
+			(action) => !compactActions.has(action) && !intentionallyFullOnlyActions.includes(action),
+		);
+		assert.deepEqual(missingActions, [], `compact mode is missing actions: ${missingActions.join(", ")}`);
+
+		const fullParameters = extractCamelCaseTerms(FULL_SUBAGENT_TOOL_DESCRIPTION);
+		const compactParameters = extractCamelCaseTerms(COMPACT_SUBAGENT_TOOL_DESCRIPTION);
+		// Keep the allowlist empty: parameter/capability names are cheap to retain.
+		const intentionallyFullOnlyParameters: string[] = [];
+		const missingParameters = [...fullParameters].filter(
+			(parameter) => !compactParameters.has(parameter) && !intentionallyFullOnlyParameters.includes(parameter),
+		);
+		assert.deepEqual(missingParameters, [], `compact mode is missing parameter/capability names: ${missingParameters.join(", ")}`);
 	});
 
 	it("renders a custom project description with placeholders and mandatory safety guidance", () => {
@@ -263,7 +315,9 @@ describe("registered subagent tool description", () => {
 
 		const compactAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-tool-desc-compact-"));
 		writeExtensionConfig(compactAgentDir, { toolDescriptionMode: "compact" });
-		assert.equal(readRegisteredDescription(compactAgentDir), COMPACT_SUBAGENT_TOOL_DESCRIPTION);
+		const compactRegisteredDescription = readRegisteredDescription(compactAgentDir);
+		assert.equal(compactRegisteredDescription, buildSubagentToolDescription({ toolDescriptionMode: "compact" }));
+		assert.ok(compactRegisteredDescription.endsWith(SUBAGENT_SAFETY_GUIDANCE));
 
 		const customAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-tool-desc-custom-"));
 		writeExtensionConfig(customAgentDir, { toolDescriptionMode: "custom" });
