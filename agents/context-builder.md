@@ -1,7 +1,7 @@
 ---
 name: context-builder
 description: Analyzes requirements and codebase, generates context and meta-prompt
-tools: read, grep, find, ls, bash, write, web_search, intercom
+tools: read, grep, find, ls, bash, bash_bg, jobs, job_decide, write, web_search, intercom
 thinking: medium
 systemPromptMode: replace
 inheritProjectContext: true
