@@ -6,7 +6,10 @@ import { createTempDir, removeTempDir, tryImport } from "../support/helpers.ts";
 
 interface AsyncJobTrackerModule {
 	createAsyncJobTracker(
-		pi: { events: { emit(channel: string, data: unknown): void } },
+		pi: {
+			events: { emit(channel: string, data: unknown): void };
+			appendEntry(customType: string, data?: unknown): void;
+		},
 		state: Record<string, unknown>,
 		asyncDirRoot: string,
 		options?: {
@@ -57,6 +60,7 @@ function createEventRecorder() {
 					events.push({ channel, data });
 				},
 			},
+			appendEntry: () => {},
 		},
 		events,
 	};
