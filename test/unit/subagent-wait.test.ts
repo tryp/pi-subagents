@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { WAIT_TOOL_ENABLED_ENV, resolveWaitToolConfig, waitForSubagents, type SubagentWaitDeps } from "../../src/runs/background/subagent-wait.ts";
+import { WAIT_TOOL_ENABLED_ENV, describeWaitSubmitSource, resolveWaitToolConfig, waitForSubagents, type SubagentWaitDeps } from "../../src/runs/background/subagent-wait.ts";
 import { SUBAGENT_STEP_RESULT_EVENT, type SubagentState } from "../../src/shared/types.ts";
 import { interactiveCheckpointMs, registerWaitTool } from "../../src/runs/background/wait-tool.ts";
 
@@ -106,6 +106,15 @@ describe("subagent_wait tool", () => {
 		assert.throws(() => resolveWaitToolConfig("false" as never, {}), /config\.waitTool/);
 		assert.throws(() => resolveWaitToolConfig({ enabled: "false" } as never, {}), /config\.waitTool\.enabled/);
 		assert.throws(() => resolveWaitToolConfig(undefined, { [WAIT_TOOL_ENABLED_ENV]: "maybe" }), /PI_SUBAGENT_WAIT_TOOL_ENABLED/);
+	});
+
+	it("names what ended the wait, and an injected input still ends it", () => {
+		// Queued work is queued work: an extension-injected message must not be
+		// left sitting until the checkpoint expires. Only the wording differs.
+		assert.equal(describeWaitSubmitSource("interactive"), "the user submitted input");
+		assert.equal(describeWaitSubmitSource("rpc"), "the user submitted input");
+		assert.equal(describeWaitSubmitSource(undefined), "the user submitted input");
+		assert.equal(describeWaitSubmitSource("extension"), "an extension injected input");
 	});
 
 	it("keeps the supervisor checkpoint only where a later turn can receive it", () => {

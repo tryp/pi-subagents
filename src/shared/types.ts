@@ -1077,8 +1077,10 @@ export interface ForegroundResumeRun {
 }
 
 export interface SubagentState {
-	/** Monotonic epoch incremented synchronously when the user submits input. */
+	/** Monotonic epoch incremented synchronously when input arrives for the agent. */
 	userInputEpoch: number;
+	/** Source of the most recent input, so a yielded wait can name what ended it. */
+	lastInputSource?: string;
 	baseCwd: string;
 	currentSessionId: string | null;
 	subagentInProgress?: boolean;

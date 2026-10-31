@@ -29,6 +29,19 @@ function configuredValue(config: unknown): boolean | undefined {
 	return enabled;
 }
 
+/**
+ * Why an interactive wait ended.
+ *
+ * The epoch advances on any input that will be delivered to the agent, whatever
+ * its source. The case it was built for is a person submitting a message, but an
+ * extension-injected message ends the wait too: the message is queued work, and
+ * blocking through the checkpoint while it sits undelivered is idle time the
+ * caller did not ask for. Only the wording differs, and naming the source keeps
+ * the checkpoint honest about what ended it.
+ */
+export const describeWaitSubmitSource = (source: string | undefined): string =>
+	source === "extension" ? "an extension injected input" : "the user submitted input";
+
 export function resolveWaitToolConfig(config?: WaitToolConfig, env: Record<string, string | undefined> = process.env): ResolvedWaitToolConfig {
 	const objectConfig = config && typeof config === "object" ? config : undefined;
 	const yieldOnUserInput = objectConfig?.yieldOnUserInput;

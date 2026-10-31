@@ -495,8 +495,13 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	registerWaitTool(pi, state, waitToolConfig.enabled, resolveSupervisorCheckpointMs(config), waitToolConfig.yieldOnUserInput);
 
-	pi.on("input", () => {
+	pi.on("input", (event) => {
+		// Any input that will be delivered to the agent ends an interactive wait.
+		// An extension-injected message is queued work too: blocking through the
+		// checkpoint while it sits undelivered is idle time. Record the source so
+		// the returned checkpoint can name what ended the wait.
 		state.userInputEpoch++;
+		state.lastInputSource = event.source;
 		return { action: "continue" };
 	});
 

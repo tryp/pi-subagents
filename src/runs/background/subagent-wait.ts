@@ -86,7 +86,8 @@ import {
 	type SupervisorCheckpoint,
 } from "../../shared/types.ts";
 import { formatDuration } from "../../shared/formatters.ts";
-export { WAIT_TOOL_ENABLED_ENV, resolveWaitToolConfig, type ResolvedWaitToolConfig } from "./wait-config.ts";
+import { WAIT_TOOL_ENABLED_ENV, describeWaitSubmitSource, resolveWaitToolConfig, type ResolvedWaitToolConfig } from "./wait-config.ts";
+export { WAIT_TOOL_ENABLED_ENV, describeWaitSubmitSource, resolveWaitToolConfig, type ResolvedWaitToolConfig };
 
 /** States that mean a run is still in flight (not yet resolved). */
 const ACTIVE_STATES: ReadonlyArray<AsyncRunSummary["state"]> = ["queued", "running"];
@@ -733,7 +734,7 @@ async function waitForDetachedForegroundRun(
 			const runIdText = oneLine(run.runId, 80);
 			const checkpoint = { ...checkpointActions(run.runId, elapsedMs, children), reason: "user_submitted" as const };
 			return resultWithSupervisorCheckpoint(
-				capWaitMessage(`The wait ended because the user submitted input. The work continues in the background; 1 run is still active. Resume with subagent_wait({ runId: "${runIdText}", barrier: "consume-result" }) or check status with subagent({ action: "status", runId: "${runIdText}" }).`),
+				capWaitMessage(`The wait ended because ${describeWaitSubmitSource(deps.state.lastInputSource)}. The work continues in the background; 1 run is still active. Resume with subagent_wait({ runId: "${runIdText}", barrier: "consume-result" }) or check status with subagent({ action: "status", runId: "${runIdText}" }).`),
 				[],
 				checkpoint,
 			);
@@ -983,7 +984,7 @@ export async function waitForSubagents(
 			const handles = runIdForActions === undefined
 				? `Resume with subagent_wait({ barrier: "consume-result" }) or check status with subagent({ action: "status" }).`
 				: `Resume with subagent_wait({ runId: "${runIdForActions}", barrier: "consume-result" }) or check with subagent({ action: "status", runId: "${runIdForActions}" }).`;
-			const head = `The wait ended because the user submitted input. The work continues in the background; ${active.length} run(s) are still active.`;
+			const head = `The wait ended because ${describeWaitSubmitSource(deps.state.lastInputSource)}. The work continues in the background; ${active.length} run(s) are still active.`;
 			const text = capWaitMessage(`${head} ${handles}${formatStepResultViews(views, "\n")}`);
 			return resultWithSupervisorCheckpoint(text, views, checkpoint);
 		}
