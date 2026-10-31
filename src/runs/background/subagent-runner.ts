@@ -42,6 +42,7 @@ import {
 	DEFAULT_CONTROL_CONFIG,
 	buildControlEvent,
 	deriveActivityState,
+	toolDurationThresholds,
 	claimControlNotification,
 	formatControlIntercomMessage,
 	formatControlNoticeMessage,
@@ -2049,6 +2050,7 @@ async function runSubagent(
 	};
 	const emittedControlEventKeys = new Set<string>();
 	const activeLongRunningSteps = new Set<number>();
+	const toolSlowNoticeKeys = new Set<string>();
 	const mutatingFailureStates = initialStatusSteps.map(() => createMutatingFailureState());
 	const pendingToolResults: Array<{ tool: string; path?: string; mutates: boolean; startedAt?: number } | undefined> = initialStatusSteps.map(() => undefined);
 	const mutatingFailureWindowMs = 5 * 60_000;
@@ -2454,6 +2456,9 @@ async function runSubagent(
 				step.lastActivityAt = lastActivityAt;
 				changed = true;
 			}
+			const toolStartedAt = step.currentToolStartedAt ?? lastActivityAt;
+			const toolThresholds = step.currentTool ? toolDurationThresholds(step.currentTool, controlConfig.toolInFlightGraceMs) : undefined;
+			const toolElapsedMs = Math.max(0, now - (toolThresholds?.progressBased ? lastActivityAt : toolStartedAt));
 			const idleState = deriveActivityState({
 				config: controlConfig,
 				startedAt: step.startedAt ?? overallStartTime,
@@ -2462,6 +2467,26 @@ async function runSubagent(
 				currentToolStartedAt: step.currentToolStartedAt,
 				now,
 			});
+			if (step.currentTool && toolThresholds && toolElapsedMs > toolThresholds.softMs) {
+				const noticeKey = `${index}:${step.currentTool}:${toolStartedAt}`;
+				if (!toolSlowNoticeKeys.has(noticeKey)) {
+					toolSlowNoticeKeys.add(noticeKey);
+					appendControlEvent(buildControlEvent({
+						type: "active_long_running",
+						from: step.activityState,
+						to: "active_long_running",
+						runId: id,
+						agent: step.agent,
+						index,
+						ts: now,
+						currentTool: step.currentTool,
+						currentToolDurationMs: toolElapsedMs,
+						elapsedMs: toolElapsedMs,
+						reason: "tool_slow",
+						message: `${step.agent} is still active in ${step.currentTool} (${Math.floor(toolElapsedMs / 1000)}s; slow, not stalled)`,
+					}));
+				}
+			}
 			if (idleState === "needs_attention") {
 				const previous = step.activityState;
 				step.activityState = "needs_attention";
@@ -2477,8 +2502,9 @@ async function runSubagent(
 						currentTool: step.currentTool,
 						currentToolDurationMs: step.currentToolStartedAt ? Math.max(0, now - step.currentToolStartedAt) : undefined,
 						elapsedMs: step.currentToolStartedAt ? Math.max(0, now - step.currentToolStartedAt) : undefined,
+						reason: step.currentTool ? "tool_wedged" : undefined,
 						message: step.currentTool
-							? `${step.agent} needs attention (in ${step.currentTool} for ${Math.floor(Math.max(0, now - (step.currentToolStartedAt ?? now)) / 1000)}s)`
+							? `${step.agent} is probably wedged in ${step.currentTool} (${Math.floor(toolElapsedMs / 1000)}s without completion)`
 							: undefined,
 					}));
 					changed = true;

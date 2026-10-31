@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { renderWidget, widgetRenderKey } from "../../tui/render.ts";
-import { formatControlNoticeMessage } from "../shared/subagent-control.ts";
+import { formatControlNoticeMessage, recordToolStallTelemetry } from "../shared/subagent-control.ts";
 import {
 	type AsyncJobState,
 	type AsyncStartedEvent,
@@ -47,7 +47,7 @@ function rememberFleetJob(state: SubagentState, job: AsyncJobState): void {
 	for (const stale of terminal.slice(MAX_RECENT_FLEET_JOBS)) state.fleetJobs.delete(stale.asyncId);
 }
 
-export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: SubagentState, asyncDirRoot: string, options: AsyncJobTrackerOptions = {}): {
+export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events" | "appendEntry">, state: SubagentState, asyncDirRoot: string, options: AsyncJobTrackerOptions = {}): {
 	ensurePoller: () => void;
 	refreshWidget: (ctx: ExtensionContext) => void;
 	handleStarted: (data: unknown) => void;
@@ -225,6 +225,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 				if ((parsed as { type?: unknown }).type !== "subagent.control") return;
 				const record = parsed as { event?: ControlEvent; channels?: string[]; childIntercomTarget?: string; noticeText?: string; intercom?: { to?: string; message?: string } };
 				if (!record.event || !Array.isArray(record.channels)) return;
+				recordToolStallTelemetry(pi.appendEntry.bind(pi), record.event);
 				const payload = {
 					event: record.event,
 					source: "async" as const,

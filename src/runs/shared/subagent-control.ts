@@ -11,12 +11,65 @@ const CONTROL_EVENT_TYPES: ControlEventType[] = ["active_long_running", "needs_a
 const CONTROL_NOTIFICATION_CHANNELS: ControlNotificationChannel[] = ["event", "async", "intercom"];
 const DEFAULT_NOTIFY_ON: ControlEventType[] = ["active_long_running", "needs_attention"];
 
+// Three-day paired-call measurement: bash p99=87.8s (n=262,978), subagent p99=122.0s (n=50,005),
+// jobs p99=284.8s (n=51,470), subagent_wait p99=256.7s (n=9,847). Soft means "slow but alive"; hard means "probably wedged".
+// jobs/subagent_wait use progress-silence (output/status activity), since they intentionally wait for minutes.
+// Other tool names use global p99=130.7s (n=588,956); event telemetry records this fallback.
+export const TOOL_DURATION_BASELINES = {
+	bash: { p99Ms: 87_800, n: 262_978, proxy: false },
+	subagent: { p99Ms: 122_000, n: 50_005, proxy: false },
+	jobs: { p99Ms: 284_800, n: 51_470, proxy: false },
+	subagent_wait: { p99Ms: 256_700, n: 9_847, proxy: false },
+	other: { p99Ms: 130_700, n: 588_956, proxy: true },
+} as const;
+const SOFT_TOOL_DURATION_MULTIPLE = 2;
+const HARD_TOOL_DURATION_MULTIPLE = 4;
+
+export function toolDurationThresholds(toolName: string, fallbackHardMs = 0): { softMs: number; hardMs: number; p99Ms: number; kind: string; baselineN: number; proxy: boolean; progressBased: boolean } {
+	const kind = toolName === "bash" || toolName === "bash_bg" ? "bash" : toolName === "subagent" ? "subagent" : toolName === "subagent_wait" ? "subagent_wait" : toolName === "jobs" ? "jobs" : "other";
+	const baseline = TOOL_DURATION_BASELINES[kind];
+	const progressBased = kind === "jobs" || kind === "subagent_wait";
+	const softMultiple = progressBased ? 1 : SOFT_TOOL_DURATION_MULTIPLE;
+	const hardMultiple = progressBased ? 2 : HARD_TOOL_DURATION_MULTIPLE;
+	const hardMs = kind === "other" && fallbackHardMs > 0 ? fallbackHardMs : baseline.p99Ms * hardMultiple;
+	return { softMs: baseline.p99Ms * softMultiple, hardMs, p99Ms: baseline.p99Ms, kind, baselineN: baseline.n, proxy: baseline.proxy, progressBased };
+}
+
+export function recordToolStallTelemetry(
+	appendEntry: (customType: string, data?: unknown) => void,
+	event: ControlEvent,
+): void {
+	if (event.reason !== "tool_slow" && event.reason !== "tool_wedged") return;
+	const baseline = toolDurationThresholds(event.currentTool ?? "unknown");
+	try {
+		appendEntry("subagent_tool_stall_telemetry", {
+			version: 1,
+			event: event.reason === "tool_slow" ? "long_running_alive" : "probably_wedged",
+			runId: event.runId,
+			tool: event.currentTool,
+			kind: baseline.kind,
+			count: 1,
+			proxy: baseline.proxy,
+			baselineN: baseline.baselineN,
+			p99Ms: baseline.p99Ms,
+		});
+	} catch {
+		// Telemetry must never interfere with control notices.
+	}
+}
+
+export function toolDurationTier(toolName: string, elapsedMs: number, fallbackHardMs = 0): "long_running" | "probably_wedged" | undefined {
+	const thresholds = toolDurationThresholds(toolName, fallbackHardMs);
+	if (elapsedMs > thresholds.hardMs) return "probably_wedged";
+	if (elapsedMs > thresholds.softMs) return "long_running";
+	return undefined;
+}
+
 export const DEFAULT_CONTROL_CONFIG: ResolvedControlConfig = {
 	enabled: true,
 	needsAttentionAfterMs: 60_000,
-	// 3-day corpus (628 files, 284k paired calls): p95 25.7s, p99 81.4s, max 1693.8s; 60s flags 1.43% (4061) healthy calls.
-	// 30m is 1.06x observed max; 10m is 7.4x p99 but falls below observed max. Chose the longer bound to avoid known healthy-call false stalls; hung detection is slower.
-	toolInFlightGraceMs: 1_800_000,
+	// Legacy override/fallback for tool names without a measured kind-specific baseline.
+	toolInFlightGraceMs: TOOL_DURATION_BASELINES.other.p99Ms * HARD_TOOL_DURATION_MULTIPLE,
 	activeNoticeAfterMs: 240_000,
 	failedToolAttemptsBeforeAttention: 3,
 	notifyOn: DEFAULT_NOTIFY_ON,
@@ -88,8 +141,12 @@ export function deriveActivityState(input: {
 	if (!input.config.enabled) return undefined;
 	const now = input.now ?? Date.now();
 	if (input.currentTool) {
-		const inFlightMs = Math.max(0, now - (input.currentToolStartedAt ?? input.lastActivityAt ?? input.startedAt));
-		return inFlightMs > input.config.toolInFlightGraceMs ? "needs_attention" : "active_long_running";
+		const thresholds = toolDurationThresholds(input.currentTool, input.config.toolInFlightGraceMs);
+		const baselineAt = thresholds.progressBased
+			? (input.lastActivityAt ?? input.currentToolStartedAt ?? input.startedAt)
+			: (input.currentToolStartedAt ?? input.lastActivityAt ?? input.startedAt);
+		const inFlightMs = Math.max(0, now - baselineAt);
+		return inFlightMs > thresholds.hardMs ? "needs_attention" : "active_long_running";
 	}
 	const lastActivity = input.lastActivityAt ?? input.startedAt;
 	const ageMs = Math.max(0, now - lastActivity);
@@ -192,7 +249,7 @@ export function formatControlNoticeMessage(event: ControlEvent, childIntercomTar
 	if (event.type === "active_long_running") {
 		const facts = formatLongRunningFacts(event);
 		return [
-			`Subagent active but long-running: ${event.agent}`,
+			`${event.reason === "tool_slow" ? "Tool slow but still active" : "Subagent active but long-running"}: ${event.agent}`,
 			`Run: ${runTarget}${event.index !== undefined ? ` step ${event.index + 1}` : ""}`,
 			`Signal: ${event.message}`,
 			facts ? `Facts: ${facts}` : undefined,
@@ -206,7 +263,7 @@ export function formatControlNoticeMessage(event: ControlEvent, childIntercomTar
 	}
 
 	return [
-		`Subagent needs attention: ${event.agent}`,
+		`${event.reason === "tool_wedged" ? "Tool probably wedged" : "Subagent needs attention"}: ${event.agent}`,
 		`Run: ${runTarget}${event.index !== undefined ? ` step ${event.index + 1}` : ""}`,
 		`Signal: ${event.message}`,
 		event.recentFailureSummary ? `Recent failures: ${event.recentFailureSummary}` : undefined,
@@ -222,17 +279,25 @@ export function formatControlNoticeMessage(event: ControlEvent, childIntercomTar
 export function formatControlIntercomMessage(event: ControlEvent, childIntercomTarget?: string): string {
 	const statusLabel = event.reason === "completion_guard"
 		? "subagent failed"
-		: event.type === "active_long_running"
-			? "subagent active but long-running"
-			: "subagent needs attention";
+		: event.reason === "tool_slow"
+			? "tool slow but still active"
+			: event.reason === "tool_wedged"
+				? "tool probably wedged"
+				: event.type === "active_long_running"
+					? "subagent active but long-running"
+					: "subagent needs attention";
 	return [
 		statusLabel,
 		"",
 		event.reason === "completion_guard"
 			? `${event.agent} failed in run ${event.runId}.`
-			: event.type === "active_long_running"
-				? `${event.agent} is still active but long-running in run ${event.runId}.`
-				: `${event.agent} needs attention in run ${event.runId}.`,
+			: event.reason === "tool_slow"
+				? `${event.agent} has a slow but still-active tool call in run ${event.runId}.`
+				: event.reason === "tool_wedged"
+					? `${event.agent} has a tool call that is probably wedged in run ${event.runId}.`
+					: event.type === "active_long_running"
+						? `${event.agent} is still active but long-running in run ${event.runId}.`
+						: `${event.agent} needs attention in run ${event.runId}.`,
 		"",
 		formatControlNoticeMessage(event, childIntercomTarget),
 	].join("\n");

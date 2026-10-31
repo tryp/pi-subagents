@@ -45,6 +45,7 @@ import { registerStepResultEvents } from "../runs/background/step-result-events.
 import { resolveAsyncByDefault } from "../runs/background/async-default-config.ts";
 import { registerWaitTool } from "../runs/background/wait-tool.ts";
 import { resolveSupervisorCheckpointMs } from "../runs/shared/sync-wake.ts";
+import { recordToolStallTelemetry } from "../runs/shared/subagent-control.ts";
 import { drainOutstandingWork } from "../runs/background/auto-drain.ts";
 import { registerBackgroundWorkProvider } from "../api/background-work.ts";
 import { createSubagentBackgroundWorkProvider } from "../runs/background/background-work-provider.ts";
@@ -535,6 +536,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	const visibleControlNotices = existingVisibleControlNotices instanceof Set ? existingVisibleControlNotices as Set<string> : new Set<string>();
 	globalStore[controlNoticeSeenStoreKey] = visibleControlNotices;
 	const controlEventHandler = (payload: unknown) => {
+		const details = payload as SubagentControlMessageDetails;
+		if (details.source !== "async") recordToolStallTelemetry(pi.appendEntry.bind(pi), details.event);
 		handleSubagentControlNotice({
 			pi,
 			state,

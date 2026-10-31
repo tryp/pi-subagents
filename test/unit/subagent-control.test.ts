@@ -5,6 +5,9 @@ import {
 	claimControlNotification,
 	controlNotificationKey,
 	deriveActivityState,
+	toolDurationThresholds,
+	toolDurationTier,
+	recordToolStallTelemetry,
 	formatControlIntercomMessage,
 	formatControlNoticeMessage,
 	resolveControlConfig,
@@ -17,12 +20,54 @@ const config = resolveControlConfig(undefined, {
 });
 
 describe("subagent control attention state", () => {
+	it("fires the slow-but-alive tier just over, but not at, its bound", () => {
+		for (const tool of ["bash", "subagent"]) {
+			const { softMs } = toolDurationThresholds(tool);
+			assert.equal(toolDurationTier(tool, softMs), undefined, `${tool} at soft bound`);
+			assert.equal(toolDurationTier(tool, softMs + 1), "long_running", `${tool} over soft bound`);
+		}
+	});
+
+	it("fires the probably-wedged tier just over, but not at, its bound", () => {
+		for (const tool of ["bash", "subagent"]) {
+			const { hardMs } = toolDurationThresholds(tool);
+			assert.equal(toolDurationTier(tool, hardMs), "long_running", `${tool} at hard bound (soft tier only)`);
+			assert.equal(toolDurationTier(tool, hardMs + 1), "probably_wedged", `${tool} over hard bound`);
+		}
+	});
+
+	it("persists distinct soft and hard counters with proxy sample metadata", () => {
+		const records: Array<{ type: string; data: Record<string, unknown> }> = [];
+		const appendEntry = (type: string, data?: unknown) => records.push({ type, data: data as Record<string, unknown> });
+		const soft = buildControlEvent({ type: "active_long_running", to: "active_long_running", runId: "run-1", agent: "worker", currentTool: "unmeasured_tool", reason: "tool_slow" });
+		const hard = buildControlEvent({ to: "needs_attention", runId: "run-1", agent: "worker", currentTool: "unmeasured_tool", reason: "tool_wedged" });
+		recordToolStallTelemetry(appendEntry, soft);
+		recordToolStallTelemetry(appendEntry, hard);
+		assert.deepEqual(records.map(({ data }) => data.event), ["long_running_alive", "probably_wedged"]);
+		assert.equal(records[0]?.type, "subagent_tool_stall_telemetry");
+		assert.equal(records[0]?.data.proxy, true);
+		assert.equal(records[0]?.data.baselineN, 588_956);
+	});
+
+	it("uses measured per-kind bounds and marks the global proxy", () => {
+		assert.deepEqual(toolDurationThresholds("bash"), { softMs: 175_600, hardMs: 351_200, p99Ms: 87_800, kind: "bash", baselineN: 262_978, proxy: false, progressBased: false });
+		assert.deepEqual(toolDurationThresholds("subagent"), { softMs: 244_000, hardMs: 488_000, p99Ms: 122_000, kind: "subagent", baselineN: 50_005, proxy: false, progressBased: false });
+		assert.deepEqual(toolDurationThresholds("jobs"), { softMs: 284_800, hardMs: 569_600, p99Ms: 284_800, kind: "jobs", baselineN: 51_470, proxy: false, progressBased: true });
+		assert.deepEqual(toolDurationThresholds("subagent_wait"), { softMs: 256_700, hardMs: 513_400, p99Ms: 256_700, kind: "subagent_wait", baselineN: 9_847, proxy: false, progressBased: true });
+		assert.equal(toolDurationThresholds("unmeasured_tool").proxy, true);
+	});
+	it("uses progress silence, not total duration, for intentional long subagent waits", () => {
+		assert.equal(deriveActivityState({ config, startedAt: 0, lastActivityAt: 500_000, currentTool: "subagent_wait", currentToolStartedAt: 0, now: 600_000 }), "active_long_running");
+		assert.equal(deriveActivityState({ config, startedAt: 0, lastActivityAt: 0, currentTool: "subagent_wait", currentToolStartedAt: 0, now: 513_400 }), "active_long_running");
+		assert.equal(deriveActivityState({ config, startedAt: 0, lastActivityAt: 0, currentTool: "subagent_wait", currentToolStartedAt: 0, now: 513_401 }), "needs_attention");
+	});
+
 	it("marks a run as needing attention only after the idle threshold", () => {
 		assert.equal(deriveActivityState({ config, startedAt: 0, lastActivityAt: 0, now: 50 }), undefined);
 		assert.equal(deriveActivityState({ config, startedAt: 0, lastActivityAt: 0, now: 400 }), "needs_attention");
 		assert.equal(deriveActivityState({ config, startedAt: 0, lastActivityAt: 0, currentTool: "bash", currentToolStartedAt: 0, now: 400 }), "active_long_running");
-		assert.equal(deriveActivityState({ config, startedAt: 0, lastActivityAt: 0, currentTool: "bash", currentToolStartedAt: 0, now: 1_800_000 }), "active_long_running");
-		assert.equal(deriveActivityState({ config, startedAt: 0, lastActivityAt: 0, currentTool: "bash", currentToolStartedAt: 0, now: 1_800_001 }), "needs_attention");
+		assert.equal(deriveActivityState({ config, startedAt: 0, lastActivityAt: 0, currentTool: "bash", currentToolStartedAt: 0, now: 351_200 }), "active_long_running");
+		assert.equal(deriveActivityState({ config, startedAt: 0, lastActivityAt: 0, currentTool: "bash", currentToolStartedAt: 0, now: 351_201 }), "needs_attention");
 		assert.equal(deriveActivityState({ config, startedAt: 0, now: 400 }), "needs_attention");
 	});
 
@@ -78,7 +123,7 @@ describe("subagent control attention state", () => {
 		assert.equal(shouldNotifyControlEvent(config, event), true);
 		assert.equal(shouldNotifyControlEvent(config, activeEvent), true);
 		assert.deepEqual(config.notifyOn, ["active_long_running", "needs_attention"]);
-		assert.equal(config.toolInFlightGraceMs, 1_800_000);
+		assert.equal(config.toolInFlightGraceMs, 522_800);
 		assert.deepEqual(config.notifyChannels, ["event", "async", "intercom"]);
 	});
 
