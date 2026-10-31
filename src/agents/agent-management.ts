@@ -709,6 +709,53 @@ function formatModelSource(agent: AgentConfig, currentModel: ParentModel | undef
 	return "inherit requested, but no current session model is available";
 }
 
+/**
+ * What the registry can actually tell us about a model's credentials.
+ *
+ * `available` - the model is in the registry's available list.
+ * `configured-unlisted` - the provider has credentials but the model is not in
+ *   the available list, so the list missed it (provider unreachable, request
+ *   failed, or a stale listing snapshot). This is NOT "no credentials".
+ * `not-configured` - a positive auth probe says there is no credential source.
+ * `unknown` - the registry offers no auth probe, or the probe threw.
+ */
+type CredentialState = "available" | "configured-unlisted" | "not-configured" | "unknown";
+
+const CREDENTIAL_LABELS: Record<CredentialState, string> = {
+	available: "credentials ok",
+	"configured-unlisted": "configured, not listed",
+	"not-configured": "no credentials",
+	unknown: "credentials unknown",
+};
+
+/**
+ * Absence from `getAvailable()` is not evidence that credentials are missing.
+ * Only a positive auth probe may claim "no credentials"; anything else must say
+ * what it actually knows, so an outage does not get reported as a missing login.
+ */
+function credentialStateFor(
+	registry: ManagementContext["modelRegistry"],
+	model: unknown,
+	listedModelIds: ReadonlySet<string>,
+	fullId: string,
+): CredentialState {
+	if (listedModelIds.has(fullId)) return "available";
+	const probe = registry.hasConfiguredAuth;
+	if (typeof probe !== "function") return "unknown";
+	try {
+		return probe.call(registry, model as Parameters<typeof probe>[0]) ? "configured-unlisted" : "not-configured";
+	} catch {
+		return "unknown";
+	}
+}
+
+function providerCredentialLabel(states: CredentialState[]): string {
+	if (states.every((state) => state === "available")) return "credentials ok";
+	if (states.every((state) => state === "not-configured")) return "no credentials";
+	if (states.some((state) => state === "configured-unlisted" || state === "unknown")) return "credentials unverified";
+	return "mixed credentials";
+}
+
 function handleModels(params: ManagementParams, ctx: ManagementContext): AgentToolResult<Details> {
 	const requestedAgent = params.agent?.trim();
 	if (requestedAgent && !(BUILTIN_AGENT_NAMES as readonly string[]).includes(requestedAgent)) {
@@ -717,9 +764,19 @@ function handleModels(params: ManagementParams, ctx: ManagementContext): AgentTo
 
 	const discovered = discoverAgentsAll(ctx.cwd);
 	const builtinByName = new Map(discovered.builtin.map((agent) => [agent.name, agent]));
-	const availableModels = ctx.modelRegistry.getAvailable().map(toModelInfo);
-	const allModels = (ctx.modelRegistry.getAll?.() ?? ctx.modelRegistry.getAvailable()).map(toModelInfo);
-	const credentialedModelIds = new Set(availableModels.map((model) => model.fullId));
+	const availableRaw = ctx.modelRegistry.getAvailable();
+	const availableModels = availableRaw.map(toModelInfo);
+	const allRaw = ctx.modelRegistry.getAll?.() ?? availableRaw;
+	const allModels = allRaw.map(toModelInfo);
+	const listedModelIds = new Set(availableModels.map((model) => model.fullId));
+	const rawByFullId = new Map(allRaw.map((model) => [`${model.provider}/${model.id}`, model]));
+	for (const scoped of ctx.scopedModels ?? []) {
+		rawByFullId.set(`${scoped.model.provider}/${scoped.model.id}`, scoped.model);
+	}
+	const credentialState = (model: { provider: string; id: string; fullId: string }): CredentialState =>
+		credentialStateFor(ctx.modelRegistry, rawByFullId.get(model.fullId) ?? model, listedModelIds, model.fullId);
+	const credentialLabel = (model: { provider: string; id: string; fullId: string }): string =>
+		CREDENTIAL_LABELS[credentialState(model)];
 	const currentModel = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
 	const preferredProvider = ctx.model?.provider;
 
@@ -748,15 +805,15 @@ function handleModels(params: ManagementParams, ctx: ManagementContext): AgentTo
 			if (candidates.length > 0) {
 				lines.push("Model resolution:");
 				for (const candidate of candidates) {
-					lines.push(`  tried ${candidate.provider} (${credentialedModelIds.has(candidate.fullId) ? "credentials ok" : "no credentials"})`);
+					lines.push(`  tried ${candidate.provider} (${credentialLabel(candidate)})`);
 				}
-				const chosen = candidates.find((candidate) => candidate.fullId === resolvedModel && credentialedModelIds.has(candidate.fullId));
+				const chosen = candidates.find((candidate) => candidate.fullId === resolvedModel && credentialState(candidate) === "available");
 				lines.push(`  chosen: ${chosen?.fullId ?? "(none)"}`);
 				if (!chosen) {
-					const candidateStates = candidates.map((candidate) => `${candidate.provider} (${credentialedModelIds.has(candidate.fullId) ? "credentials ok" : "no credentials"})`).join(", ");
-					lines.push(`  error: no credentialed candidate; tried ${candidateStates}`);
+					const candidateStates = candidates.map((candidate) => `${candidate.provider} (${credentialLabel(candidate)})`).join(", ");
+					lines.push(`  error: no candidate is both configured and listed; tried ${candidateStates}`);
 				}
-				lines.push(`  why: ${chosen ? (candidates.length > 1 ? "selected a credentialed matching candidate" : "only matching provider") : "no matching provider has credentials"}`);
+				lines.push(`  why: ${chosen ? (candidates.length > 1 ? "selected a matching candidate with credentials" : "only matching provider") : "no matching provider is both configured and listed"}`);
 			}
 		}
 		if (agent.disabled) lines.push("Disabled: true");
@@ -776,7 +833,7 @@ function handleModels(params: ManagementParams, ctx: ManagementContext): AgentTo
 	const visibleBareNames = new Set(visibleModels.map((model) => model.id));
 	const listedModels = new Map<string, (typeof allModels)[number]>();
 	for (const model of visibleModels) listedModels.set(model.fullId, model);
-	// Include uncredentialed providers only when they are candidates for a visible bare id.
+	// Include unlisted providers only when they are candidates for a visible bare id.
 	for (const model of allModels) {
 		if (visibleBareNames.has(model.id)) listedModels.set(model.fullId, model);
 	}
@@ -787,11 +844,9 @@ function handleModels(params: ManagementParams, ctx: ManagementContext): AgentTo
 		byProvider.set(model.provider, models);
 	}
 	for (const [provider, models] of [...byProvider.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-		const credentialedCount = models.filter((model) => credentialedModelIds.has(model.fullId)).length;
-		const providerState = credentialedCount === 0 ? "no credentials" : credentialedCount === models.length ? "credentials ok" : "mixed credentials";
-		lines.push(`${provider} (${providerState})`);
+		lines.push(`${provider} (${providerCredentialLabel(models.map(credentialState))})`);
 		for (const model of models.sort((a, b) => a.id.localeCompare(b.id))) {
-			lines.push(`  ${model.id} (${credentialedModelIds.has(model.fullId) ? "credentials ok" : "no credentials"})`);
+			lines.push(`  ${model.id} (${credentialLabel(model)})`);
 		}
 		lines.push("");
 	}

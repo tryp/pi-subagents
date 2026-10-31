@@ -675,6 +675,7 @@ Drive the failing test first.
 					{ provider: "openai-codex", id: "gpt-6-luna" },
 					{ provider: "amazon-bedrock", id: "gpt-6-luna" },
 				],
+				hasConfiguredAuth: (model: { provider: string }) => model.provider === "openai-codex",
 			},
 			model: { provider: "ollama-cloud", id: "deepseek-v4.1-flash:1017" },
 		};
@@ -702,13 +703,14 @@ Drive the failing test first.
 					{ provider: "openai-codex", id: "gpt-6-luna" },
 					{ provider: "amazon-bedrock", id: "gpt-6-luna" },
 				],
+				hasConfiguredAuth: (model: { provider: string }) => model.provider === "openai-codex",
 			},
 		};
 		const text = readText(handleManagementAction("models", { agent: "reviewer" }, ctx));
 		assert.match(text, /tried amazon-bedrock \(no credentials\)/);
 		assert.match(text, /tried openai-codex \(credentials ok\)/);
 		assert.match(text, /chosen: openai-codex\/gpt-6-luna/);
-		assert.match(text, /why: selected a credentialed matching candidate/);
+		assert.match(text, /why: selected a matching candidate with credentials/);
 	});
 
 	it("reports every bare-name candidate when no provider is credentialed", () => {
@@ -724,24 +726,63 @@ Drive the failing test first.
 					{ provider: "openai-codex", id: "gpt-6-luna" },
 					{ provider: "amazon-bedrock", id: "gpt-6-luna" },
 				],
+				hasConfiguredAuth: () => false,
 			},
 		};
 		const text = readText(handleManagementAction("models", { agent: "reviewer" }, ctx));
 		assert.match(text, /tried amazon-bedrock \(no credentials\)/);
 		assert.match(text, /tried openai-codex \(no credentials\)/);
 		assert.match(text, /chosen: \(none\)/);
-		assert.match(text, /error: no credentialed candidate; tried amazon-bedrock \(no credentials\), openai-codex \(no credentials\)/);
-		assert.match(text, /why: no matching provider has credentials/);
+		assert.match(text, /error: no candidate is both configured and listed; tried amazon-bedrock \(no credentials\), openai-codex \(no credentials\)/);
+		assert.match(text, /why: no matching provider is both configured and listed/);
 	});
 
-	it("marks scoped models absent from getAvailable as uncredentialed", () => {
+	it("does not report a configured provider absent from getAvailable as uncredentialed", () => {
+		// An unreachable provider, a failed listing request, or a stale availability
+		// snapshot all drop the model from getAvailable(). Reporting that as
+		// "no credentials" sends the user to re-login for an outage.
+		const ctx = {
+			cwd: tempDir,
+			modelRegistry: { getAvailable: () => [], hasConfiguredAuth: () => true },
+			scopedModels: [{ model: { provider: "openai-codex", id: "gpt-6-luna" } }],
+		};
+		const text = readText(handleManagementAction("models", {}, ctx));
+		assert.match(text, /openai-codex \(credentials unverified\)\n  gpt-6-luna \(configured, not listed\)/);
+		assert.doesNotMatch(text, /no credentials/);
+	});
+
+	it("reports a provider with no auth source as uncredentialed only on a negative probe", () => {
+		const ctx = {
+			cwd: tempDir,
+			modelRegistry: { getAvailable: () => [], hasConfiguredAuth: () => false },
+			scopedModels: [{ model: { provider: "openai-codex", id: "gpt-6-luna" } }],
+		};
+		const text = readText(handleManagementAction("models", {}, ctx));
+		assert.match(text, /openai-codex \(no credentials\)\n  gpt-6-luna \(no credentials\)/);
+	});
+
+	it("reports a throwing auth probe as unknown rather than uncredentialed", () => {
+		const ctx = {
+			cwd: tempDir,
+			modelRegistry: {
+				getAvailable: () => [],
+				hasConfiguredAuth: () => { throw new Error("credential store unavailable"); },
+			},
+			scopedModels: [{ model: { provider: "openai-codex", id: "gpt-6-luna" } }],
+		};
+		const text = readText(handleManagementAction("models", {}, ctx));
+		assert.match(text, /openai-codex \(credentials unverified\)\n  gpt-6-luna \(credentials unknown\)/);
+		assert.doesNotMatch(text, /no credentials/);
+	});
+
+	it("reports unknown credentials when the registry offers no auth probe", () => {
 		const ctx = {
 			cwd: tempDir,
 			modelRegistry: { getAvailable: () => [] },
 			scopedModels: [{ model: { provider: "openai-codex", id: "gpt-6-luna" } }],
 		};
 		const text = readText(handleManagementAction("models", {}, ctx));
-		assert.match(text, /openai-codex \(no credentials\)\n  gpt-6-luna \(no credentials\)/);
+		assert.match(text, /openai-codex \(credentials unverified\)\n  gpt-6-luna \(credentials unknown\)/);
 	});
 
 	it("reports override source and disabled builtin state in runtime model mappings", () => {
