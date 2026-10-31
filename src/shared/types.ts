@@ -207,6 +207,7 @@ export interface CompletionBatchConfig {
 
 export interface WaitToolConfigObject {
 	enabled?: boolean;
+	yieldOnUserInput?: boolean;
 }
 
 export type WaitToolConfig = boolean | WaitToolConfigObject;
@@ -463,7 +464,7 @@ export interface SupervisorCheckpoint {
 			currentTool?: string;
 		}>;
 	};
-	reason: "supervisor_checkpoint";
+	reason: "supervisor_checkpoint" | "user_submitted";
 	suggestedActions: {
 		/** Absent when no single run id could be named. */
 		status?: { tool: "subagent"; action: "status"; runId: string };
@@ -1076,6 +1077,8 @@ export interface ForegroundResumeRun {
 }
 
 export interface SubagentState {
+	/** Monotonic epoch incremented synchronously when the user submits input. */
+	userInputEpoch: number;
 	baseCwd: string;
 	currentSessionId: string | null;
 	subagentInProgress?: boolean;

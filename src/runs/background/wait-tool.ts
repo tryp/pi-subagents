@@ -3,7 +3,7 @@ import { SubagentWaitParams } from "../../extension/schemas.ts";
 import type { Details, SubagentState } from "../../shared/types.ts";
 import { resolveWaitToolConfig, waitForSubagents } from "./subagent-wait.ts";
 
-export function registerWaitTool(pi: ExtensionAPI, state: SubagentState, enabled = resolveWaitToolConfig().enabled, checkpointMs?: number): void {
+export function registerWaitTool(pi: ExtensionAPI, state: SubagentState, enabled = resolveWaitToolConfig().enabled, checkpointMs?: number, yieldOnUserInput = resolveWaitToolConfig().yieldOnUserInput): void {
 	const checkpointDescription = checkpointMs === undefined
 		? ""
 		: ` In an interactive session a blocking wait returns a non-error supervisor checkpoint after config.syncWakeMs (default 4 minutes; set to 0 to disable), with any published child results and handles to continue, while the work keeps running; single-shot runs have no later turn to land in, so they block until the work is terminal or the timeout elapses. This is the same budget and the same 0-means-off switch that foreground sync wakes use.`;
@@ -18,6 +18,7 @@ export function registerWaitTool(pi: ExtensionAPI, state: SubagentState, enabled
 				events: pi.events,
 				enabled,
 				checkpointMs: interactiveCheckpointMs(checkpointMs, ctx),
+				yieldOnUserInput: ctx?.hasUI === true && yieldOnUserInput,
 			});
 		},
 	};

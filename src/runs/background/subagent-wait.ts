@@ -140,6 +140,8 @@ export interface SubagentWaitDeps {
 	enabled?: boolean;
 	/** Interactive supervisor checkpoint budget; omitted for headless auto-drain. */
 	checkpointMs?: number;
+	/** Yield an interactive wait when the user submits input; defaults on. */
+	yieldOnUserInput?: boolean;
 	/** Injectable sleep for tests. */
 	sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 	/** Internal auto-drain mode waits through needs-attention states. */
@@ -689,6 +691,7 @@ async function waitForDetachedForegroundRun(
 	pollIntervalMs: number,
 	timeoutMs: number,
 	checkpointMs?: number,
+	initialUserInputEpoch = deps.state.userInputEpoch ?? 0,
 ): Promise<AgentToolResult<Details>> {
 	const initialDetachedIndices = new Set(run.children.filter((child) => child.status === "detached").map((child) => child.index));
 	while (true) {
@@ -721,6 +724,18 @@ async function waitForDetachedForegroundRun(
 			return result(
 				capWaitMessage(`Wait timed out after ${formatDuration(timeoutMs)} with remembered foreground run "${runIdText}" still detached.${progress} ${guidance} Do not resume or launch a replacement while it remains detached.`),
 				true,
+			);
+		}
+		if (deps.yieldOnUserInput !== false && (deps.state.userInputEpoch ?? 0) > initialUserInputEpoch) {
+			const children = current.children
+				.filter((child) => initialDetachedIndices.has(child.index) && child.status === "detached")
+				.map((child) => ({ agent: child.agent, index: child.index, status: "detached" as const }));
+			const runIdText = oneLine(run.runId, 80);
+			const checkpoint = { ...checkpointActions(run.runId, elapsedMs, children), reason: "user_submitted" as const };
+			return resultWithSupervisorCheckpoint(
+				capWaitMessage(`The wait ended because the user submitted input. The work continues in the background; 1 run is still active. Resume with subagent_wait({ runId: "${runIdText}", barrier: "consume-result" }) or check status with subagent({ action: "status", runId: "${runIdText}" }).`),
+				[],
+				checkpoint,
 			);
 		}
 		if (checkpointMs !== undefined && checkpointMs > 0 && elapsedMs >= checkpointMs) {
@@ -778,6 +793,7 @@ export async function waitForSubagents(
 	const pollIntervalMs = Math.max(MIN_POLL_INTERVAL_MS, deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS);
 	const timeoutMs = params.timeoutMs !== undefined && params.timeoutMs > 0 ? params.timeoutMs : DEFAULT_TIMEOUT_MS;
 	const startedAt = now();
+	const initialUserInputEpoch = deps.state.userInputEpoch ?? 0;
 	const waitForAll = params.all === true || untilMode === "all-terminal";
 
 	let active: AsyncRunSummary[];
@@ -809,7 +825,7 @@ export async function waitForSubagents(
 		}
 		const selected = matches[0];
 		if (selected?.kind === "foreground") {
-			return waitForDetachedForegroundRun(selected.run, signal, deps, startedAt, now, pollIntervalMs, timeoutMs, deps.checkpointMs);
+			return waitForDetachedForegroundRun(selected.run, signal, deps, startedAt, now, pollIntervalMs, timeoutMs, deps.checkpointMs, initialUserInputEpoch);
 		}
 		active = selected?.kind === "async" ? [selected.run] : [];
 		if (!selected) {
@@ -952,6 +968,24 @@ export async function waitForSubagents(
 			const progress = await formatRunProgressBlock(activeInitialRuns, checkpointDeltas, elapsedMs, now(), progressBudget);
 			retainActiveRuns(checkpointDeltas, deps);
 			return resultWithStepResults(capWaitMessage(`${head}${progress}${tail}`), views, true);
+		}
+		if (deps.yieldOnUserInput !== false && (deps.state.userInputEpoch ?? 0) > initialUserInputEpoch) {
+			retainActiveRuns(checkpointDeltas, deps);
+			const runIdForActions = runId ?? (activeInitialRuns.length === 1 ? activeInitialRuns[0].id : undefined);
+			const activeChildren: SupervisorCheckpoint["activeChildSummary"]["children"] = activeInitialRuns.flatMap((run) => {
+				const steps = run.steps.filter((step) => step.status === "running" || step.status === "pending");
+				return steps.length > 0
+					? steps.map((step) => ({ agent: step.agent, index: step.index, status: "running" as const, ...(step.currentTool ? { currentTool: step.currentTool } : {}) }))
+					: [{ index: 0, status: "running" as const }];
+			});
+			const checkpoint = { ...checkpointActions(runIdForActions, elapsedMs, activeChildren), reason: "user_submitted" as const };
+			const views = resultsForTerminalReturn(earlyResults);
+			const handles = runIdForActions === undefined
+				? `Resume with subagent_wait({ barrier: "consume-result" }) or check status with subagent({ action: "status" }).`
+				: `Resume with subagent_wait({ runId: "${runIdForActions}", barrier: "consume-result" }) or check with subagent({ action: "status", runId: "${runIdForActions}" }).`;
+			const head = `The wait ended because the user submitted input. The work continues in the background; ${active.length} run(s) are still active.`;
+			const text = capWaitMessage(`${head} ${handles}${formatStepResultViews(views, "\n")}`);
+			return resultWithSupervisorCheckpoint(text, views, checkpoint);
 		}
 		if (deps.checkpointMs !== undefined && deps.checkpointMs > 0 && elapsedMs >= deps.checkpointMs) {
 			retainActiveRuns(checkpointDeltas, deps);

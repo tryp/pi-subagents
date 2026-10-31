@@ -229,6 +229,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	cleanupAllArtifactDirs(DEFAULT_ARTIFACT_CONFIG.cleanupDays);
 
 	const state: SubagentState = {
+		userInputEpoch: 0,
 		baseCwd: "",
 		currentSessionId: null,
 		subagentInProgress: false,
@@ -492,7 +493,12 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		"Discover models via subagent({action: \"list\"}) or subagent({action: \"models\"}).",
 	]);
 
-	registerWaitTool(pi, state, waitToolConfig.enabled, resolveSupervisorCheckpointMs(config));
+	registerWaitTool(pi, state, waitToolConfig.enabled, resolveSupervisorCheckpointMs(config), waitToolConfig.yieldOnUserInput);
+
+	pi.on("input", () => {
+		state.userInputEpoch++;
+		return { action: "continue" };
+	});
 
 	pi.on("agent_end", async (_event, ctx) => {
 		if (ctx.hasUI) return;

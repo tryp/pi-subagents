@@ -31,6 +31,7 @@ function writeStatus(asyncRoot: string, runId: string, state: string, extra: obj
 function makeState(sessionId: string | null): SubagentState {
 	return {
 		baseCwd: "",
+		userInputEpoch: 0,
 		currentSessionId: sessionId,
 		asyncJobs: new Map(),
 		foregroundControls: new Map(),
@@ -95,11 +96,13 @@ function baseDeps(root: string, state: SubagentState, overrides: Partial<Subagen
 
 describe("subagent_wait tool", () => {
 	it("resolves waitTool config and environment overrides strictly", () => {
-		assert.deepEqual(resolveWaitToolConfig(undefined, {}), { enabled: true });
-		assert.deepEqual(resolveWaitToolConfig(false, {}), { enabled: false });
-		assert.deepEqual(resolveWaitToolConfig({ enabled: false }, {}), { enabled: false });
-		assert.deepEqual(resolveWaitToolConfig({ enabled: false }, { [WAIT_TOOL_ENABLED_ENV]: "true" }), { enabled: true });
-		assert.deepEqual(resolveWaitToolConfig(true, { [WAIT_TOOL_ENABLED_ENV]: "off" }), { enabled: false });
+		assert.deepEqual(resolveWaitToolConfig(undefined, {}), { enabled: true, yieldOnUserInput: true });
+		assert.deepEqual(resolveWaitToolConfig(false, {}), { enabled: false, yieldOnUserInput: true });
+		assert.deepEqual(resolveWaitToolConfig({ enabled: false }, {}), { enabled: false, yieldOnUserInput: true });
+		assert.deepEqual(resolveWaitToolConfig({ yieldOnUserInput: false }, {}), { enabled: true, yieldOnUserInput: false });
+		assert.throws(() => resolveWaitToolConfig({ yieldOnUserInput: "false" } as never, {}), /yieldOnUserInput/);
+		assert.deepEqual(resolveWaitToolConfig({ enabled: false }, { [WAIT_TOOL_ENABLED_ENV]: "true" }), { enabled: true, yieldOnUserInput: true });
+		assert.deepEqual(resolveWaitToolConfig(true, { [WAIT_TOOL_ENABLED_ENV]: "off" }), { enabled: false, yieldOnUserInput: true });
 		assert.throws(() => resolveWaitToolConfig("false" as never, {}), /config\.waitTool/);
 		assert.throws(() => resolveWaitToolConfig({ enabled: "false" } as never, {}), /config\.waitTool\.enabled/);
 		assert.throws(() => resolveWaitToolConfig(undefined, { [WAIT_TOOL_ENABLED_ENV]: "maybe" }), /PI_SUBAGENT_WAIT_TOOL_ENABLED/);
@@ -113,6 +116,53 @@ describe("subagent_wait tool", () => {
 		assert.equal(interactiveCheckpointMs(240_000, { hasUI: false }), undefined);
 		assert.equal(interactiveCheckpointMs(240_000, undefined), undefined);
 		assert.equal(interactiveCheckpointMs(undefined, { hasUI: true }), undefined);
+	});
+
+	it("yields within one poll after user submission without cancelling active children", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-user-input-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			let sleeps = 0;
+			const result = await waitForSubagents({}, undefined, baseDeps(root, state, {
+				yieldOnUserInput: true,
+				sleep: async () => { sleeps++; state.userInputEpoch++; },
+			}));
+			assert.equal(result.details?.supervisorCheckpoint?.reason, "user_submitted");
+			assert.equal(sleeps, 1, "the wait should return on the first poll after submission");
+			assert.match(textOf(result), /ended because the user submitted input/i);
+			assert.match(textOf(result), /work continues in the background/i);
+			assert.match(textOf(result), /1 run\(s\) are still active/i);
+			assert.match(textOf(result), /subagent_wait.*run-a/);
+			assert.match(textOf(result), /subagent.*status.*run-a/);
+			assert.equal(JSON.parse(fs.readFileSync(path.join(asyncRoot, "run-a", "status.json"), "utf8")).state, "running");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not yield on user input in headless mode and waits for terminal state", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-headless-input-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			let sleeps = 0;
+			const result = await waitForSubagents({}, undefined, baseDeps(root, state, {
+				yieldOnUserInput: false,
+				sleep: async () => {
+					sleeps++;
+					state.userInputEpoch++;
+					if (sleeps === 2) writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1" });
+				},
+			}));
+			assert.ok(sleeps >= 2);
+			assert.equal(result.details?.supervisorCheckpoint, undefined);
+			assert.match(textOf(result), /done|complete/i);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("returns immediately without polling when waitTool is disabled", async () => {
