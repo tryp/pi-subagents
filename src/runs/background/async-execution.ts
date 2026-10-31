@@ -20,7 +20,7 @@ import { resolvePiPackageRoot, resolvePrlimitPath } from "../shared/pi-spawn.ts"
 import { buildSkillInjection, normalizeSkillInput, resolveSkillsWithFallback } from "../../agents/skills.ts";
 import { buildAgentMemoryInjection } from "../../agents/agent-memory.ts";
 import { PI_CODING_AGENT_PACKAGE_ROOT_ENV, resolveChildCwd } from "../../shared/utils.ts";
-import { buildModelCandidates, formatModelResolutionReceipt, isDefaultedAgentModel, resolveEffectiveSubagentModelWithSource, resolveModelCandidate, resolveSubagentModelOverride, type AvailableModelInfo, type ParentModel, type SubagentModelSource } from "../shared/model-fallback.ts";
+import { buildModelCandidates, formatModelResolutionReceipt, isDefaultedAgentModel, resolveEffectiveSubagentModelWithSource, resolveModelCandidate, type AvailableModelInfo, type ParentModel, type SubagentModelSource } from "../shared/model-fallback.ts";
 import type { ModelScopeConfig } from "../shared/model-scope.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { resolveExpectedWorktreeAgentCwd } from "../shared/worktree.ts";
