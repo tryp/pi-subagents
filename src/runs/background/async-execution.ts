@@ -123,6 +123,10 @@ interface AsyncExecutionContext {
 interface AsyncChainParams {
 	chain: ChainStep[];
 	task?: string;
+	/** Run-level compatibility flag; `forkedAgents` refines it for mixed chains. */
+	forked?: boolean;
+	/** Agent names that fork; absence preserves the run-level behavior for older/resumed runs. */
+	forkedAgents?: string[];
 	/** Raw caller-facing goal used only by the started event. */
 	goal?: string;
 	attachRoot?: ImportedAsyncRoot & { agent: string; outputName?: string; label?: string };
@@ -231,6 +235,8 @@ export interface AsyncRunnerStepBuildParams {
 	 * session model even when `subagents.defaultModel` filled the gap at discovery.
 	 */
 	forked?: boolean;
+	/** Agent names that fork; absent preserves the run-level behavior for older/resumed runs. */
+	forkedAgents?: string[];
 	attachRoot?: ImportedAsyncRoot & { agent: string; outputName?: string; label?: string };
 	resultMode?: SubagentRunMode;
 	agents: AgentConfig[];
@@ -680,7 +686,9 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			ctx.currentModelProvider,
 			{
 				scope: ctx.modelScope,
-				forked: params.forked === true,
+				// `usesFork` means some agent forks, not all. Resolve each chain step
+				// by name; otherwise a fresh defaulted worker inherits the parent model.
+				forked: params.forked === true && (params.forkedAgents === undefined || params.forkedAgents.includes(s.agent)),
 				agentModelFromDefault: isDefaultedAgentModel(a.modelSource),
 			},
 		);
@@ -909,6 +917,8 @@ export function executeAsyncChain(
 		task: params.task,
 		attachRoot: params.attachRoot,
 		resultMode,
+		forked: params.forked,
+		forkedAgents: params.forkedAgents,
 		agents,
 		ctx,
 		availableModels: params.availableModels,

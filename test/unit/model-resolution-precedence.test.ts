@@ -208,6 +208,71 @@ describe("model resolution receipts", () => {
 		assert.deepEqual(buildModelResolutionReceipts(steps), []);
 	});
 
+	it("resolves mixed async chains per agent instead of using the run-level any-fork flag", () => {
+		const built = buildAsyncRunnerSteps("run-mixed-fork", {
+			chain: [
+				{ agent: "planner", task: "forked planner" },
+				{ agent: "worker", task: "fresh worker" },
+			],
+			agents: [
+				agent("planner", { defaultContext: "fork", model: "openai-codex/gpt-6-luna", modelSource: userDefaultSource }),
+				agent("worker", { defaultContext: "fresh", model: "openai-codex/gpt-6-luna", modelSource: userDefaultSource }),
+			],
+			ctx,
+			forked: true,
+			forkedAgents: ["planner"],
+			asyncDir: path.join(process.cwd(), ".tmp-receipt-mixed-fork-test"),
+			maxSubagentDepth: 2,
+			waitToolEnabled: false,
+		});
+		assert.ok("steps" in built, "expected a successful step build");
+		const steps = flattenSteps(built.steps);
+		assert.equal(steps[0]?.model, parentFullId);
+		assert.equal(steps[0]?.modelResolution?.source, "fork-parent");
+		assert.equal(steps[1]?.model, "openai-codex/gpt-6-luna");
+		assert.equal(steps[1]?.modelResolution?.source, "user-default");
+	});
+
+	it("preserves run-level fork behavior when forkedAgents is absent", () => {
+		const built = buildAsyncRunnerSteps("run-legacy-fork", {
+			chain: [
+				{ agent: "planner", task: "forked planner" },
+				{ agent: "worker", task: "also treated as forked for compatibility" },
+			],
+			agents: [
+				agent("planner", { model: "openai-codex/gpt-6-luna", modelSource: userDefaultSource }),
+				agent("worker", { model: "openai-codex/gpt-6-luna", modelSource: userDefaultSource }),
+			],
+			ctx,
+			forked: true,
+			asyncDir: path.join(process.cwd(), ".tmp-receipt-legacy-fork-test"),
+			maxSubagentDepth: 2,
+			waitToolEnabled: false,
+		});
+		assert.ok("steps" in built, "expected a successful step build");
+		for (const step of flattenSteps(built.steps)) {
+			assert.equal(step.model, parentFullId);
+			assert.equal(step.modelResolution?.source, "fork-parent");
+		}
+	});
+
+	it("requires the run-level fork flag even when a step is listed in forkedAgents", () => {
+		const built = buildAsyncRunnerSteps("run-fork-flag", {
+			chain: [{ agent: "planner", task: "listed but run is fresh" }],
+			agents: [agent("planner", { model: "openai-codex/gpt-6-luna", modelSource: userDefaultSource })],
+			ctx,
+			forked: false,
+			forkedAgents: ["planner"],
+			asyncDir: path.join(process.cwd(), ".tmp-receipt-fork-flag-test"),
+			maxSubagentDepth: 2,
+			waitToolEnabled: false,
+		});
+		assert.ok("steps" in built, "expected a successful step build");
+		const [step] = flattenSteps(built.steps);
+		assert.equal(step?.model, "openai-codex/gpt-6-luna");
+		assert.equal(step?.modelResolution?.source, "user-default");
+	});
+
 	it("records the fork override on the step so status.json and the receipt agree", () => {
 		const built = buildAsyncRunnerSteps("run-fork", {
 			chain: [{ agent: "planner", task: "forked child on a defaulted model" }],
