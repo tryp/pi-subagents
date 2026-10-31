@@ -337,7 +337,7 @@ function formatActivityFacts(input: { activityState?: ActivityState; lastActivit
 	else if (input.turnBudget) facts.push(`turn budget ${input.turnBudget.turnCount}/${input.turnBudget.maxTurns}+${input.turnBudget.graceTurns}`);
 	if (input.toolCount !== undefined) facts.push(`${input.toolCount} tools`);
 	if (input.steering) facts.push(`steering ${input.steering.scheduled} scheduled, ${input.steering.pending} pending, ${input.steering.delivered} delivered, ${input.steering.failed} failed, ${input.steering.recovered} recovered`);
-	const activity = formatActivityLabel(input.lastActivityAt, input.activityState);
+	const activity = formatActivityLabel(input.lastActivityAt, input.activityState, Date.now(), input.currentTool, input.currentToolStartedAt);
 	return activity || facts.length ? [activity, ...facts].filter(Boolean).join(" | ") : undefined;
 }
 

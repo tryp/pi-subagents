@@ -167,6 +167,7 @@ export type ControlNotificationChannel = "event" | "async" | "intercom";
 export interface ControlConfig {
 	enabled?: boolean;
 	needsAttentionAfterMs?: number;
+	toolInFlightGraceMs?: number;
 	activeNoticeAfterMs?: number;
 	activeNoticeAfterTurns?: number;
 	activeNoticeAfterTokens?: number;
@@ -178,6 +179,7 @@ export interface ControlConfig {
 export interface ResolvedControlConfig {
 	enabled: boolean;
 	needsAttentionAfterMs: number;
+	toolInFlightGraceMs: number;
 	activeNoticeAfterMs: number;
 	activeNoticeAfterTurns?: number;
 	activeNoticeAfterTokens?: number;

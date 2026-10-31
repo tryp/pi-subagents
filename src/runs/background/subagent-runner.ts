@@ -2104,7 +2104,9 @@ async function runSubagent(
 			agent: step.agent,
 			index: flatIndex,
 			ts: now,
-			message: `${step.agent} is still active but long-running`,
+			message: step.currentTool
+				? `${step.agent} is in ${step.currentTool} for ${Math.floor(Math.max(0, now - (step.currentToolStartedAt ?? now)) / 1000)}s`
+				: `${step.agent} is still active but long-running`,
 			reason,
 			turns: step.turnCount,
 			tokens: step.tokens?.total,
@@ -2112,7 +2114,7 @@ async function runSubagent(
 			currentTool: step.currentTool,
 			currentToolDurationMs: step.currentToolStartedAt ? Math.max(0, now - step.currentToolStartedAt) : undefined,
 			currentPath: step.currentPath,
-			elapsedMs: now - (step.startedAt ?? overallStartTime),
+			elapsedMs: step.currentToolStartedAt ? Math.max(0, now - step.currentToolStartedAt) : now - (step.startedAt ?? overallStartTime),
 		});
 		appendControlEvent(event);
 		return true;
@@ -2457,6 +2459,7 @@ async function runSubagent(
 				startedAt: step.startedAt ?? overallStartTime,
 				lastActivityAt,
 				currentTool: step.currentTool,
+				currentToolStartedAt: step.currentToolStartedAt,
 				now,
 			});
 			if (idleState === "needs_attention") {
@@ -2471,6 +2474,12 @@ async function runSubagent(
 						index,
 						ts: now,
 						lastActivityAt,
+						currentTool: step.currentTool,
+						currentToolDurationMs: step.currentToolStartedAt ? Math.max(0, now - step.currentToolStartedAt) : undefined,
+						elapsedMs: step.currentToolStartedAt ? Math.max(0, now - step.currentToolStartedAt) : undefined,
+						message: step.currentTool
+							? `${step.agent} needs attention (in ${step.currentTool} for ${Math.floor(Math.max(0, now - (step.currentToolStartedAt ?? now)) / 1000)}s)`
+							: undefined,
 					}));
 					changed = true;
 				}

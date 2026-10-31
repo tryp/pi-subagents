@@ -14,6 +14,8 @@ const DEFAULT_NOTIFY_ON: ControlEventType[] = ["active_long_running", "needs_att
 export const DEFAULT_CONTROL_CONFIG: ResolvedControlConfig = {
 	enabled: true,
 	needsAttentionAfterMs: 60_000,
+	// No corpus measurement is available; allow a 10-minute silent tool call before flagging it.
+	toolInFlightGraceMs: 600_000,
 	activeNoticeAfterMs: 240_000,
 	failedToolAttemptsBeforeAttention: 3,
 	notifyOn: DEFAULT_NOTIFY_ON,
@@ -42,6 +44,9 @@ export function resolveControlConfig(
 	const needsAttentionAfterMs = parsePositiveInt(override?.needsAttentionAfterMs)
 		?? parsePositiveInt(globalConfig?.needsAttentionAfterMs)
 		?? DEFAULT_CONTROL_CONFIG.needsAttentionAfterMs;
+	const toolInFlightGraceMs = parsePositiveInt(override?.toolInFlightGraceMs)
+		?? parsePositiveInt(globalConfig?.toolInFlightGraceMs)
+		?? DEFAULT_CONTROL_CONFIG.toolInFlightGraceMs;
 	const activeNoticeAfterMs = parsePositiveInt(override?.activeNoticeAfterMs)
 		?? parsePositiveInt(globalConfig?.activeNoticeAfterMs)
 		?? DEFAULT_CONTROL_CONFIG.activeNoticeAfterMs;
@@ -61,6 +66,7 @@ export function resolveControlConfig(
 	return {
 		enabled,
 		needsAttentionAfterMs,
+		toolInFlightGraceMs,
 		activeNoticeAfterMs,
 		activeNoticeAfterTurns,
 		activeNoticeAfterTokens,
@@ -75,10 +81,15 @@ export function deriveActivityState(input: {
 	startedAt: number;
 	lastActivityAt?: number;
 	currentTool?: string;
+	currentToolStartedAt?: number;
 	now?: number;
 }): ActivityState | undefined {
-	if (!input.config.enabled || input.currentTool) return undefined;
+	if (!input.config.enabled) return undefined;
 	const now = input.now ?? Date.now();
+	if (input.currentTool) {
+		const inFlightMs = Math.max(0, now - (input.currentToolStartedAt ?? input.lastActivityAt ?? input.startedAt));
+		return inFlightMs > input.config.toolInFlightGraceMs ? "needs_attention" : "active_long_running";
+	}
 	const lastActivity = input.lastActivityAt ?? input.startedAt;
 	const ageMs = Math.max(0, now - lastActivity);
 	return ageMs > input.config.needsAttentionAfterMs ? "needs_attention" : undefined;

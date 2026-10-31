@@ -8,7 +8,8 @@ function formatActivityAge(ms: number): string {
 	return `${Math.floor(ms / 60000)}m`;
 }
 
-export function formatActivityLabel(lastActivityAt: number | undefined, activityState?: ActivityState, now = Date.now()): string | undefined {
+export function formatActivityLabel(lastActivityAt: number | undefined, activityState?: ActivityState, now = Date.now(), currentTool?: string, currentToolStartedAt?: number): string | undefined {
+	if (currentTool) return `in ${currentTool} for ${formatActivityAge(Math.max(0, now - (currentToolStartedAt ?? lastActivityAt ?? now)))}`;
 	if (lastActivityAt === undefined) {
 		if (activityState === "needs_attention") return "needs attention";
 		if (activityState === "active_long_running") return "active but long-running";

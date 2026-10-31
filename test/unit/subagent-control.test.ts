@@ -20,7 +20,8 @@ describe("subagent control attention state", () => {
 	it("marks a run as needing attention only after the idle threshold", () => {
 		assert.equal(deriveActivityState({ config, startedAt: 0, lastActivityAt: 0, now: 50 }), undefined);
 		assert.equal(deriveActivityState({ config, startedAt: 0, lastActivityAt: 0, now: 400 }), "needs_attention");
-		assert.equal(deriveActivityState({ config, startedAt: 0, lastActivityAt: 0, currentTool: "bash", now: 400 }), undefined);
+		assert.equal(deriveActivityState({ config, startedAt: 0, lastActivityAt: 0, currentTool: "bash", currentToolStartedAt: 0, now: 400 }), "active_long_running");
+		assert.equal(deriveActivityState({ config, startedAt: 0, lastActivityAt: 0, currentTool: "bash", currentToolStartedAt: 0, now: 600_001 }), "needs_attention");
 		assert.equal(deriveActivityState({ config, startedAt: 0, now: 400 }), "needs_attention");
 	});
 
@@ -76,6 +77,7 @@ describe("subagent control attention state", () => {
 		assert.equal(shouldNotifyControlEvent(config, event), true);
 		assert.equal(shouldNotifyControlEvent(config, activeEvent), true);
 		assert.deepEqual(config.notifyOn, ["active_long_running", "needs_attention"]);
+		assert.equal(config.toolInFlightGraceMs, 600_000);
 		assert.deepEqual(config.notifyChannels, ["event", "async", "intercom"]);
 	});
 
