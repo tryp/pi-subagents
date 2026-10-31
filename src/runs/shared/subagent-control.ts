@@ -14,8 +14,9 @@ const DEFAULT_NOTIFY_ON: ControlEventType[] = ["active_long_running", "needs_att
 export const DEFAULT_CONTROL_CONFIG: ResolvedControlConfig = {
 	enabled: true,
 	needsAttentionAfterMs: 60_000,
-	// No corpus measurement is available; allow a 10-minute silent tool call before flagging it.
-	toolInFlightGraceMs: 600_000,
+	// 3-day corpus (628 files, 284k paired calls): p95 25.7s, p99 81.4s, max 1693.8s; 60s flags 1.43% (4061) healthy calls.
+	// 30m is 1.06x observed max; 10m is 7.4x p99 but falls below observed max. Chose the longer bound to avoid known healthy-call false stalls; hung detection is slower.
+	toolInFlightGraceMs: 1_800_000,
 	activeNoticeAfterMs: 240_000,
 	failedToolAttemptsBeforeAttention: 3,
 	notifyOn: DEFAULT_NOTIFY_ON,
