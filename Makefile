@@ -18,6 +18,7 @@ RUNTIME_DIR ?= $(HOME)/.pi/agent/local/pi-subagents
 ALLOW_DRIFT ?=
 SMOKE_SCRIPT ?= /home/dev/src/pi-session-analysis/scripts/predeploy_smoke.py
 SMOKE_TIMEOUT ?= 90
+PI_SESSION_ANALYSIS_DIR ?= /home/dev/src/pi-session-analysis
 
 # Runtime-only files and directories. node_modules is installed separately in
 # the deployed copy so the source checkout and runtime dependencies remain
@@ -34,7 +35,7 @@ RSYNC_EXCLUDES := \
 	--exclude '.deploy.lock' \
 	--exclude '.pi-subagents/'
 
-.PHONY: deploy deploy-locked drift verify smoke-test deployed-commit test-invocation-model mutcheck-invocation-model test-count-stability
+.PHONY: deploy deploy-locked drift verify smoke-test deployed-commit record-deploy-ledger test-invocation-model mutcheck-invocation-model test-count-stability
 
 # `--test-force-exit` can truncate the runner's report while still exiting successfully.
 # Keep it out of focused suites and mutation checks: missing assertions can look like survivors.
@@ -71,6 +72,16 @@ deploy-locked:  ## Run the deploy while holding the runtime lock
 		> "$(RUNTIME_DIR)/.deployed-commit"
 	@$(MAKE) --no-print-directory verify
 	@$(MAKE) --no-print-directory smoke-test
+	@$(MAKE) --no-print-directory record-deploy-ledger
+
+record-deploy-ledger:
+	@if [ "$${SKIP_DEPLOY_LEDGER:-0}" = 1 ]; then \
+		echo "Skipping deploy ledger recording (SKIP_DEPLOY_LEDGER=1)."; \
+	elif [ ! -x "$(PI_SESSION_ANALYSIS_DIR)/scripts/record-deploy" ]; then \
+		echo "Skipping deploy ledger recording: pi-session-analysis recorder not found at $(PI_SESSION_ANALYSIS_DIR)/scripts/record-deploy."; \
+	elif ! "$(PI_SESSION_ANALYSIS_DIR)/scripts/record-deploy"; then \
+		echo "WARNING: deploy succeeded, but deploy ledger recording failed." >&2; \
+	fi
 
 smoke-test:  ## Load only the deployed extension in a fresh pi process
 	python3 "$(SMOKE_SCRIPT)" --extension "$(RUNTIME_DIR)" --tool subagent \
