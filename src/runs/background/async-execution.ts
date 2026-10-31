@@ -15,11 +15,12 @@ import { applyThinkingSuffix } from "../shared/pi-args.ts";
 import { injectOutputPathSystemPrompt, injectSingleOutputInstruction, normalizeSingleOutputOverride, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { buildChainInstructions, isDynamicParallelStep, isParallelStep, resolveStepBehavior, suppressProgressForReadOnlyTask, writeInitialProgressFile, type ChainStep, type ResolvedStepBehavior, type SequentialStep, type StepOverrides } from "../../shared/settings.ts";
 import type { RunnerStep } from "../shared/parallel-utils.ts";
+import { flattenSteps } from "../shared/parallel-utils.ts";
 import { resolvePiPackageRoot, resolvePrlimitPath } from "../shared/pi-spawn.ts";
 import { buildSkillInjection, normalizeSkillInput, resolveSkillsWithFallback } from "../../agents/skills.ts";
 import { buildAgentMemoryInjection } from "../../agents/agent-memory.ts";
 import { PI_CODING_AGENT_PACKAGE_ROOT_ENV, resolveChildCwd } from "../../shared/utils.ts";
-import { buildModelCandidates, resolveEffectiveSubagentModel, resolveModelCandidate, resolveSubagentModelOverride, type AvailableModelInfo, type ParentModel } from "../shared/model-fallback.ts";
+import { buildModelCandidates, formatModelResolutionReceipt, isDefaultedAgentModel, resolveEffectiveSubagentModelWithSource, resolveModelCandidate, resolveSubagentModelOverride, type AvailableModelInfo, type ParentModel, type SubagentModelSource } from "../shared/model-fallback.ts";
 import type { ModelScopeConfig } from "../shared/model-scope.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { resolveExpectedWorktreeAgentCwd } from "../shared/worktree.ts";
@@ -182,6 +183,8 @@ interface AsyncSingleParams {
 	outputMode?: "inline" | "file-only";
 	outputBaseDir?: string;
 	modelOverride?: string;
+	/** True when this child forks the parent session; a defaulted agent model must then lose to the parent's. */
+	forked?: boolean;
 	/**
 	 * Full candidate list restored from the source run's status (used model
 	 * first). Replaces the agent-config rebuild so a revived child keeps the
@@ -221,6 +224,13 @@ interface AsyncExecutionResult {
 export interface AsyncRunnerStepBuildParams {
 	chain: ChainStep[];
 	task?: string;
+	/**
+	 * True when these children fork the parent session. Forking is decided in the
+	 * foreground executor's context policy, so it must be handed to the step builder:
+	 * a forked child continues the parent conversation and therefore runs the parent
+	 * session model even when `subagents.defaultModel` filled the gap at discovery.
+	 */
+	forked?: boolean;
 	attachRoot?: ImportedAsyncRoot & { agent: string; outputName?: string; label?: string };
 	resultMode?: SubagentRunMode;
 	agents: AgentConfig[];
@@ -254,7 +264,7 @@ export type AsyncRunnerStepBuildResult =
 	}
 	| { error: string };
 
-export function formatAsyncStartedMessage(headline: string, interactive: boolean): string {
+export function formatAsyncStartedMessage(headline: string, interactive: boolean, receipts?: string[]): string {
 	const guidance = interactive
 		? [
 			"The async run is detached and running in the background.",
@@ -269,7 +279,27 @@ export function formatAsyncStartedMessage(headline: string, interactive: boolean
 			"A wait returns the first finished child by default, so it is safe to call early and act on a partial batch; pass until: \"all-terminal\" when the whole batch must be finished first.",
 			"Use subagent({ action: \"status\", id: \"...\" }) when you need a one-shot status/result or to inspect a blocked/stale run. To block until completion, use subagent_wait() — do not poll in a loop.",
 		];
-	return [headline, "", ...guidance].join("\n");
+	return [headline, ...formatReceiptBlock(receipts), "", ...guidance].join("\n");
+}
+
+/** `Models:` block for a launch message: one line per child, omitted when nothing was resolved. */
+function formatReceiptBlock(receipts: string[] | undefined): string[] {
+	if (!receipts || receipts.length === 0) return [];
+	return ["", "Models:", ...receipts.map((line) => `- ${line}`)];
+}
+
+/**
+ * One receipt line per launched child, taken from the resolution each step recorded.
+ * Steps that never recorded one (dynamic fanout members are materialized later) are skipped.
+ */
+export function buildModelResolutionReceipts(steps: RunnerStep[]): string[] {
+	return flattenSteps(steps)
+		.filter((step) => step.modelResolution !== undefined)
+		.map((step) => formatModelResolutionReceipt(step.agent, {
+			...(step.modelResolution!.requested ? { requested: step.modelResolution!.requested } : {}),
+			...(step.modelResolution!.resolved ? { model: step.modelResolution!.resolved } : {}),
+			source: step.modelResolution!.source as SubagentModelSource,
+		}));
 }
 
 /**
@@ -642,14 +672,19 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 		const taskText = `${readInstructions.prefix}${taskTemplate}${progressInstructions.suffix}`;
 		const task = namespaceOutputPath ? taskText : injectSingleOutputInstruction(taskText, outputPath, a);
 
-		const primaryModel = resolveEffectiveSubagentModel(
+		const primaryModelResolution = resolveEffectiveSubagentModelWithSource(
 			s.model,
 			a.model,
 			ctx.currentModel,
 			availableModels,
 			ctx.currentModelProvider,
-			{ scope: ctx.modelScope },
+			{
+				scope: ctx.modelScope,
+				forked: params.forked === true,
+				agentModelFromDefault: isDefaultedAgentModel(a.modelSource),
+			},
 		);
+		const primaryModel = primaryModelResolution.model;
 		const thinkingOverride = flatIndex === undefined ? undefined : thinkingOverridesByFlatIndex?.[flatIndex];
 		const effectiveThinking = thinkingOverride ?? a.thinking;
 		const model = applyThinkingSuffix(primaryModel, effectiveThinking, thinkingOverride !== undefined);
@@ -665,6 +700,11 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			cwd: stepCwd,
 			model,
 			thinking: resolveEffectiveThinking(model, effectiveThinking),
+			modelResolution: {
+				...(primaryModelResolution.requested ? { requested: primaryModelResolution.requested } : {}),
+				...(model ? { resolved: model } : {}),
+				source: primaryModelResolution.source,
+			},
 			modelCandidates: buildModelCandidates(primaryModel, a.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope }).map((candidate) =>
 				applyThinkingSuffix(candidate, effectiveThinking, thinkingOverride !== undefined),
 			),
@@ -1066,7 +1106,7 @@ export function executeAsyncChain(
 		.join(" -> ");
 
 	return {
-		content: [{ type: "text", text: formatAsyncStartedMessage(`Async ${resultMode}: ${chainDesc} [${id}]`, ctx.interactive === true) }],
+		content: [{ type: "text", text: formatAsyncStartedMessage(`Async ${resultMode}: ${chainDesc} [${id}]`, ctx.interactive === true, buildModelResolutionReceipts(built.steps)) }],
 		details: { mode: resultMode, runId: id, results: [], asyncId: id, asyncDir, workflowGraph, ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}), ...(params.turnBudget ? { turnBudget: params.turnBudget } : {}), ...(params.toolBudget ? { toolBudget: params.toolBudget } : {}), ...(params.rlimits ? { rlimits: params.rlimits } : {}) },
 	};
 }
@@ -1148,14 +1188,25 @@ export function executeAsyncSingle(
 	const validationError = validateFileOnlyOutputMode(outputMode, outputPath, `Async single run (${agent})`);
 	if (validationError) return formatAsyncStartError("single", validationError);
 	const taskWithOutputInstruction = injectSingleOutputInstruction(task, outputPath, agentConfig);
-	const primaryModel = resolveSubagentModelOverride(
-		params.modelOverride ?? agentConfig.model,
+	const primaryModelResolution = resolveEffectiveSubagentModelWithSource(
+		params.modelOverride,
+		agentConfig.model,
 		ctx.currentModel,
 		availableModels,
 		ctx.currentModelProvider,
+		{
+			forked: params.forked === true,
+			agentModelFromDefault: isDefaultedAgentModel(agentConfig.modelSource),
+		},
 	);
+	const primaryModel = primaryModelResolution.model;
 	const effectiveThinking = params.thinkingOverride ?? agentConfig.thinking;
 	const model = applyThinkingSuffix(primaryModel, effectiveThinking, params.thinkingOverride !== undefined);
+	const modelResolution = {
+		...(primaryModelResolution.requested ? { requested: primaryModelResolution.requested } : {}),
+		...(model ? { resolved: model } : {}),
+		source: primaryModelResolution.source,
+	};
 	const toolBudgetInput = params.toolBudget ?? agentConfig.toolBudget ?? params.configToolBudget;
 	const resolvedToolBudget = validateToolBudgetConfig(toolBudgetInput, params.toolBudget ? "toolBudget" : agentConfig.toolBudget ? "agent.toolBudget" : "config.toolBudget");
 	if (resolvedToolBudget.error) return formatAsyncStartError("single", resolvedToolBudget.error);
@@ -1234,8 +1285,9 @@ export function executeAsyncSingle(
 						task: taskWithOutputInstruction,
 						contextFiles: params.contextFiles,
 						cwd: runnerCwd,
-						model,
+		 						model,
 						thinking: resolveEffectiveThinking(model, effectiveThinking),
+						modelResolution,
 						modelCandidates: (params.modelCandidatesOverride
 							?? buildModelCandidates(primaryModel, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope })
 						)
@@ -1360,7 +1412,7 @@ export function executeAsyncSingle(
 	}
 
 	return {
-		content: [{ type: "text", text: formatAsyncStartedMessage(`Async: ${agent} [${id}]`, ctx.interactive === true) }],
+		content: [{ type: "text", text: formatAsyncStartedMessage(`Async: ${agent} [${id}]`, ctx.interactive === true, [formatModelResolutionReceipt(agent, { ...primaryModelResolution, ...(model ? { model } : {}) })]) }],
 		details: { mode: "single", runId: id, results: [], asyncId: id, asyncDir, ...(timeoutMs !== undefined ? { timeoutMs, deadlineAt } : {}), ...(params.turnBudget ? { turnBudget: params.turnBudget } : {}), ...(params.toolBudget ? { toolBudget: params.toolBudget } : {}) },
 	};
 }

@@ -139,6 +139,27 @@ describe("dynamic fanout helpers", () => {
 		);
 	});
 
+	it("accepts a runner-injected modelResolution on the parallel template but keeps it out of user-facing validation", () => {
+		// The runner records where each materialized child's model came from, so
+		// status.json can explain a fork child that ran the parent model. Like
+		// parentSessionId it is runner-internal: a chain author cannot set it, and a
+		// runner step carrying it must still validate.
+		const runnerStep = {
+			expand: { from: { output: "targets", path: "/items" }, maxItems: 4 },
+			parallel: {
+				agent: "reviewer",
+				task: "Review {item.path}",
+				modelResolution: { requested: "openai-codex/gpt-6-luna", resolved: "ollama-cloud/deepseek-v4.1-flash:1017", source: "fork-parent" },
+			},
+			collect: { as: "reviews" },
+		} as unknown as Parameters<typeof validateDynamicStepShape>[0];
+		assert.doesNotThrow(() => validateDynamicStepShape(runnerStep, 1, { allowRunnerFields: true }));
+		assert.throws(
+			() => validateDynamicStepShape(runnerStep, 1),
+			(error: unknown) => error instanceof DynamicFanoutError && /modelResolution/.test(error.message),
+		);
+	});
+
 	it("accepts toolBudget on dynamic parallel templates", () => {
 		const step = {
 			expand: { from: { output: "targets", path: "/items" }, maxItems: 4 },
