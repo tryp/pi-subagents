@@ -1257,7 +1257,7 @@ Agent definitions are not loaded into context by default. Management actions let
 |-------|------|---------|-------------|
 | `agent` | string | - | Agent name for single mode, or target for management actions. |
 | `task` | string | - | Task string for single mode. |
-| `action` | string | - | `list`, `get`, `create`, `update`, `delete`, `status`, `interrupt`, `stop`, `resume`, `steer`, `append-step`, or `doctor`. |
+| `action` | string | - | `list`, `get`, `create`, `update`, `delete`, `status`, `interrupt`, `stop`, `resume`, `steer`, `append-step`, `doctor`, `help`, or a watchdog/schedule action. `help` returns the full tool reference on demand. |
 | `chainName` | string | - | Chain name for management actions. |
 | `config` | object/string | - | Agent or chain config for create/update. |
 | `output` | `string \| false` | agent default | Override single-agent output file. |
@@ -1396,9 +1396,9 @@ Example global default:
 { "toolDescriptionMode": "compact" }
 ```
 
-Controls the parent-facing `subagent` tool description registered at startup. `full` is the default. `compact` keeps the execution modes, async/`subagent_wait` guidance, child-safety boundary, management/action split, one-writer review guidance, and artifact/status essentials with less prompt bloat.
+Controls the parent-facing `subagent` tool description registered at startup. `compact` is the default, because the description is a per-turn cost every session pays; `full` puts the whole reference in the prompt instead. `compact` is an index of the same tool: every action name, execution shape, nested chain key and limit name still appears, and the detail it leaves out is one call away through `{ action: "help" }`, which returns the full description verbatim. Both modes append the mandatory safety guidance, so the async/`subagent_wait` rules, the child-safety boundary, one-writer review guidance and the artifact/status essentials are present either way, and the compact text does not repeat them. Measured on 2026-10-31: full is 10,574 characters registered and compact is 4,060, of which 2,228 is the shared safety block; excluding that block the index is 1,832 characters against 8,346.
 
-`custom` reads `subagent-tool-description.md` from the project config directory, then from `~/.pi/agent/subagent-tool-description.md`. Missing, empty, unreadable, or oversized custom files fall back to the full description. Custom templates may use `{{fullDescription}}`, `{{compactDescription}}`, `{{safetyGuidance}}`, `{{agentDir}}`, and `{{projectConfigDir}}`; the safety guidance is always present so custom prose cannot remove the runtime guardrails. Restart Pi after changing the mode or custom file.
+`custom` reads `subagent-tool-description.md` from the project config directory, then from `~/.pi/agent/subagent-tool-description.md`. Missing, empty, unreadable, or oversized custom files fall back to the default mode, so a broken custom file cannot quietly cost more prompt than an unconfigured install. Custom templates may use `{{fullDescription}}`, `{{compactDescription}}`, `{{safetyGuidance}}`, `{{agentDir}}`, and `{{projectConfigDir}}`; the safety guidance is always present so custom prose cannot remove the runtime guardrails. Restart Pi after changing the mode or custom file.
 
 ### `asyncByDefault`
 

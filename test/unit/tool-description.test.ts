@@ -12,38 +12,13 @@ import {
 	SUBAGENT_SAFETY_GUIDANCE,
 } from "../../src/extension/tool-description.ts";
 import { SUBAGENT_CHILD_ENV, SUBAGENT_FANOUT_CHILD_ENV } from "../../src/runs/shared/pi-args.ts";
+import { SUBAGENT_ACTIONS } from "../../src/shared/types.ts";
+import { subagentHelpText } from "../../src/shared/tool-reference.ts";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 function escapeRegex(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function extractListedActions(description: string): Set<string> {
-	const actions = new Set<string>();
-	for (const line of description.split("\n")) {
-		const actionField = line.indexOf("action:");
-		if (actionField >= 0) {
-			const actionText = line.slice(actionField);
-			const direct = actionText.match(/action:\s*"([a-z][a-z0-9.-]*)"((?:\s*\|\s*"[a-z][a-z0-9.-]*")*)/i);
-			if (direct) {
-				for (const match of direct[0].matchAll(/"([a-z][a-z0-9.-]*)"/gi)) actions.add(match[1]);
-			}
-		}
-		const listMarker = line.match(/(?:actions:|Use action without execution fields:)/i);
-		if (listMarker) {
-			const list = line.slice(line.indexOf(listMarker[0]) + listMarker[0].length);
-			for (const item of list.split(",")) {
-				const action = item.trim().match(/^([a-z][a-z0-9.-]*[a-z0-9])/i)?.[1];
-				if (action) actions.add(action);
-			}
-		}
-	}
-	return actions;
-}
-
-function extractCamelCaseTerms(description: string): Set<string> {
-	return new Set(description.match(/\b[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*\b/g) ?? []);
 }
 
 function parentToolEnv(agentDir?: string): NodeJS.ProcessEnv {
@@ -56,7 +31,7 @@ function parentToolEnv(agentDir?: string): NodeJS.ProcessEnv {
 
 describe("registered subagent tool description", () => {
 	it("keeps full mode safe and free of hardcoded builtin agent names", () => {
-		const description = buildSubagentToolDescription();
+		const description = buildSubagentToolDescription({ toolDescriptionMode: "full" });
 
 		for (const builtinName of ["scout", "worker", "planner"]) {
 			assert.doesNotMatch(description, new RegExp(`\\b${builtinName}\\b`));
@@ -119,65 +94,98 @@ describe("registered subagent tool description", () => {
 		);
 	});
 
-	it("offers a compact mode that keeps safety-critical guidance", () => {
-		const description = buildSubagentToolDescription({ toolDescriptionMode: "compact" });
-
-		assert.equal(description.split(SUBAGENT_SAFETY_GUIDANCE).length - 1, 1);
-		assert.ok(description.endsWith(SUBAGENT_SAFETY_GUIDANCE), "compact mode must append mandatory safety guidance exactly once");
+	it("offers a compact mode that is an index of the full one", () => {
+		const compact = buildSubagentToolDescription({ toolDescriptionMode: "compact" });
 		const full = buildSubagentToolDescription({ toolDescriptionMode: "full" });
-		assert.ok(description.length <= full.length * 0.6, `compact mode (${description.length} chars) must be at most 60% of full (${full.length} chars)`);
-		assert.match(description, /SINGLE/);
-		assert.match(description, /PARALLEL/);
-		assert.match(description, /CHAIN/);
-		assert.match(description, /action without execution fields/i);
-		assert.match(description, /subagent_wait/i);
-		assert.match(description, /interactive session.*normally return control/i);
-		assert.match(description, /Non-interactive runs.*auto-drain current-session work at agent_end/i);
-		assert.doesNotMatch(description, /MUST call subagent_wait/i);
-		assert.match(description, /Do not sleep or poll/i);
-		assert.match(description, /ordinary child subagents are not orchestrators/i);
-		assert.match(description, /one writer/i);
-		assert.match(description, /view:"fleet"/);
-		assert.match(description, /view:"transcript"/);
-		assert.match(description, /steer/);
-		assert.match(description, /schedule-list/);
-		assert.match(description, /eject/);
-		assert.match(description, /disable/);
-		assert.match(description, /grant-spawn-budget/);
-		assert.match(description, /acceptanceRole.*affects inferred acceptance, never tools/i);
-		assert.match(description, /Explicit task intent wins/i);
-		assert.match(description, /omission keeps name heuristics/i);
-		assert.match(description, /false\/empty string clears it/i);
-		assert.match(description, /status\.json/);
-		assert.match(description, /events\.jsonl/);
-		// Compact mode keeps a chain quick-reference too (#417)
-		assert.match(description, /chain example/i);
-		assert.match(description, /\{previous\}/);
-		assert.match(description, /parallel:/);
-		assert.match(description, /count:/);
-		for (const parameter of ["turnBudget", "toolBudget", "timeoutMs", "rlimits", "acceptanceRole", "worktree"]) {
-			assert.ok(description.includes(parameter), `compact mode must mention ${parameter}`);
+
+		// The safety block is mandatory in every mode and must not be duplicated.
+		assert.equal(compact.split(SUBAGENT_SAFETY_GUIDANCE).length - 1, 1);
+		assert.ok(compact.endsWith(SUBAGENT_SAFETY_GUIDANCE));
+		assert.equal(full.split(SUBAGENT_SAFETY_GUIDANCE).length - 1, 1);
+
+		// The size win is the reason this mode exists; a description that drifts
+		// back towards full has to fail here rather than be noticed by nobody.
+		// Measured 2026-10-31: full 10,574 rendered, compact 4,060 (38.4%), of which
+		// 2,228 is the mandatory block both modes carry. Excluding that shared block
+		// the index is 1,832 chars against 8,346, i.e. 22% of the reference.
+		assert.ok(
+			compact.length <= full.length * 0.4,
+			`compact (${compact.length} chars) must stay at or below 40% of full (${full.length} chars)`,
+		);
+
+		// What compact must keep: every execution shape, the nesting it cannot
+		// express in the pruned schema, and a pointer to the reference.
+		for (const shape of ["SINGLE", "PARALLEL", "CHAIN", "{previous}", "parallel:", "count?"]) {
+			assert.ok(compact.includes(shape), `compact mode must keep ${shape}`);
+		}
+		for (const parameter of [
+			"context",
+			"model",
+			"timeoutMs",
+			"rlimits",
+			"turnBudget",
+			"toolBudget",
+			"worktree",
+			"concurrency",
+			"chainName",
+			"acceptanceRole",
+			"status.json",
+			"events.jsonl",
+			"asyncId",
+		]) {
+			assert.ok(compact.includes(parameter), `compact mode must keep ${parameter}`);
+		}
+		assert.match(compact, /provider\/model\[:thinking\]/, "compact mode must keep the thinking-suffix syntax");
+		assert.match(compact, /view "fleet"\|"transcript"/);
+		assert.match(compact, /scheduledRuns\.enabled/);
+		assert.match(compact, /\{action:"help"\}/, "compact mode must point at the reference");
+	});
+
+	it("names every action in every mode and in the on-demand reference", () => {
+		// Ground truth is the allowlist the dispatcher rejects against, not the
+		// prose: comparing compact to full can only prove that one hand-written
+		// text contains another, and both were wrong when they omitted turnBudget
+		// and toolBudget respectively.
+		const help = subagentHelpText();
+		for (const action of SUBAGENT_ACTIONS) {
+			for (const mode of ["full", "compact"] as const) {
+				const description = buildSubagentToolDescription({ toolDescriptionMode: mode });
+				assert.ok(description.includes(action), `${mode} mode must name the action ${action}`);
+			}
+			assert.ok(help.includes(action), `the help reference must name the action ${action}`);
+		}
+		assert.ok(help.includes("help"), "the reference must document the help action itself");
+	});
+
+	it("keeps the safety contract in every mode instead of in each description", () => {
+		// These are behaviour rules, and they live in the mandatory block that is
+		// appended to every mode. Asserting them per mode made the compact text a
+		// duplicate of the block, which is tokens spent twice on one instruction.
+		for (const mode of ["full", "compact"] as const) {
+			const description = buildSubagentToolDescription({ toolDescriptionMode: mode });
+			assert.match(description, /use \{ action: "list" \} before execution/i, mode);
+			assert.match(description, /Do not sleep or poll status just to wait/i, mode);
+			assert.match(description, /returns the first finished child by default/i, mode);
+			assert.match(description, /until:"all-terminal"/i, mode);
+			assert.match(description, /interactive session.*normally return control/i, mode);
+			assert.match(description, /Headless sessions auto-drain current-session work at agent_end/i, mode);
+			assert.match(description, /ordinary child subagents are not orchestrators/i, mode);
+			assert.match(description, /keep one writer/i, mode);
+			assert.match(description, /status\.json/i, mode);
+			assert.match(description, /events\.jsonl/i, mode);
 		}
 	});
 
-	it("keeps every full-mode action and parameter visible in compact mode", () => {
-		const fullActions = extractListedActions(FULL_SUBAGENT_TOOL_DESCRIPTION);
-		const compactActions = extractListedActions(COMPACT_SUBAGENT_TOOL_DESCRIPTION);
-		// No full-mode action should become undiscoverable in compact mode.
-		const intentionallyFullOnlyActions: string[] = [];
-		const missingActions = [...fullActions].filter(
-			(action) => !compactActions.has(action) && !intentionallyFullOnlyActions.includes(action),
-		);
-		assert.deepEqual(missingActions, [], `compact mode is missing actions: ${missingActions.join(", ")}`);
-
-		const fullParameters = extractCamelCaseTerms(FULL_SUBAGENT_TOOL_DESCRIPTION);
-		const compactParameters = extractCamelCaseTerms(COMPACT_SUBAGENT_TOOL_DESCRIPTION);
-		// Keep the allowlist empty: parameter/capability names are cheap to retain.
-		const intentionallyFullOnlyParameters: string[] = [];
-		const missingParameters = [...fullParameters].filter(
-			(parameter) => !compactParameters.has(parameter) && !intentionallyFullOnlyParameters.includes(parameter),
-		);
-		assert.deepEqual(missingParameters, [], `compact mode is missing parameter/capability names: ${missingParameters.join(", ")}`);
+	it("returns the long-form reference from the help action", async () => {
+		const { handleManagementAction } = await import("../../src/agents/agent-management.ts");
+		const result = handleManagementAction("help", {}, {} as never);
+		const text = result.content.map((part: { type: string; text?: string }) => part.text ?? "").join("\n");
+		assert.ok(!result.isError, "help must not be an error");
+		for (const action of SUBAGENT_ACTIONS) assert.ok(text.includes(action), `help must document ${action}`);
+		for (const section of ["CHAIN EXAMPLES", "SCHEDULE", "DIAGNOSTICS", "turnBudget", "toolBudget"]) {
+			assert.ok(text.includes(section), `help must keep the ${section} section`);
+		}
+		assert.match(text, /provider\/model\[:thinking\]/);
 	});
 
 	it("renders a custom project description with placeholders and mandatory safety guidance", () => {
@@ -240,7 +248,7 @@ describe("registered subagent tool description", () => {
 		assert.match(description, /ordinary child subagents are not orchestrators/i);
 	});
 
-	it("falls back to full mode when custom mode has no valid file", () => {
+	it("falls back to the default mode when custom mode has no valid file", () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-tool-desc-missing-"));
 		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-tool-desc-agent-"));
 		const warnings: string[] = [];
@@ -250,11 +258,14 @@ describe("registered subagent tool description", () => {
 			{ cwd, agentDir, warn: (message) => warnings.push(message) },
 		);
 
-		assert.equal(description, FULL_SUBAGENT_TOOL_DESCRIPTION);
-		assert.ok(warnings.some((message) => message.includes("using full description")));
+		// A fallback must land on the same description an unconfigured install gets,
+		// not on the expensive one: "custom" is a request for my own text, and a
+		// missing file should not quietly cost more prompt than the default.
+		assert.equal(description, buildSubagentToolDescription({ toolDescriptionMode: "compact" }));
+		assert.ok(warnings.some((message) => message.includes("using the compact description")));
 	});
 
-	it("falls back to full mode when toolDescriptionMode is invalid", () => {
+	it("falls back to the default mode when toolDescriptionMode is invalid", () => {
 		const warnings: string[] = [];
 
 		const description = buildSubagentToolDescription(
@@ -262,7 +273,7 @@ describe("registered subagent tool description", () => {
 			{ warn: (message) => warnings.push(message) },
 		);
 
-		assert.equal(description, FULL_SUBAGENT_TOOL_DESCRIPTION);
+		assert.equal(description, buildSubagentToolDescription({ toolDescriptionMode: "compact" }));
 		assert.ok(warnings.some((message) => message.includes("Ignoring invalid toolDescriptionMode")));
 	});
 
@@ -311,7 +322,15 @@ describe("registered subagent tool description", () => {
 
 	it("registers full, compact, custom, and fallback descriptions from extension config", () => {
 		const defaultAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-tool-desc-default-"));
-		assert.equal(readRegisteredDescription(defaultAgentDir), FULL_SUBAGENT_TOOL_DESCRIPTION);
+		// The default costs less prompt and is still an index of the whole tool:
+		// every action name survives, and `{ action: "help" }` returns the detail.
+		assert.equal(
+			readRegisteredDescription(defaultAgentDir),
+			buildSubagentToolDescription({ toolDescriptionMode: "compact" }),
+		);
+		const fullAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-tool-desc-full-"));
+		writeExtensionConfig(fullAgentDir, { toolDescriptionMode: "full" });
+		assert.equal(readRegisteredDescription(fullAgentDir), FULL_SUBAGENT_TOOL_DESCRIPTION);
 
 		const compactAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-tool-desc-compact-"));
 		writeExtensionConfig(compactAgentDir, { toolDescriptionMode: "compact" });
@@ -328,10 +347,16 @@ describe("registered subagent tool description", () => {
 
 		const missingCustomAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-tool-desc-missing-"));
 		writeExtensionConfig(missingCustomAgentDir, { toolDescriptionMode: "custom" });
-		assert.equal(readRegisteredDescription(missingCustomAgentDir), FULL_SUBAGENT_TOOL_DESCRIPTION);
+		assert.equal(
+			readRegisteredDescription(missingCustomAgentDir),
+			buildSubagentToolDescription({ toolDescriptionMode: "compact" }),
+		);
 
 		const invalidAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-tool-desc-invalid-"));
 		writeExtensionConfig(invalidAgentDir, { toolDescriptionMode: "tiny" });
-		assert.equal(readRegisteredDescription(invalidAgentDir), FULL_SUBAGENT_TOOL_DESCRIPTION);
+		assert.equal(
+			readRegisteredDescription(invalidAgentDir),
+			buildSubagentToolDescription({ toolDescriptionMode: "compact" }),
+		);
 	});
 });

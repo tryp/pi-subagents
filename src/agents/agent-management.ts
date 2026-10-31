@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { subagentHelpText } from "../shared/tool-reference.ts";
 import {
 	type AgentConfig,
 	type AgentScope,
@@ -40,7 +41,7 @@ import { validateAcceptanceInput } from "../runs/shared/acceptance.ts";
 import type { AcceptanceInput, Details, ExtensionConfig, ToolBudgetConfig } from "../shared/types.ts";
 import { getProjectConfigDir } from "../shared/utils.ts";
 
-type ManagementAction = "list" | "get" | "models" | "create" | "update" | "delete" | "eject" | "disable" | "enable" | "reset";
+type ManagementAction = "list" | "get" | "models" | "create" | "update" | "delete" | "eject" | "disable" | "enable" | "reset" | "help";
 type ManagementScope = "user" | "project";
 type ManagementContext = Pick<ExtensionContext, "cwd" | "modelRegistry"> & {
 	model?: ExtensionContext["model"];
@@ -1237,6 +1238,7 @@ export function handleManagementAction(action: string, params: ManagementParams,
 		case "disable": return handleDisable(params, ctx);
 		case "enable": return handleEnable(params, ctx);
 		case "reset": return handleReset(params, ctx);
+		case "help": return result(subagentHelpText());
 		default: return result(`Unknown action: ${action}`, true);
 	}
 }
