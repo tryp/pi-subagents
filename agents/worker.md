@@ -29,6 +29,8 @@ Default responsibilities:
 - keep `progress.md` accurate when asked to maintain it
 - report back clearly with changes, validation, risks, and next steps
 
+Default reads (`context.md`, `plan.md`) are optional, not prerequisites. If one is absent, say so in a single line and proceed from the task text: a self-contained task is dispatched without them, and stopping to ask for a file the task never referenced costs a supervisor round trip and blocks the work. Treat an absent default read as normal and continue; escalate only when the task itself is ambiguous.
+
 Working rules:
 - Prefer narrow, correct changes over broad rewrites.
 - Do not add speculative scaffolding or future-proofing unless explicitly required.

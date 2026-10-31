@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, it } from "node:test";
 import { handleManagementAction } from "../../src/agents/agent-management.ts";
 import { serializeAgent } from "../../src/agents/agent-serializer.ts";
@@ -1609,5 +1610,39 @@ Inspect project
 			if (oldUserProfile === undefined) delete process.env.USERPROFILE;
 			else process.env.USERPROFILE = oldUserProfile;
 		}
+	});
+});
+
+// `defaultReads` names files a task is expected to supply. Most dispatches are a
+// self-contained task with no context.md or plan.md, and an agent that treats the
+// absent read as a blocker stops and asks for a file the task never mentioned --
+// a supervisor round trip that produces nothing. The prompt has to say the reads
+// are optional; the frontmatter cannot express it, so this is the only place the
+// regression is visible.
+describe("builtin agents with default reads", () => {
+	it("tells every agent that an absent default read is optional, not a blocker", () => {
+		const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+		const agentsDir = path.join(projectRoot, "agents");
+		const files = fs.readdirSync(agentsDir).filter((name) => name.endsWith(".md"));
+		const withDefaultReads: string[] = [];
+		for (const file of files) {
+			const text = fs.readFileSync(path.join(agentsDir, file), "utf-8");
+			if (!/^defaultReads:/m.test(text)) continue;
+			withDefaultReads.push(file);
+			assert.match(
+				text,
+				/optional/i,
+				`${file} declares defaultReads but never says the reads are optional; a self-contained task would stall on a missing file`,
+			);
+			assert.match(
+				text,
+				/absent|missing|not prerequisites/i,
+				`${file} declares defaultReads but never says what to do when one is absent`,
+			);
+		}
+		assert.ok(
+			withDefaultReads.length >= 3,
+			`expected at least three builtin agents to declare defaultReads, found ${withDefaultReads.length}: ${withDefaultReads.join(", ")}. If the reads were removed the assertions above cannot see the regression, so this count is the guard against a vacuous pass.`,
+		);
 	});
 });
