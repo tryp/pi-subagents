@@ -29,7 +29,11 @@ import {
 } from "./proactive-skills.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
 import { toModelInfo } from "../shared/model-info.ts";
-import { resolveSubagentModelOverride, type ParentModel } from "../runs/shared/model-fallback.ts";
+import {
+	isDefaultedAgentModel,
+	resolveEffectiveSubagentModelWithSource,
+	type ParentModel,
+} from "../runs/shared/model-fallback.ts";
 import { validateToolBudgetConfig } from "../runs/shared/tool-budget.ts";
 import { resolveTurnBudgetConfig } from "../runs/shared/turn-budget.ts";
 import { validateAcceptanceInput } from "../runs/shared/acceptance.ts";
@@ -783,7 +787,17 @@ function handleModels(params: ManagementParams, ctx: ManagementContext): AgentTo
 	if (requestedAgent) {
 		const agent = builtinByName.get(requestedAgent);
 		if (!agent) return result(`Builtin agent '${requestedAgent}' not found.`, true);
-		const resolvedModel = resolveSubagentModelOverride(agent.model, currentModel, availableModels, preferredProvider);
+		const resolvedModel = resolveEffectiveSubagentModelWithSource(
+			undefined,
+			agent.model,
+			currentModel,
+			availableModels,
+			preferredProvider,
+			{
+				forked: agent.defaultContext === "fork",
+				agentModelFromDefault: isDefaultedAgentModel(agent.modelSource),
+			},
+		).model;
 		const lines = [
 			"Builtin subagent model",
 			"",
