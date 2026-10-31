@@ -65,7 +65,7 @@ import {
 	MAX_CONCURRENCY,
 	resolveChildMaxSubagentDepth,
 } from "../../shared/types.ts";
-import { resolveEffectiveSubagentModel } from "../shared/model-fallback.ts";
+import { isDefaultedAgentModel, resolveEffectiveSubagentModel } from "../shared/model-fallback.ts";
 import type { ModelScopeConfig } from "../shared/model-scope.ts";
 import { injectSingleOutputInstruction, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { buildWorkflowGraphSnapshot } from "../shared/workflow-graph.ts";
@@ -116,6 +116,8 @@ interface ParallelChainRunInput {
 	sessionFileForIndex?: (idx?: number) => string | undefined;
 	sessionFileForTask?: (agentName: string, idx?: number, modelOverride?: string) => string | undefined;
 	thinkingOverrideForTask?: (agentName: string, idx?: number, modelOverride?: string) => AgentConfig["thinking"] | undefined;
+	/** True when this agent forks the parent session; a `subagents.defaultModel` must not outrank the parent's model there. */
+	forkedForAgent?: (agentName: string) => boolean;
 	shareEnabled: boolean;
 	artifactConfig: ArtifactConfig;
 	artifactsDir: string;
@@ -246,7 +248,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 			input.ctx.model,
 			input.availableModels,
 			input.ctx.model?.provider,
-			{ scope: input.modelScope },
+			{ scope: input.modelScope, forked: input.forkedForAgent?.(task.agent) === true, agentModelFromDefault: isDefaultedAgentModel(taskAgentConfig?.modelSource) },
 		);
 	});
 	for (let taskIndex = 0; taskIndex < input.step.parallel.length; taskIndex++) {
@@ -435,6 +437,8 @@ interface ChainExecutionParams {
 	sessionFileForIndex?: (idx?: number) => string | undefined;
 	sessionFileForTask?: (agentName: string, idx?: number, modelOverride?: string) => string | undefined;
 	thinkingOverrideForTask?: (agentName: string, idx?: number, modelOverride?: string) => AgentConfig["thinking"] | undefined;
+	/** True when this agent forks the parent session; a `subagents.defaultModel` must not outrank the parent's model there. */
+	forkedForAgent?: (agentName: string) => boolean;
 	artifactsDir: string;
 	artifactConfig: ArtifactConfig;
 	includeProgress?: boolean;
@@ -520,6 +524,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 		chainSkills: chainSkillsParam,
 		chainDir: chainDirBase,
 		modelScope,
+		forkedForAgent,
 	} = params;
 	const chainSkills = chainSkillsParam ?? [];
 
@@ -742,6 +747,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					stepIndex,
 					availableModels,
 					modelScope,
+					forkedForAgent,
 					chainDir,
 					prev,
 					originalTask,
@@ -963,6 +969,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				stepIndex,
 				availableModels,
 				modelScope,
+				forkedForAgent,
 				chainDir,
 				prev,
 				originalTask,
@@ -1160,7 +1167,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				ctx.model,
 				availableModels,
 				ctx.model?.provider,
-				{ scope: modelScope },
+				{ scope: modelScope, forked: forkedForAgent?.(seqStep.agent) === true, agentModelFromDefault: isDefaultedAgentModel(agentConfig.modelSource) },
 			);
 
 			const outputPath = typeof behavior.output === "string"

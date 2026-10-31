@@ -20,6 +20,8 @@ export interface RunnerSubagentStep {
 	model?: string;
 	thinking?: string;
 	modelCandidates?: string[];
+	/** Where `model` came from, recorded at resolution time so status/receipts never re-derive it. */
+	modelResolution?: { requested?: string; resolved?: string; source: string };
 	tools?: string[];
 	extensions?: string[];
 	subagentOnlyExtensions?: string[];

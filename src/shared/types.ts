@@ -972,6 +972,11 @@ export interface AsyncStatus {
 		skills?: string[];
 		model?: string;
 		thinking?: string;
+		/**
+		 * Where `model` came from, recorded at launch so a later investigation can read
+		 * why a child ran the model it did without opening its events.jsonl.
+		 */
+		modelResolution?: { requested?: string; resolved?: string; source: string };
 		attemptedModels?: string[];
 		modelAttempts?: ModelAttempt[];
 		totalCost?: CostSummary;

@@ -164,6 +164,42 @@ export interface ResolveSubagentModelOverrideOptions {
 	onWarn?: (violation: ModelScopeViolation) => void;
 }
 
+/**
+ * Where a child's effective model came from, in precedence order.
+ *
+ * The two "gap filler" sources (`user-default` and `parent-session`) both mean
+ * "the agent never asked for a model", but they are kept apart on purpose: a
+ * user-wide `subagents.defaultModel` is applied when agents are *discovered*,
+ * which happens before a run's context mode is known, so it cannot tell a fresh
+ * child from a forked one. Recording which of the two filled the gap is what
+ * lets a receipt (and a later investigation) see the difference instead of
+ * having to re-derive it.
+ */
+export type SubagentModelSource =
+	/** Caller-supplied (`task.model` / `params.model`); always wins. */
+	| "explicit"
+	/** Declared on the agent itself (`model:` in frontmatter, or a settings override); always wins, fork or fresh. */
+	| "agent"
+	/** `subagents.defaultModel` filled the gap for a fresh child. */
+	| "user-default"
+	/** A defaulted model lost to the parent session model because the child forks the parent session. */
+	| "fork-parent"
+	/** Nothing set: the child inherits the parent session model, as it always has. */
+	| "parent-session";
+
+export interface SubagentModelResolution {
+	/** The model the caller or the agent asked for, verbatim, before resolution. */
+	requested?: string;
+	/** The model the child will actually run, after resolution. */
+	model?: string;
+	source: SubagentModelSource;
+}
+
+/** True when `subagents.defaultModel` filled this agent's model rather than the agent declaring one. */
+export function isDefaultedAgentModel(modelSource: { type: string } | undefined): boolean {
+	return modelSource?.type === "subagents.defaultModel";
+}
+
 function defaultScopeWarn(violation: ModelScopeViolation): void {
 	console.warn(`[pi-subagents] ${violation.message}`);
 }
@@ -211,14 +247,59 @@ export function resolveSubagentModelOverride(
 	return resolved;
 }
 
-export function resolveEffectiveSubagentModel(
+export interface ResolveEffectiveSubagentModelOptions extends Omit<ResolveSubagentModelOverrideOptions, "source"> {
+	/**
+	 * True when this child forks the parent session. A *defaulted* model must not
+	 * outrank the parent's: the fork continues the parent conversation, so the
+	 * model the user picked for it is the one that applies. A *declared* model is
+	 * unaffected — naming a model is a decision about that agent, not a gap filler.
+	 */
+	forked?: boolean;
+	/** True when `agentModel` came from `subagents.defaultModel` (see {@link isDefaultedAgentModel}). */
+	agentModelFromDefault?: boolean;
+}
+
+/** A model string that actually requests something (not `inherit`, not blank). */
+function requestedModelOf(model: string | boolean | undefined): string | undefined {
+	const trimmed = typeof model === "string" ? model.trim() : "";
+	return trimmed && trimmed !== INHERIT_MODEL ? trimmed : undefined;
+}
+
+/**
+ * Resolve a subagent's effective model together with *why* it got that model.
+ *
+ * Precedence, highest first:
+ *
+ * 1. caller-supplied model (`task.model` / `params.model`) — always wins
+ * 2. model declared on the agent (frontmatter `model:`, or a settings override) —
+ *    always wins, fork or fresh
+ * 3. fork child — the parent session model, even when `subagents.defaultModel`
+ *    filled the gap (see {@link ResolveEffectiveSubagentModelOptions.forked})
+ * 4. fresh child — `subagents.defaultModel`
+ * 5. nothing set — the parent session model, as it always has been
+ *
+ * Rows 1, 2, 4 and 5 are today's behaviour; row 3 is the one rule a user-wide
+ * default cannot express on its own. The result carries its source so a launch
+ * receipt can name the branch that fired instead of guessing from the string.
+ */
+export function resolveEffectiveSubagentModelWithSource(
 	explicitModel: string | boolean | undefined,
 	agentModel: string | boolean | undefined,
 	parentModel: ParentModel | undefined,
 	availableModels: AvailableModelInfo[] | undefined,
 	preferredProvider?: string,
-	options?: Omit<ResolveSubagentModelOverrideOptions, "source">,
-): string | undefined {
+	options?: ResolveEffectiveSubagentModelOptions,
+): SubagentModelResolution {
+	const requestedExplicit = requestedModelOf(explicitModel);
+	const requestedAgent = requestedModelOf(agentModel);
+	const inheritFromParent = () =>
+		resolveSubagentModelOverride(undefined, parentModel, availableModels, preferredProvider, options);
+
+	// Row 3: a defaulted model loses to the parent on a fork.
+	if (requestedExplicit === undefined && requestedAgent !== undefined && options?.forked === true && options.agentModelFromDefault === true) {
+		return { requested: requestedAgent, model: inheritFromParent(), source: "fork-parent" };
+	}
+
 	const resolved = resolveSubagentModelOverride(
 		explicitModel ?? agentModel,
 		parentModel,
@@ -226,14 +307,73 @@ export function resolveEffectiveSubagentModel(
 		preferredProvider,
 		{ ...options, source: explicitModel !== undefined ? "explicit" : "inherited" },
 	);
-	if (resolved || explicitModel === undefined) return resolved;
-	return resolveSubagentModelOverride(
+	if (resolved === undefined && explicitModel !== undefined) {
+		const fallback = resolveSubagentModelOverride(
+			agentModel,
+			parentModel,
+			availableModels,
+			preferredProvider,
+			{ ...options, source: "inherited" },
+		);
+		return { requested: requestedAgent, model: fallback, source: agentSourceOf(requestedAgent, options) };
+	}
+	return {
+		requested: requestedExplicit ?? requestedAgent,
+		model: resolved,
+		source: requestedExplicit !== undefined ? "explicit" : agentSourceOf(requestedAgent, options),
+	};
+}
+
+function agentSourceOf(
+	requestedAgent: string | undefined,
+	options: ResolveEffectiveSubagentModelOptions | undefined,
+): SubagentModelSource {
+	if (requestedAgent === undefined) return "parent-session";
+	return options?.agentModelFromDefault === true ? "user-default" : "agent";
+}
+
+/**
+ * Backwards-compatible projection of {@link resolveEffectiveSubagentModelWithSource}.
+ * Existing callers that do not care about provenance keep calling this; a caller
+ * that launches a possible fork must call the `...WithSource` form and pass
+ * `forked` so row 3 can fire, and should render the source with
+ * {@link formatModelResolutionReceipt}.
+ */
+export function resolveEffectiveSubagentModel(
+	explicitModel: string | boolean | undefined,
+	agentModel: string | boolean | undefined,
+	parentModel: ParentModel | undefined,
+	availableModels: AvailableModelInfo[] | undefined,
+	preferredProvider?: string,
+	options?: ResolveEffectiveSubagentModelOptions,
+): string | undefined {
+	return resolveEffectiveSubagentModelWithSource(
+		explicitModel,
 		agentModel,
 		parentModel,
 		availableModels,
 		preferredProvider,
-		{ ...options, source: "inherited" },
-	);
+		options,
+	).model;
+}
+
+/** Human-readable provenance, as it appears in a launch receipt. */
+const MODEL_SOURCE_LABELS: Record<SubagentModelSource, string> = {
+	"explicit": "caller request",
+	"agent": "agent frontmatter",
+	"user-default": "user defaultModel",
+	"fork-parent": "fork: parent session",
+	"parent-session": "parent session",
+};
+
+/**
+ * One compact launch line per child: `worker -> model (provenance)`.
+ *
+ * The provenance is taken from the resolver's own record, never re-derived
+ * here, so this line cannot disagree with the model that was actually launched.
+ */
+export function formatModelResolutionReceipt(agent: string, resolution: SubagentModelResolution): string {
+	return `${agent} -> ${resolution.model ?? "provider default"} (${MODEL_SOURCE_LABELS[resolution.source]})`;
 }
 
 export interface BuildModelCandidatesOptions {

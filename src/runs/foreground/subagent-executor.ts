@@ -15,7 +15,7 @@ import { clearPendingForegroundControlNotices } from "../../extension/control-no
 import { runSync } from "./execution.ts";
 import { handleWatchdogToolAction, WATCHDOG_TOOL_ACTIONS } from "../../watchdog/tool-actions.ts";
 import type { MainWatchdogRuntime } from "../../watchdog/runtime.ts";
-import { buildModelCandidates, resolveEffectiveSubagentModel, resolveModelCandidate } from "../shared/model-fallback.ts";
+import { buildModelCandidates, isDefaultedAgentModel, resolveEffectiveSubagentModel, resolveModelCandidate } from "../shared/model-fallback.ts";
 import type { ModelScopeConfig } from "../shared/model-scope.ts";
 import { aggregateParallelOutputs } from "../shared/parallel-utils.ts";
 import { recordRun } from "../shared/run-history.ts";
@@ -853,6 +853,8 @@ function appendStepToAsyncChain(input: {
 		chain: wrapChainTasksForFork(input.params.chain, contextPolicy),
 		task: input.params.task,
 		resultMode: "chain",
+		forked: contextPolicy.usesFork,
+		forkedAgents: agents.filter((candidate) => shouldForkAgent(contextPolicy, candidate.name)).map((candidate) => candidate.name),
 		agents,
 		ctx: asyncCtx,
 		availableModels: input.ctx.modelRegistry.getAvailable().map(toModelInfo),
@@ -1214,12 +1216,15 @@ async function resumeAsyncRun(input: {
 		const artifactConfig: ArtifactConfig = { ...DEFAULT_ARTIFACT_CONFIG, enabled: input.params.artifacts !== false };
 		const availableModels = input.ctx.modelRegistry.getAvailable().map(toModelInfo);
 		const contextPolicy = resolveExplicitContextPolicy(input.params);
+		const forkedAgents = agents.filter((candidate) => shouldForkAgent(contextPolicy, candidate.name)).map((candidate) => candidate.name);
 		const workflowTask = (input.params.task ?? followUp) || undefined;
 		const goal = resolveAsyncEventGoal(workflowTask, attachChain);
 		const chain = wrapChainTasksForFork(attachChain, contextPolicy);
 		const normalized = normalizeSkillInput(input.params.skill);
 		const result = executeAsyncChain(runId, {
 			chain,
+			forked: contextPolicy.usesFork,
+			forkedAgents,
 			task: workflowTask,
 			goal,
 			attachRoot: {
@@ -2037,6 +2042,9 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 		interactive: ctx.hasUI,
 	};
 	const availableModels: ModelInfo[] = ctx.modelRegistry.getAvailable().map(toModelInfo);
+	// `usesFork` is true when any requested agent forks; carry the per-agent set
+	// so mixed async chains do not apply fork precedence to fresh defaulted steps.
+	const forkedAgents = agents.filter((candidate) => shouldForkAgent(contextPolicy, candidate.name)).map((candidate) => candidate.name);
 	const currentMaxSubagentDepth = resolveCurrentMaxSubagentDepth(deps.config.maxSubagentDepth);
 	const currentProvider = ctx.model?.provider;
 	const controlIntercomTarget = intercomBridge.active ? intercomBridge.orchestratorTarget : undefined;
@@ -2064,6 +2072,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 				concurrency: resolveTopLevelParallelConcurrency(params.concurrency, deps.config.parallel?.concurrency),
 				worktree: params.worktree,
 			}],
+			forked: contextPolicy.usesFork,
+			forkedAgents,
 			resultMode: "parallel",
 			goal: params.tasks[0]?.task ?? "",
 			agents,
@@ -2104,6 +2114,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 		const chain = wrapChainTasksForFork(rawChain, contextPolicy);
 		return executeAsyncChain(id, {
 			chain,
+			forked: contextPolicy.usesFork,
+			forkedAgents,
 			task: params.task,
 			goal: resolveAsyncEventGoal(params.task, rawChain),
 			agents,
@@ -2153,7 +2165,14 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 		const normalizedSkills = normalizeSkillInput(params.skill);
 		const skills = normalizedSkills === false ? [] : normalizedSkills;
 		const maxSubagentDepth = resolveChildMaxSubagentDepth(currentMaxSubagentDepth, a.maxSubagentDepth);
-		const modelOverride = resolveEffectiveSubagentModel(params.model as string | undefined, a.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope });
+		const modelOverride = resolveEffectiveSubagentModel(
+			params.model as string | undefined,
+			a.model,
+			ctx.model,
+			availableModels,
+			currentProvider,
+			{ scope: data.modelScope, forked: shouldForkAgent(contextPolicy, params.agent!), agentModelFromDefault: isDefaultedAgentModel(a.modelSource) },
+		);
 		return executeAsyncSingle(id, {
 			agent: params.agent!,
 			task: shouldForkAgent(contextPolicy, params.agent!) ? wrapForkTask(params.task ?? "") : (params.task ?? ""),
@@ -2162,6 +2181,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			ctx: asyncCtx,
 			availableModels,
 			cwd: effectiveCwd,
+			forked: shouldForkAgent(contextPolicy, params.agent!),
 			maxOutput: params.maxOutput,
 			artifactsDir: artifactConfig.enabled ? artifactsDir : undefined,
 			artifactConfig,
@@ -2222,6 +2242,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 	const normalized = normalizeSkillInput(params.skill);
 	const chainSkills = normalized === false ? [] : (normalized ?? []);
 	const chain = wrapChainTasksForFork(params.chain as ChainStep[], contextPolicy);
+	const forkedAgents = agents.filter((candidate) => shouldForkAgent(contextPolicy, candidate.name)).map((candidate) => candidate.name);
 	const currentMaxSubagentDepth = resolveCurrentMaxSubagentDepth(deps.config.maxSubagentDepth);
 	const chainResult = await executeChain({
 		chain,
@@ -2238,6 +2259,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		sessionFileForIndex,
 		sessionFileForTask,
 		thinkingOverrideForTask,
+		forkedForAgent: (agentName) => shouldForkAgent(contextPolicy, agentName),
 		artifactsDir,
 		artifactConfig,
 		includeProgress: params.includeProgress,
@@ -2291,6 +2313,8 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		const firstAgent = firstChainAgent(rawAsyncChain);
 		return executeAsyncChain(id, {
 			chain: asyncChain,
+			forked: contextPolicy.usesFork,
+			forkedAgents,
 			task: params.task,
 			goal: resolveAsyncEventGoal(params.task, rawAsyncChain, firstAgent ? shouldForkAgent(contextPolicy, firstAgent) : false),
 			agents,
@@ -2640,6 +2664,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 	} = data;
 	const onControlEvent = createForegroundControlNotifier(data, deps);
 	const childIntercomTarget = data.intercomBridge.active ? resolveSubagentIntercomTarget : undefined;
+	const forkedAgents = agents.filter((candidate) => shouldForkAgent(contextPolicy, candidate.name)).map((candidate) => candidate.name);
 	const allProgress: AgentProgress[] = [];
 	const allArtifactPaths: ArtifactPaths[] = [];
 	const tasks = params.tasks!;
@@ -2701,7 +2726,11 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		...(task.model !== undefined ? { model: task.model } : {}),
 	}));
 	const modelOverrides: (string | undefined)[] = tasks.map((_, i) =>
-		resolveEffectiveSubagentModel(behaviorOverrides[i]?.model, agentConfigs[i]?.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope }),
+		resolveEffectiveSubagentModel(behaviorOverrides[i]?.model, agentConfigs[i]?.model, ctx.model, availableModels, currentProvider, {
+			scope: data.modelScope,
+			forked: shouldForkAgent(contextPolicy, tasks[i]!.agent),
+			agentModelFromDefault: isDefaultedAgentModel(agentConfigs[i]?.modelSource),
+		}),
 	);
 
 	if (params.clarify === true && ctx.hasUI) {
@@ -2736,7 +2765,11 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		for (let i = 0; i < result.behaviorOverrides.length; i++) {
 			const override = result.behaviorOverrides[i];
 			if (override?.model !== undefined) {
-				modelOverrides[i] = resolveEffectiveSubagentModel(override.model, agentConfigs[i]?.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope });
+				modelOverrides[i] = resolveEffectiveSubagentModel(override.model, agentConfigs[i]?.model, ctx.model, availableModels, currentProvider, {
+					scope: data.modelScope,
+					forked: shouldForkAgent(contextPolicy, tasks[i]!.agent),
+					agentModelFromDefault: isDefaultedAgentModel(agentConfigs[i]?.modelSource),
+				});
 				behaviorOverrides[i]!.model = override.model;
 			}
 			if (override?.output !== undefined) behaviorOverrides[i]!.output = override.output;
@@ -2788,6 +2821,8 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			});
 			return executeAsyncChain(id, {
 				chain: [{ parallel: parallelTasks, concurrency: parallelConcurrency, worktree: params.worktree }],
+				forked: contextPolicy.usesFork,
+				forkedAgents,
 				resultMode: "parallel",
 				goal: taskTexts[0] ?? "",
 				agents,
@@ -3045,7 +3080,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		ctx.model,
 		availableModels,
 		currentProvider,
-		{ scope: data.modelScope },
+		{ scope: data.modelScope, forked: shouldForkAgent(contextPolicy, agentConfig.name), agentModelFromDefault: isDefaultedAgentModel(agentConfig.modelSource) },
 	);
 	let skillOverride: string[] | false | undefined = normalizeSkillInput(params.skill);
 	const rawOutput = params.output !== undefined ? params.output : agentConfig.output;
@@ -3082,7 +3117,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 
 		task = result.templates[0]!;
 		const override = result.behaviorOverrides[0];
-		if (override?.model !== undefined) modelOverride = resolveEffectiveSubagentModel(override.model, agentConfig.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope });
+		if (override?.model !== undefined) modelOverride = resolveEffectiveSubagentModel(override.model, agentConfig.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope, forked: shouldForkAgent(contextPolicy, agentConfig.name), agentModelFromDefault: isDefaultedAgentModel(agentConfig.modelSource) });
 		if (override?.output !== undefined) effectiveOutput = normalizeSingleOutputOverride(override.output, agentConfig.output);
 		if (override?.skills !== undefined) skillOverride = override.skills;
 
@@ -3814,6 +3849,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 					ctx.model,
 					forkAvailableModels,
 					ctx.model?.provider,
+					{ forked: shouldForkAgent(contextPolicy, agentName), agentModelFromDefault: isDefaultedAgentModel(agentConfig?.modelSource) },
 				);
 				const candidates = buildModelCandidates(
 					primaryModel,
