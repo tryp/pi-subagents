@@ -105,9 +105,12 @@ describe("registered subagent tool description", () => {
 
 		// The size win is the reason this mode exists; a description that drifts
 		// back towards full has to fail here rather than be noticed by nobody.
-		// Measured 2026-10-31: full 10,574 rendered, compact 4,060 (38.4%), of which
-		// 2,228 is the mandatory block both modes carry. Excluding that shared block
-		// the index is 1,832 chars against 8,346, i.e. 22% of the reference.
+		// Measured 2026-10-31 from `buildSubagentToolDescription`: full 10,543
+		// rendered (its constant carries the 2,228-char mandatory block inline),
+		// compact 4,058 = 1,828 of index plus that same block, i.e. 38.5%. Excluding
+		// the shared block the index is 1,828 against 8,311, i.e. 22% of the
+		// reference. These are the numbers to quote; a hand measurement of the
+		// constants is easy to get wrong because the full text contains backticks.
 		assert.ok(
 			compact.length <= full.length * 0.4,
 			`compact (${compact.length} chars) must stay at or below 40% of full (${full.length} chars)`,
