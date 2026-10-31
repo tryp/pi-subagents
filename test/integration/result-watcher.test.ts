@@ -33,6 +33,7 @@ function createState(): SubagentState {
 
 describe("result watcher", () => {
 	it("does not notify a completion published after wait already returned all terminal output", async () => {
+		fs.mkdirSync(path.join(process.cwd(), "tmp"), { recursive: true });
 		const root = fs.mkdtempSync(path.join(process.cwd(), "tmp", "completion-wait-race-"));
 		const resultsDir = path.join(root, "results");
 		const asyncDir = path.join(root, "runs", "run-after-wait");

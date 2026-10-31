@@ -1236,7 +1236,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		);
 		assert.equal(resumed.isError, true);
 		assert.match(resumed.content[0]?.text ?? "", /cannot be revived safely while any child may still be live/);
-		assert.match(resumed.content[0]?.text ?? "", /do not launch a replacement/);
+		assert.match(resumed.content[0]?.text ?? "", /Do not launch a replacement/);
 	});
 
 	it("resume action rejects detached foreground children that may still be live", async () => {
