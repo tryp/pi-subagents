@@ -666,24 +666,82 @@ Drive the failing test first.
 		assert.match(readText(listed), /Invalid JSON chain/);
 	});
 
-	it("reports builtin runtime-loaded model mappings from current session state", () => {
+	it("lists registered models by provider and credential state without builtin model mappings", () => {
 		const ctx = {
 			cwd: tempDir,
 			modelRegistry: {
-				getAvailable: () => [
-					{ provider: "openai", id: "gpt-5-mini" },
-					{ provider: "anthropic", id: "claude-sonnet-4" },
+				getAvailable: () => [{ provider: "openai-codex", id: "gpt-6-luna" }],
+				getAll: () => [
+					{ provider: "openai-codex", id: "gpt-6-luna" },
+					{ provider: "amazon-bedrock", id: "gpt-6-luna" },
 				],
 			},
-			model: { provider: "openai", id: "gpt-5-mini" },
+			model: { provider: "ollama-cloud", id: "deepseek-v4.1-flash:1017" },
 		};
 
-		const result = handleManagementAction("models", {}, ctx);
-		const text = readText(result);
-		assert.equal(result.isError, false);
-		assert.match(text, /^Builtin subagent models/m);
-		assert.match(text, /Current session model:\n  openai\/gpt-5-mini/);
-		assert.match(text, /(?:^|\n)scout\n  model:\n    openai\/gpt-5-mini\n  source: inherits current session model(?:\n|$)/);
+		const response = handleManagementAction("models", {}, ctx);
+		const text = readText(response);
+		assert.equal(response.isError, false);
+		assert.match(text, /^Requestable models by provider/m);
+		assert.match(text, /Current session:\n  ollama-cloud\/deepseek-v4\.1-flash:1017/);
+		assert.match(text, /amazon-bedrock \(no credentials\)\n  gpt-6-luna \(no credentials\)/);
+		assert.match(text, /openai-codex \(credentials ok\)\n  gpt-6-luna \(credentials ok\)/);
+		assert.doesNotMatch(text, /\n  source:/, "no-agent mode must not emit per-builtin effective-model blocks");
+	});
+
+	it("reports bare-name candidates, chooses the credentialed provider, and explains why", () => {
+		fs.mkdirSync(path.join(tempDir, ".pi"), { recursive: true });
+		fs.writeFileSync(path.join(tempDir, ".pi", "settings.json"), JSON.stringify({
+			subagents: { agentOverrides: { reviewer: { model: "gpt-6-luna" } } },
+		}), "utf-8");
+		const ctx = {
+			cwd: tempDir,
+			modelRegistry: {
+				getAvailable: () => [{ provider: "openai-codex", id: "gpt-6-luna" }],
+				getAll: () => [
+					{ provider: "openai-codex", id: "gpt-6-luna" },
+					{ provider: "amazon-bedrock", id: "gpt-6-luna" },
+				],
+			},
+		};
+		const text = readText(handleManagementAction("models", { agent: "reviewer" }, ctx));
+		assert.match(text, /tried amazon-bedrock \(no credentials\)/);
+		assert.match(text, /tried openai-codex \(credentials ok\)/);
+		assert.match(text, /chosen: openai-codex\/gpt-6-luna/);
+		assert.match(text, /why: selected a credentialed matching candidate/);
+	});
+
+	it("reports every bare-name candidate when no provider is credentialed", () => {
+		fs.mkdirSync(path.join(tempDir, ".pi"), { recursive: true });
+		fs.writeFileSync(path.join(tempDir, ".pi", "settings.json"), JSON.stringify({
+			subagents: { agentOverrides: { reviewer: { model: "gpt-6-luna" } } },
+		}), "utf-8");
+		const ctx = {
+			cwd: tempDir,
+			modelRegistry: {
+				getAvailable: () => [],
+				getAll: () => [
+					{ provider: "openai-codex", id: "gpt-6-luna" },
+					{ provider: "amazon-bedrock", id: "gpt-6-luna" },
+				],
+			},
+		};
+		const text = readText(handleManagementAction("models", { agent: "reviewer" }, ctx));
+		assert.match(text, /tried amazon-bedrock \(no credentials\)/);
+		assert.match(text, /tried openai-codex \(no credentials\)/);
+		assert.match(text, /chosen: \(none\)/);
+		assert.match(text, /error: no credentialed candidate; tried amazon-bedrock \(no credentials\), openai-codex \(no credentials\)/);
+		assert.match(text, /why: no matching provider has credentials/);
+	});
+
+	it("marks scoped models absent from getAvailable as uncredentialed", () => {
+		const ctx = {
+			cwd: tempDir,
+			modelRegistry: { getAvailable: () => [] },
+			scopedModels: [{ model: { provider: "openai-codex", id: "gpt-6-luna" } }],
+		};
+		const text = readText(handleManagementAction("models", {}, ctx));
+		assert.match(text, /openai-codex \(no credentials\)\n  gpt-6-luna \(no credentials\)/);
 	});
 
 	it("reports override source and disabled builtin state in runtime model mappings", () => {

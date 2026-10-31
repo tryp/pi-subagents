@@ -177,7 +177,8 @@ describe("builtin agent disabling", () => {
 			{ cwd: tempProject, modelRegistry: { getAvailable: () => [] } },
 		));
 
-		assert.match(text, /Executable agents:\n- helper \(project\): Helper/);
+		assert.match(text, /Available agents:\n- helper \(project\): Helper/);
+		assert.doesNotMatch(text, /Executable agents:/);
 		assert.doesNotMatch(text, /Disabled builtins:/);
 		for (const name of disabledBuiltinNames) {
 			assert.doesNotMatch(text, new RegExp(`^- ${name} \\(builtin`, "m"));

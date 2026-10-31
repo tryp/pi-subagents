@@ -684,7 +684,7 @@ export function handleList(params: ManagementParams, ctx: ManagementContext): Ag
 		: undefined;
 
 	const lines = [
-		"Executable agents:",
+		"Available agents:",
 		...agentLines,
 		...(currentModelLine ? ["", currentModelLine] : []),
 		...modelLines,
@@ -718,9 +718,10 @@ function handleModels(params: ManagementParams, ctx: ManagementContext): AgentTo
 	const discovered = discoverAgentsAll(ctx.cwd);
 	const builtinByName = new Map(discovered.builtin.map((agent) => [agent.name, agent]));
 	const availableModels = ctx.modelRegistry.getAvailable().map(toModelInfo);
+	const allModels = (ctx.modelRegistry.getAll?.() ?? ctx.modelRegistry.getAvailable()).map(toModelInfo);
+	const credentialedModelIds = new Set(availableModels.map((model) => model.fullId));
 	const currentModel = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
 	const preferredProvider = ctx.model?.provider;
-	const names = requestedAgent ? [requestedAgent] : [...BUILTIN_AGENT_NAMES];
 
 	if (requestedAgent) {
 		const agent = builtinByName.get(requestedAgent);
@@ -742,6 +743,22 @@ function handleModels(params: ManagementParams, ctx: ManagementContext): AgentTo
 			lines.push("Requested model setting:");
 			lines.push(`  ${agent.model}`);
 		}
+		if (typeof agent.model === "string" && !agent.model.includes("/")) {
+			const candidates = allModels.filter((model) => model.id === agent.model).sort((a, b) => a.provider.localeCompare(b.provider));
+			if (candidates.length > 0) {
+				lines.push("Model resolution:");
+				for (const candidate of candidates) {
+					lines.push(`  tried ${candidate.provider} (${credentialedModelIds.has(candidate.fullId) ? "credentials ok" : "no credentials"})`);
+				}
+				const chosen = candidates.find((candidate) => candidate.fullId === resolvedModel && credentialedModelIds.has(candidate.fullId));
+				lines.push(`  chosen: ${chosen?.fullId ?? "(none)"}`);
+				if (!chosen) {
+					const candidateStates = candidates.map((candidate) => `${candidate.provider} (${credentialedModelIds.has(candidate.fullId) ? "credentials ok" : "no credentials"})`).join(", ");
+					lines.push(`  error: no credentialed candidate; tried ${candidateStates}`);
+				}
+				lines.push(`  why: ${chosen ? (candidates.length > 1 ? "selected a credentialed matching candidate" : "only matching provider") : "no matching provider has credentials"}`);
+			}
+		}
 		if (agent.disabled) lines.push("Disabled: true");
 		lines.push("Current session model:");
 		lines.push(`  ${currentModel ? `${currentModel.provider}/${currentModel.id}` : "(unavailable)"}`);
@@ -749,31 +766,36 @@ function handleModels(params: ManagementParams, ctx: ManagementContext): AgentTo
 	}
 
 	const lines = [
-		"Builtin subagent models",
+		"Requestable models by provider",
 		"",
-		"Current session model:",
+		"Current session:",
 		`  ${currentModel ? `${currentModel.provider}/${currentModel.id}` : "(unavailable)"}`,
 		"",
 	];
-
-	for (const name of names) {
-		const agent = builtinByName.get(name);
-		if (!agent) {
-			lines.push(name);
-			lines.push("  model:");
-			lines.push("    (builtin definition not found)");
-			lines.push("  source: missing");
-			lines.push("");
-			continue;
+	const visibleModels = getVisibleModels(ctx).map(toModelInfo);
+	const visibleBareNames = new Set(visibleModels.map((model) => model.id));
+	const listedModels = new Map<string, (typeof allModels)[number]>();
+	for (const model of visibleModels) listedModels.set(model.fullId, model);
+	// Include uncredentialed providers only when they are candidates for a visible bare id.
+	for (const model of allModels) {
+		if (visibleBareNames.has(model.id)) listedModels.set(model.fullId, model);
+	}
+	const byProvider = new Map<string, (typeof allModels)[number][]>();
+	for (const model of listedModels.values()) {
+		const models = byProvider.get(model.provider) ?? [];
+		models.push(model);
+		byProvider.set(model.provider, models);
+	}
+	for (const [provider, models] of [...byProvider.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+		const credentialedCount = models.filter((model) => credentialedModelIds.has(model.fullId)).length;
+		const providerState = credentialedCount === 0 ? "no credentials" : credentialedCount === models.length ? "credentials ok" : "mixed credentials";
+		lines.push(`${provider} (${providerState})`);
+		for (const model of models.sort((a, b) => a.id.localeCompare(b.id))) {
+			lines.push(`  ${model.id} (${credentialedModelIds.has(model.fullId) ? "credentials ok" : "no credentials"})`);
 		}
-		const resolvedModel = resolveSubagentModelOverride(agent.model, currentModel, availableModels, preferredProvider);
-		const source = `${formatModelSource(agent, currentModel)}${agent.disabled ? "; disabled" : ""}`;
-		lines.push(name);
-		lines.push("  model:");
-		lines.push(`    ${resolvedModel ?? "(unresolved)"}`);
-		lines.push(`  source: ${source}`);
 		lines.push("");
 	}
+	if (byProvider.size === 0) lines.push("(no models registered)");
 
 	return result(lines.join("\n"));
 }

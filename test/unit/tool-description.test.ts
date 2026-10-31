@@ -35,7 +35,8 @@ describe("registered subagent tool description", () => {
 			assert.doesNotMatch(description, new RegExp(`\\b${builtinName}\\b`));
 		}
 		assert.match(description, /use \{ action: "list" \} to inspect configured agents\/chains/i);
-		assert.match(description, /executable\/non-disabled/i);
+		assert.match(description, /listed, enabled/i);
+		assert.doesNotMatch(description, /executable\/non-disabled/i);
 		assert.match(description, /proactive skill subagent suggestions/i);
 		assert.doesNotMatch(description, /disabled builtins/i);
 		assert.match(description, /output\?,reads\?,progress\?/i);

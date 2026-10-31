@@ -7,7 +7,7 @@ const CUSTOM_TOOL_DESCRIPTION_FILE = "subagent-tool-description.md";
 const CUSTOM_TOOL_DESCRIPTION_MAX_BYTES = 50 * 1024;
 
 export const SUBAGENT_SAFETY_GUIDANCE = `SAFETY-CRITICAL SUBAGENT GUIDANCE:
-• Use { action: "list" } before execution and only run executable/non-disabled agents or chains.
+• Use { action: "list" } before execution and only run listed, enabled agents or chains.
 • Keep execution and management separate: omit action for SINGLE/PARALLEL/CHAIN execution; use action only for list/get/models/create/update/delete/status/grant-spawn-budget/interrupt/stop/resume/append-step/doctor.
 • Async is the default: an omitted async detaches the run and returns immediately, so omit it. (In a single-shot 'pi -p' run an omitted async stays inline instead, because a detached result would have no later turn to land in.) Prefer ONE parallel batch over a series of sequential launches when the tasks do not depend on each other, and pass async:false only when you must have the result inline before the next step (a blocking launch overlaps nothing). Do not sleep or poll status just to wait. In an interactive session, normally return control and let Pi wake you; a wait is only for when you need a result now, and until:"next-event" sleeps until anything changes. A wait returns the first finished child by default, so checking for an early result is cheap: call subagent_wait when any child's result would let you start the next step, and repeat it to drain the remaining children as they finish. Ask for until:"all-terminal" (or barrier:"integration") only when the whole batch must be finished before you proceed. Headless sessions auto-drain current-session work at agent_end, so detached children are never abandoned by returning early.
 • Child-safety boundary: ordinary child subagents are not orchestrators and must not run subagents. Only explicitly configured fanout children may use the child-safe subagent tool, still bounded by depth/session limits.
@@ -17,7 +17,7 @@ export const SUBAGENT_SAFETY_GUIDANCE = `SAFETY-CRITICAL SUBAGENT GUIDANCE:
 export const FULL_SUBAGENT_TOOL_DESCRIPTION = `Delegate to subagents or manage agent definitions.
 
 EXECUTION (use exactly ONE mode):
-• Before executing, use { action: "list" } to inspect configured agents/chains. Only execute agents listed as executable/non-disabled.
+• Before executing, use { action: "list" } to inspect configured agents/chains. Only execute agents listed and enabled.
 • SINGLE: { agent, task? } - one task; omit task for self-contained agents
 • CHAIN: { chain: [{agent:"agent-a"}, {parallel:[{agent:"agent-b",count:3}]}] } - sequential pipeline with optional parallel fan-out
 • PARALLEL: { tasks: [{agent,task,count?,output?,reads?,progress?}, ...], concurrency?: number, worktree?: true } - concurrent execution (worktree: isolate each task in a git worktree)
@@ -39,7 +39,7 @@ CHAIN EXAMPLES (quick reference for the nested schema):
 • Mixed: { chain: [{agent:"agent-a", task:"Research {task}"}, {parallel: [{agent:"agent-b", task:"Review {previous}", count: 2}]}, {agent:"agent-c", task:"Summarize {previous}"}] }
 
 MANAGEMENT (use action field, omit agent/task/chain/tasks):
-• { action: "list" } - discover executable agents/chains
+• { action: "list" } - discover available agents/chains
 • { action: "get", agent: "name" } - full detail; packaged agents use dotted runtime names like "package.agent"
 • { action: "models", agent?: "name" } - show the runtime-loaded builtin subagent model mapping, optionally filtered to one builtin
 • { action: "watchdog.status" | "watchdog.check" | "watchdog.recommend-model" } - inspect the opt-in subagent watchdog and its strong complementary model recommendation
@@ -79,7 +79,7 @@ ${SUBAGENT_SAFETY_GUIDANCE}`;
 export const COMPACT_SUBAGENT_TOOL_DESCRIPTION = `Delegate to subagents or manage definitions. Use exactly one mode per call.
 
 EXECUTE:
-• Before execution, call { action: "list" }; run only executable/non-disabled configured agents/chains.
+• Before execution, call { action: "list" }; run only listed, enabled agents/chains.
 • SINGLE {agent, task?}; PARALLEL {tasks:[{agent,task,count?,output?,reads?,progress?}], concurrency?, worktree?}; CHAIN {chain:[{agent,task?},{parallel:[...]}]}.
 • context can be "fresh" or "fork"; omitted uses each agent defaultContext, otherwise fresh. timeoutMs applies to foreground and async/background runs.
 • rlimits can set cpuSeconds, fileSizeMb, openFiles, and coreSizeMb; Linux only, no memory/process-count bound, inherited by nested agents (which can only lower them). A configured limit on macOS/Windows is rejected, not ignored.
