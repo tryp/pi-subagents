@@ -7,6 +7,7 @@ import {
 	ASYNC_RUN_GC_BUDGET_BYTES,
 	pruneAsyncRunDirs,
 	type AsyncRunGcOptions,
+	runAsyncRunGc,
 } from "../../src/runs/background/async-run-retention.ts";
 
 const roots: string[] = [];
@@ -54,8 +55,8 @@ function addRun(
 	return runDir;
 }
 
-function gc(root: ReturnType<typeof fixture>, options: Partial<AsyncRunGcOptions> = {}) {
-	return pruneAsyncRunDirs({
+async function gc(root: ReturnType<typeof fixture>, options: Partial<AsyncRunGcOptions> = {}) {
+	return await pruneAsyncRunDirs({
 		asyncDir: root.asyncDir,
 		resultsDir: root.resultsDir,
 		nestedEventsDir: root.nestedEventsDir,
@@ -73,18 +74,18 @@ afterEach(() => {
 });
 
 describe("async run retention", () => {
-	it("uses a named 2 GiB budget setting", () => {
+	it("uses a named 2 GiB budget setting", async () => {
 		assert.equal(ASYNC_RUN_GC_BUDGET_BYTES, 2 * 1024 * 1024 * 1024);
 	});
 
-	it("prunes only terminal writer states and keeps paused, running, queued, missing, and unreadable statuses", () => {
+	it("prunes only terminal writer states and keeps paused, running, queued, missing, and unreadable statuses", async () => {
 		const root = fixture();
 		for (const [id, state] of [["complete", "complete"], ["failed", "failed"], ["stopped", "stopped"]]) addRun(root, id, state, 1);
 		for (const [id, state] of [["paused", "paused"], ["running", "running"], ["queued", "queued"]]) addRun(root, id, state, 1);
 		fs.mkdirSync(path.join(root.asyncDir, "missing"));
 		fs.mkdirSync(path.join(root.asyncDir, "invalid"));
 		fs.writeFileSync(path.join(root.asyncDir, "invalid", "status.json"), "{");
-		const summary = gc(root);
+		const summary = await gc(root);
 		assert.deepEqual(["complete", "failed", "stopped"].map((id) => fs.existsSync(path.join(root.asyncDir, id))), [false, false, false]);
 		for (const id of ["paused", "running", "queued", "missing", "invalid"]) assert.equal(fs.existsSync(path.join(root.asyncDir, id)), true, id);
 		assert.equal(summary.pruned, 3);
@@ -94,27 +95,27 @@ describe("async run retention", () => {
 		assert.equal(summary.kept["unreadable-status"], 1);
 	});
 
-	it("keeps runs with a live or permission-denied recorded PID and prunes dead PIDs", () => {
+	it("keeps runs with a live or permission-denied recorded PID and prunes dead PIDs", async () => {
 		const root = fixture();
 		addRun(root, "dead", "complete", 1, { pid: 123 });
 		addRun(root, "live", "failed", 1, { pid: 456 });
-		const summary = gc(root, { isPidAlive: (pid) => pid === 456 });
+		const summary = await gc(root, { isPidAlive: (pid) => pid === 456 });
 		assert.equal(fs.existsSync(path.join(root.asyncDir, "dead")), false);
 		assert.equal(fs.existsSync(path.join(root.asyncDir, "live")), true);
 		assert.equal(summary.kept["live-pid"], 1);
 	});
 
-	it("keeps a tree with an open fd or an incomplete /proc scan", () => {
+	it("keeps a tree with an open fd or an incomplete /proc scan", async () => {
 		const root = fixture();
 		const open = addRun(root, "open", "complete", 1);
 		addRun(root, "incomplete", "failed", 1);
-		const summary = gc(root, {
+		const summary = await gc(root, {
 			scanOpenFds: (paths) => ({ complete: true, unreadable: 0, openPaths: [open] }),
 		});
 		assert.equal(fs.existsSync(open), true);
 		assert.equal(fs.existsSync(path.join(root.asyncDir, "incomplete")), false);
 		assert.equal(summary.kept["open-fd"], 1);
-		const conservative = gc(root, {
+		const conservative = await gc(root, {
 			scanOpenFds: () => ({ complete: false, unreadable: 7, openPaths: [] }),
 		});
 		assert.equal(fs.existsSync(open), true);
@@ -122,11 +123,11 @@ describe("async run retention", () => {
 		assert.equal(conservative.fdScan.unreadable, 7);
 	});
 
-	it("preserves the 20 newest terminal runs and anything under 48 hours", () => {
+	it("preserves the 20 newest terminal runs and anything under 48 hours", async () => {
 		const root = fixture();
 		const now = Date.now();
 		for (let index = 0; index < 22; index++) addRun(root, `run-${index}`, "complete", now - (index === 20 ? 72 : 1) * 60 * 60 * 1000 - index);
-		const summary = gc(root, { now, keepRecentTerminal: 20, minAgeMs: 48 * 60 * 60 * 1000 });
+		const summary = await gc(root, { now, keepRecentTerminal: 20, minAgeMs: 48 * 60 * 60 * 1000 });
 		assert.equal(fs.existsSync(path.join(root.asyncDir, "run-20")), false);
 		for (let index = 0; index < 20; index++) assert.equal(fs.existsSync(path.join(root.asyncDir, `run-${index}`)), true);
 		assert.equal(summary.kept["retention-floor"], 20);
@@ -134,14 +135,14 @@ describe("async run retention", () => {
 		assert.equal(summary.kept["younger-than-min-age"], 1);
 	});
 
-	it("prunes oldest first only until the configured byte budget is met and removes related trees", () => {
+	it("prunes oldest first only until the configured byte budget is met and removes related trees", async () => {
 		const root = fixture();
 		const now = Date.now();
 		addRun(root, "oldest", "complete", now - 10 * 24 * 60 * 60 * 1000, { resultBytes: 10, nested: true });
 		addRun(root, "middle", "complete", now - 9 * 24 * 60 * 60 * 1000, { resultBytes: 10 });
 		addRun(root, "newest", "complete", now - 8 * 24 * 60 * 60 * 1000, { resultBytes: 10 });
 		const oneRunBytes = fs.statSync(path.join(root.asyncDir, "newest", "status.json")).size + 18;
-		const summary = gc(root, { now, budgetBytes: oneRunBytes, keepRecentTerminal: 0 });
+		const summary = await gc(root, { now, budgetBytes: oneRunBytes, keepRecentTerminal: 0 });
 		assert.equal(fs.existsSync(path.join(root.asyncDir, "oldest")), false);
 		assert.equal(fs.existsSync(path.join(root.asyncDir, "middle")), false);
 		assert.equal(fs.existsSync(path.join(root.asyncDir, "newest")), true);
@@ -152,7 +153,7 @@ describe("async run retention", () => {
 		assert.ok(summary.bytesAfter <= oneRunBytes);
 	});
 
-	it("indexes nested routes once instead of rescanning them per run", () => {
+	it("indexes nested routes once instead of rescanning them per run", async () => {
 		const root = fixture();
 		for (let i = 0; i < 300; i++) addRun(root, `run-${i}`, "running", 1);
 		for (let i = 0; i < 400; i++) {
@@ -173,7 +174,7 @@ describe("async run retention", () => {
 			return (originalReadFile as (...values: unknown[]) => unknown)(target, ...args);
 		}) as typeof fs.readFileSync;
 		try {
-			const summary = gc(root);
+			const summary = await gc(root);
 			assert.equal(summary.examined, 300);
 			assert.equal(routeDirReads, 1);
 			assert.equal(routeFileReads, 400);
@@ -182,6 +183,105 @@ describe("async run retention", () => {
 			fs.readdirSync = originalReaddir;
 			fs.readFileSync = originalReadFile;
 		}
+	});
+
+	it("counts injected reader calls as O(N+M), not N*M", async () => {
+		const root = fixture();
+		const runCount = 80;
+		const routeCount = 120;
+		for (let i = 0; i < runCount; i++) addRun(root, `count-${i}`, "running", 1);
+		for (let i = 0; i < routeCount; i++) {
+			const route = path.join(root.nestedEventsDir, `count-route-${i}`);
+			fs.mkdirSync(route);
+			fs.writeFileSync(path.join(route, "route.json"), JSON.stringify({ rootRunId: `count-${i % runCount}` }));
+		}
+		let statusReads = 0;
+		let routeReads = 0;
+		const reader = new Proxy(fs, {
+			get(target, property, receiver) {
+				if (property === "readFileSync") return (file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+					if (String(file).endsWith(`${path.sep}status.json`)) statusReads++;
+					if (String(file).endsWith(`${path.sep}route.json`)) routeReads++;
+					return (target.readFileSync as (...values: unknown[]) => unknown)(file, ...args);
+				};
+				return Reflect.get(target, property, receiver);
+			},
+		}) as unknown as AsyncRunGcOptions["reader"];
+		const summary = await gc(root, { reader });
+		assert.equal(summary.examined, runCount);
+		assert.equal(statusReads, runCount);
+		assert.equal(routeReads, routeCount);
+		assert.equal(statusReads + routeReads, runCount + routeCount);
+	});
+
+	it("lets a scheduled setImmediate run before the sweep completes", async () => {
+		const root = fixture();
+		for (let i = 0; i < 300; i++) addRun(root, `yield-${i}`, "running", 1);
+		let immediateRan = false;
+		setImmediate(() => { immediateRan = true; });
+		const summary = await gc(root, { yieldEveryItems: 8, maxChunkMs: 1000 });
+		assert.equal(immediateRan, true);
+		assert.ok(summary.yieldedChunks > 0);
+	});
+
+	it("reports budget yields and resumes its cursor without rereading completed candidates", async () => {
+		const root = fixture();
+		const candidateCount = 40;
+		for (let i = 0; i < candidateCount; i++) addRun(root, `resume-${i}`, "running", 1);
+		let statusReads = 0;
+		let observedCursorAdvance = false;
+		const telemetry: string[] = [];
+		const reader = new Proxy(fs, {
+			get(target, property, receiver) {
+				if (property === "readFileSync") return (file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+					if (String(file).endsWith(`${path.sep}status.json`)) statusReads++;
+					return (target.readFileSync as (...values: unknown[]) => unknown)(file, ...args);
+				};
+				return Reflect.get(target, property, receiver);
+			},
+		}) as unknown as AsyncRunGcOptions["reader"];
+		const cursor = { phase: "nested-routes" as const, routeOffset: 0, candidateOffset: 0, fdProcessOffset: 0, fdEntryOffset: 0, deleteOffset: 0, yieldedChunks: 0 };
+		const summary = await gc(root, {
+			reader,
+			cursor,
+			yieldEveryItems: 4,
+			maxChunkMs: 1000,
+			onYield: (current) => { if (current.candidateOffset > 0) observedCursorAdvance = true; },
+			log: (line) => telemetry.push(line),
+		});
+		assert.ok(summary.deferredByBudget > 0);
+		assert.equal(summary.deferredByBudget, summary.yieldedChunks);
+		assert.equal(statusReads, candidateCount);
+		assert.equal(cursor.candidateOffset, candidateCount);
+		assert.equal(cursor.phase, "done");
+		assert.equal(observedCursorAdvance, true);
+		assert.match(telemetry[0], /deferredByBudget=[1-9][0-9]*/);
+	});
+
+	it("does not run overlapping GC sweeps concurrently", async () => {
+		const root = fixture();
+		for (let i = 0; i < 80; i++) addRun(root, `overlap-${i}`, "running", 1);
+		const options: AsyncRunGcOptions = {
+			asyncDir: root.asyncDir,
+			resultsDir: root.resultsDir,
+			nestedEventsDir: root.nestedEventsDir,
+			yieldEveryItems: 1,
+			maxChunkMs: 1000,
+			scanOpenFds: () => ({ complete: true, unreadable: 0, openPaths: [] }),
+		};
+		const first = runAsyncRunGc(options);
+		const second = await runAsyncRunGc(options);
+		assert.equal(second, null);
+		assert.ok(await first);
+	});
+
+	it("dry-run reports would-prune without deleting copied candidates", async () => {
+		const root = fixture();
+		const runDir = addRun(root, "dry-run", "complete", 1);
+		const summary = await gc(root, { dryRun: true });
+		assert.equal(summary.pruned, 0);
+		assert.equal(summary.dryRunWouldPrune, 1);
+		assert.equal(fs.existsSync(runDir), true);
 	});
 
 	it("honors PI_SUBAGENTS_GC=off as a kill switch", async () => {
@@ -198,11 +298,11 @@ describe("async run retention", () => {
 		}
 	});
 
-	it("counts retention keeps and emits one summary line", () => {
+	it("counts retention keeps and emits one summary line", async () => {
 		const root = fixture();
 		addRun(root, "fresh", "complete", Date.now());
 		const lines: string[] = [];
-		const summary = gc(root, { minAgeMs: 48 * 60 * 60 * 1000, log: (line) => lines.push(line) });
+		const summary = await gc(root, { minAgeMs: 48 * 60 * 60 * 1000, log: (line) => lines.push(line) });
 		assert.equal(summary.kept["younger-than-min-age"], 1);
 		assert.equal(lines.length, 1);
 		assert.match(lines[0], /pruned=0.*examined=1/);

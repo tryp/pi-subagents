@@ -4,7 +4,7 @@ import { pruneAsyncRunDirs } from "../src/runs/background/async-run-retention.ts
 const [asyncDir, nestedEventsDir, resultsDir] = process.argv.slice(2);
 if (!asyncDir || !nestedEventsDir || !resultsDir) throw new Error("usage: node bench-async-gc.ts ASYNC_DIR NESTED_EVENTS_DIR RESULTS_DIR");
 const started = performance.now();
-const summary = pruneAsyncRunDirs({
+const summary = await pruneAsyncRunDirs({
 	asyncDir,
 	nestedEventsDir,
 	resultsDir,
