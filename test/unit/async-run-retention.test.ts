@@ -77,7 +77,7 @@ function gc(root: ReturnType<typeof fixture>, options: Partial<AsyncRunGcOptions
 		budgetBytes: 0,
 		keepRecentTerminal: 0,
 		minAgeMs: 0,
-		scanOpenFds: () => ({ complete: true, unreadable: 0, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, scanTruncated: false, unreadableForeignUids: [], openPaths: [] }),
+		scanOpenFds: () => ({ complete: true, unreadable: 0, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, procStatusErrors: {}, fdTableErrors: {}, fdEntryErrors: {}, sameUidFdErrorCodes: {}, foreignFdErrorCodes: {}, scanTruncated: false, unreadableForeignUids: [], openPaths: [] }),
 		...options,
 	});
 }
@@ -137,13 +137,13 @@ describe("async run retention", () => {
 		const open = addRun(root, "open", "complete", 1);
 		addRun(root, "incomplete", "failed", 1);
 		const summary = gc(root, {
-			scanOpenFds: (paths) => ({ complete: true, unreadable: 0, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, scanTruncated: false, unreadableForeignUids: [], openPaths: [open] }),
+			scanOpenFds: (paths) => ({ complete: true, unreadable: 0, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, procStatusErrors: {}, fdTableErrors: {}, fdEntryErrors: {}, sameUidFdErrorCodes: {}, foreignFdErrorCodes: {}, scanTruncated: false, unreadableForeignUids: [], openPaths: [open] }),
 		});
 		assert.equal(fs.existsSync(open), true);
 		assert.equal(fs.existsSync(path.join(root.asyncDir, "incomplete")), false);
 		assert.equal(summary.kept["open-fd"], 1);
 		const conservative = gc(root, {
-			scanOpenFds: () => ({ complete: false, unreadable: 7, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, scanTruncated: false, unreadableForeignUids: [], openPaths: [] }),
+			scanOpenFds: () => ({ complete: false, unreadable: 7, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, procStatusErrors: {}, fdTableErrors: {}, fdEntryErrors: {}, sameUidFdErrorCodes: {}, foreignFdErrorCodes: {}, scanTruncated: false, unreadableForeignUids: [], openPaths: [] }),
 		});
 		assert.equal(fs.existsSync(open), true);
 		assert.equal(conservative.kept["incomplete-fd-scan"], 1);
@@ -154,13 +154,18 @@ describe("async run retention", () => {
 		const root = fixture();
 		const runDir = addRun(root, "foreign-only", "complete", 1);
 		const foreignUid = (process.getuid?.() ?? 1000) + 1;
-		const procRoot = fakeProc(root, "901", `Uid:\t${foreignUid}\t${foreignUid}\t${foreignUid}\t${foreignUid}`, "file");
+		const procRoot = fakeProc(root, "901", `Uid:\t${foreignUid}\t${foreignUid}\t${foreignUid}\t${foreignUid}`, "directory");
+		const fdRoot = path.join(procRoot, "901", "fd");
+		fs.chmodSync(fdRoot, 0);
 		const lines: string[] = [];
-		const summary = gc(root, { procRoot, scanOpenFds: scanProcOpenFds, log: (line) => lines.push(line) });
+		let summary: ReturnType<typeof gc>;
+		try { summary = gc(root, { procRoot, scanOpenFds: scanProcOpenFds, log: (line) => lines.push(line) }); }
+		finally { fs.chmodSync(fdRoot, 0o700); }
 		assert.equal(fs.existsSync(runDir), false);
 		assert.equal(summary.pruned, 1);
 		assert.equal(summary.skippedUnreadableForeignProvenUnreachable, 1);
 		assert.equal(summary.keptUnreadableForeignReachable, 0);
+		assert.equal(summary.aclScanCandidates, 0);
 		assert.equal(summary.keptSameUidUnreadable, 0);
 		assert.match(lines[0]!, /sweep examined=1 collectable=1 .*deleted=1/);
 		assert.match(lines[0]!, /blockedUnreadable=0 blockedWorldAccessible=0/);
@@ -173,10 +178,15 @@ describe("async run retention", () => {
 		fs.chmodSync(root.asyncDir, 0o755);
 		fs.chmodSync(runDir, 0o755);
 		const foreignUid = (process.getuid?.() ?? 1000) + 1;
-		const procRoot = fakeProc(root, "902", `Uid:\t${foreignUid}\t${foreignUid}\t${foreignUid}\t${foreignUid}`, "file");
-		const summary = gc(root, { procRoot, scanOpenFds: scanProcOpenFds });
+		const procRoot = fakeProc(root, "902", `Uid:\t${foreignUid}\t${foreignUid}\t${foreignUid}\t${foreignUid}`, "directory");
+		const fdRoot = path.join(procRoot, "902", "fd");
+		fs.chmodSync(fdRoot, 0);
+		let summary: ReturnType<typeof gc>;
+		try { summary = gc(root, { procRoot, scanOpenFds: scanProcOpenFds }); }
+		finally { fs.chmodSync(fdRoot, 0o700); }
 		assert.equal(fs.existsSync(runDir), true);
 		assert.equal(summary.keptUnreadableForeignReachable, 1);
+		assert.equal(summary.aclScanCandidates, 1);
 		assert.equal(summary.kept["unreadable-foreign-reachable"], 1);
 	});
 
@@ -196,11 +206,64 @@ describe("async run retention", () => {
 		const root = fixture();
 		const runDir = addRun(root, "same-uid-unreadable", "complete", 1);
 		const uid = process.getuid?.() ?? 1000;
-		const procRoot = fakeProc(root, "903", `Uid:\t${uid}\t${uid}\t${uid}\t${uid}`, "file");
-		const summary = gc(root, { procRoot, scanOpenFds: scanProcOpenFds });
+		const procRoot = fakeProc(root, "903", `Uid:\t${uid}\t${uid}\t${uid}\t${uid}`, "directory");
+		const fdRoot = path.join(procRoot, "903", "fd");
+		fs.chmodSync(fdRoot, 0);
+		let summary: ReturnType<typeof gc>;
+		try { summary = gc(root, { procRoot, scanOpenFds: scanProcOpenFds }); }
+		finally { fs.chmodSync(fdRoot, 0o700); }
 		assert.equal(fs.existsSync(runDir), true);
 		assert.equal(summary.keptSameUidUnreadable, 1);
 		assert.equal(summary.kept["same-uid-unreadable-fd"], 1);
+		assert.equal(summary.fdScan.sameUidFdErrorCodes.EACCES, 1);
+	});
+
+	it("prunes when a same-uid process fd table vanished with ENOENT", () => {
+		const root = fixture();
+		const runDir = addRun(root, "vanished-fd-table", "complete", 1);
+		const uid = process.getuid?.() ?? 1000;
+		const procRoot = fakeProc(root, "907", `Uid:\t${uid}\t${uid}\t${uid}\t${uid}`, "missing");
+		const summary = gc(root, { procRoot, scanOpenFds: scanProcOpenFds });
+		assert.equal(fs.existsSync(runDir), false);
+		assert.equal(summary.pruned, 1);
+		assert.equal(summary.keptSameUidUnreadable, 0);
+		assert.equal(summary.fdScan.fdTableErrors.ENOENT, 1);
+		assert.equal(summary.fdScan.sameUidFdErrorCodes.ENOENT, 1);
+	});
+
+	it("ignores an ENOENT fd entry that vanishes during the scan", () => {
+		const root = fixture();
+		const runDir = addRun(root, "vanished-fd-entry", "complete", 1);
+		const uid = process.getuid?.() ?? 1000;
+		const procRoot = fakeProc(root, "909", `Uid:\t${uid}\t${uid}\t${uid}\t${uid}`, "directory", runDir);
+		const fdRoot = path.join(procRoot, "909", "fd");
+		const mutableFs = fs as unknown as { readdirSync: (...args: any[]) => any };
+		const originalReaddirSync = mutableFs.readdirSync;
+		mutableFs.readdirSync = function (entryPath: string, ...args: any[]) {
+			const entries = originalReaddirSync.call(fs, entryPath, ...args);
+			if (entryPath === fdRoot) fs.unlinkSync(path.join(fdRoot, "0"));
+			return entries;
+		};
+		let summary: ReturnType<typeof gc>;
+		try { summary = gc(root, { procRoot, scanOpenFds: scanProcOpenFds }); }
+		finally { mutableFs.readdirSync = originalReaddirSync; }
+		assert.equal(fs.existsSync(runDir), false);
+		assert.equal(summary.fdScan.fdEntryErrors.ENOENT, 1);
+		assert.equal(summary.fdScan.sameUidFdErrorCodes.ENOENT, 1);
+		assert.equal(summary.keptSameUidUnreadable, 0);
+	});
+
+	it("treats an ENOTDIR fd table as a vanished proc entry", () => {
+		const root = fixture();
+		const runDir = addRun(root, "non-directory-fd-table", "complete", 1);
+		const uid = process.getuid?.() ?? 1000;
+		const procRoot = fakeProc(root, "908", `Uid:\t${uid}\t${uid}\t${uid}\t${uid}`, "file");
+		const summary = gc(root, { procRoot, scanOpenFds: scanProcOpenFds });
+		assert.equal(fs.existsSync(runDir), false);
+		assert.equal(summary.pruned, 1);
+		assert.equal(summary.fdScan.fdTableErrors.ENOTDIR, 1);
+		assert.equal(summary.fdScan.sameUidFdErrorCodes.ENOTDIR, 1);
+		assert.equal(summary.keptSameUidUnreadable, 0);
 	});
 
 	it("keeps candidates when process uid cannot be verified", () => {
@@ -227,7 +290,7 @@ describe("async run retention", () => {
 		const lines: string[] = [];
 		const summary = gc(root, {
 			isPidAlive: (pid) => pid === 905,
-			scanOpenFds: () => ({ complete: true, unreadable: 0, foreignUid: 1, scannedReadableForeign: 1, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, scanTruncated: false, unreadableForeignUids: [], openPaths: [openRun] }),
+			scanOpenFds: () => ({ complete: true, unreadable: 0, foreignUid: 1, scannedReadableForeign: 1, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, procStatusErrors: {}, fdTableErrors: {}, fdEntryErrors: {}, sameUidFdErrorCodes: {}, foreignFdErrorCodes: {}, scanTruncated: false, unreadableForeignUids: [], openPaths: [openRun] }),
 			log: (line) => lines.push(line),
 		});
 		assert.equal(fs.existsSync(privateRun), false);

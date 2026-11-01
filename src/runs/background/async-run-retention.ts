@@ -21,6 +21,11 @@ export interface FdScanResult {
 	foreignUnreadable: number;
 	sameUidUnreadable: number;
 	uidUnverifiable: number;
+	procStatusErrors: Record<string, number>;
+	fdTableErrors: Record<string, number>;
+	fdEntryErrors: Record<string, number>;
+	sameUidFdErrorCodes: Record<string, number>;
+	foreignFdErrorCodes: Record<string, number>;
 	scanTruncated: boolean;
 	unreadableForeignUids: number[];
 	openPaths: string[];
@@ -39,10 +44,11 @@ export interface AsyncRunGcSummary {
 	bytesWouldReclaim: number;
 	bytesBefore: number;
 	bytesAfter: number;
-	fdScan: { complete: boolean; unreadable: number; foreignUid: number; foreignUnreadable: number; sameUidUnreadable: number; uidUnverifiable: number; scanTruncated: boolean };
+	fdScan: { complete: boolean; unreadable: number; foreignUid: number; foreignUnreadable: number; sameUidUnreadable: number; uidUnverifiable: number; procStatusErrors: Record<string, number>; fdTableErrors: Record<string, number>; fdEntryErrors: Record<string, number>; sameUidFdErrorCodes: Record<string, number>; foreignFdErrorCodes: Record<string, number>; scanTruncated: boolean };
 	scannedReadableForeign: number;
 	skippedUnreadableForeignProvenUnreachable: number;
 	keptUnreadableForeignReachable: number;
+	aclScanCandidates: number;
 	keptUnknownUid: number;
 	keptAcl: number;
 	keptForeignOwner: number;
@@ -104,6 +110,19 @@ function isAccessDenied(error: unknown): boolean {
 	return isRecord(error) && (error.code === "EACCES" || error.code === "EPERM");
 }
 
+function isVanishedProcEntry(error: unknown): boolean {
+	return isRecord(error) && (error.code === "ENOENT" || error.code === "ENOTDIR");
+}
+
+function errno(error: unknown): string {
+	return isRecord(error) && typeof error.code === "string" ? error.code : "unknown";
+}
+
+function countError(counts: Record<string, number>, error: unknown): void {
+	const code = errno(error);
+	counts[code] = (counts[code] ?? 0) + 1;
+}
+
 export function isProcessAlive(pid: number): boolean {
 	if (!Number.isSafeInteger(pid) || pid <= 0) return true;
 	try {
@@ -138,10 +157,9 @@ function containedPath(root: string, target: string): boolean {
 }
 
 /**
- * A foreign uid cannot inherit or otherwise hold our descriptors absent privileged fd transfer
- * (for example SCM_RIGHTS to a cooperating foreign process, or root). We skip only a positively
- * identified foreign uid, and only collect its unreadable-fd case for trees not world-accessible.
- * Unknown uid and same-uid unreadability remain fail-closed.
+ * Readable fd tables are always scanned regardless of uid. An unreadable foreign table is ignored
+ * only when candidate paths are proved inaccessible by mode bits and ACLs; SCM_RIGHTS fd transfer
+ * remains a counted residual risk. Unknown uid and same-uid unreadability remain fail-closed.
  */
 export function scanProcOpenFds(paths: string[], procRoot = "/proc"): FdScanResult {
 	let complete = true;
@@ -153,11 +171,16 @@ export function scanProcOpenFds(paths: string[], procRoot = "/proc"): FdScanResu
 	const unreadableForeignUids = new Set<number>();
 	let sameUidUnreadable = 0;
 	let uidUnverifiable = 0;
+	const procStatusErrors: Record<string, number> = {};
+	const fdTableErrors: Record<string, number> = {};
+	const fdEntryErrors: Record<string, number> = {};
+	const sameUidFdErrorCodes: Record<string, number> = {};
+	const foreignFdErrorCodes: Record<string, number> = {};
 	let procEntries: fs.Dirent[];
 	try {
 		procEntries = fs.readdirSync(procRoot, { withFileTypes: true });
 	} catch {
-		return { complete: false, unreadable: 1, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 1, scanTruncated: false, unreadableForeignUids: [], openPaths: [] };
+		return { complete: false, unreadable: 1, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 1, procStatusErrors: {}, fdTableErrors: {}, fdEntryErrors: {}, sameUidFdErrorCodes: {}, foreignFdErrorCodes: {}, scanTruncated: false, unreadableForeignUids: [], openPaths: [] };
 	}
 	const processEntries = procEntries.filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name));
 	if (processEntries.length > MAX_PROC_ENTRIES) { complete = false; scanTruncated = true; }
@@ -170,7 +193,8 @@ export function scanProcOpenFds(paths: string[], procRoot = "/proc"): FdScanResu
 		try {
 			status = fs.readFileSync(path.join(procDir, "status"), "utf8");
 		} catch (error) {
-			if (isNotFound(error)) continue;
+			if (isVanishedProcEntry(error)) { countError(procStatusErrors, error); continue; }
+			countError(procStatusErrors, error);
 			unreadable++;
 			uidUnverifiable++;
 			complete = false;
@@ -190,7 +214,10 @@ export function scanProcOpenFds(paths: string[], procRoot = "/proc"): FdScanResu
 		try {
 			descriptors = fs.readdirSync(path.join(procDir, "fd"));
 		} catch (error) {
-			if (isNotFound(error)) continue;
+			countError(fdTableErrors, error);
+			if (isForeign) countError(foreignFdErrorCodes, error);
+			else countError(sameUidFdErrorCodes, error);
+			if (isVanishedProcEntry(error)) continue;
 			unreadable++;
 			complete = false;
 			if (isForeign) {
@@ -204,13 +231,16 @@ export function scanProcOpenFds(paths: string[], procRoot = "/proc"): FdScanResu
 			if (++scannedFds > MAX_FD_ENTRIES) {
 				complete = false;
 				scanTruncated = true;
-				return { complete, unreadable, foreignUid, scannedReadableForeign, foreignUnreadable, sameUidUnreadable, uidUnverifiable, scanTruncated, unreadableForeignUids: [...unreadableForeignUids], openPaths: [...openPaths] };
+				return { complete, unreadable, foreignUid, scannedReadableForeign, foreignUnreadable, sameUidUnreadable, uidUnverifiable, procStatusErrors, fdTableErrors, fdEntryErrors, sameUidFdErrorCodes, foreignFdErrorCodes, scanTruncated, unreadableForeignUids: [...unreadableForeignUids], openPaths: [...openPaths] };
 			}
 			let target: string;
 			try {
 				target = fs.readlinkSync(path.join(procDir, "fd", descriptor));
 			} catch (error) {
-				if (isNotFound(error)) continue;
+				countError(fdEntryErrors, error);
+				if (isForeign) countError(foreignFdErrorCodes, error);
+				else countError(sameUidFdErrorCodes, error);
+				if (isVanishedProcEntry(error)) continue;
 				unreadable++;
 				complete = false;
 				if (isForeign) {
@@ -227,7 +257,7 @@ export function scanProcOpenFds(paths: string[], procRoot = "/proc"): FdScanResu
 			}
 		}
 	}
-	return { complete, unreadable, foreignUid, scannedReadableForeign, foreignUnreadable, sameUidUnreadable, uidUnverifiable, scanTruncated, unreadableForeignUids: [...unreadableForeignUids], openPaths: [...openPaths] };
+	return { complete, unreadable, foreignUid, scannedReadableForeign, foreignUnreadable, sameUidUnreadable, uidUnverifiable, procStatusErrors, fdTableErrors, fdEntryErrors, sameUidFdErrorCodes, foreignFdErrorCodes, scanTruncated, unreadableForeignUids: [...unreadableForeignUids], openPaths: [...openPaths] };
 }
 
 function pathComponents(item: string): string[] | null {
@@ -462,7 +492,8 @@ export function pruneAsyncRunDirs(options: AsyncRunGcOptions = {}): AsyncRunGcSu
 	const totalPaths = [...new Set(candidates.flatMap((candidate) => candidate.paths))];
 	const fdScan: FdScanResult = totalPaths.length
 		? scan(totalPaths, procRoot)
-		: { complete: true, unreadable: 0, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, scanTruncated: false, unreadableForeignUids: [], openPaths: [] };
+		: { complete: true, unreadable: 0, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, procStatusErrors: {}, fdTableErrors: {}, fdEntryErrors: {}, sameUidFdErrorCodes: {}, foreignFdErrorCodes: {}, scanTruncated: false, unreadableForeignUids: [], openPaths: [] };
+	let aclScanCandidates = 0;
 	if (fdScan.foreignUnreadable > 0 && fdScan.unreadableForeignUids.length > 0) {
 		const ourUid = typeof process.getuid === "function" ? process.getuid() : null;
 		for (const candidate of candidates) {
@@ -471,6 +502,7 @@ export function pruneAsyncRunDirs(options: AsyncRunGcOptions = {}): AsyncRunGcSu
 				: assessForeignReachability(candidate.paths, ourUid);
 		}
 		const aclCandidates = candidates.filter((candidate) => candidate.foreignReachability?.reason === "reachable");
+		aclScanCandidates = aclCandidates.length;
 		if (aclCandidates.length > 0) {
 			const aclPaths = [...new Set(aclCandidates.flatMap((candidate) => candidate.paths))];
 			const aclScan = scanPosixAcls(aclPaths);
@@ -499,12 +531,18 @@ export function pruneAsyncRunDirs(options: AsyncRunGcOptions = {}): AsyncRunGcSu
 			foreignUid: fdScan.foreignUid,
 			sameUidUnreadable: fdScan.sameUidUnreadable,
 			uidUnverifiable: fdScan.uidUnverifiable,
+			procStatusErrors: fdScan.procStatusErrors,
+			fdTableErrors: fdScan.fdTableErrors,
+			fdEntryErrors: fdScan.fdEntryErrors,
+			sameUidFdErrorCodes: fdScan.sameUidFdErrorCodes,
+			foreignFdErrorCodes: fdScan.foreignFdErrorCodes,
 			foreignUnreadable: fdScan.foreignUnreadable,
 			scanTruncated: fdScan.scanTruncated,
 		},
 		scannedReadableForeign: fdScan.scannedReadableForeign,
 		skippedUnreadableForeignProvenUnreachable: 0,
 		keptUnreadableForeignReachable: 0,
+		aclScanCandidates,
 		keptUnknownUid: 0,
 		keptAcl: 0,
 		keptForeignOwner: 0,
@@ -596,7 +634,7 @@ export function pruneAsyncRunDirs(options: AsyncRunGcOptions = {}): AsyncRunGcSu
 	const outcomeCount = Object.values(summary.outcomes).reduce((sum, count) => sum + count, 0);
 	if (outcomeCount !== summary.examined) throw new Error(`async-run GC candidate outcome mismatch: ${outcomeCount} outcomes for ${summary.examined} candidates`);
 	const blockedUnreadable = summary.keptSameUidUnreadable + summary.keptUidUnverifiable + (summary.kept["incomplete-fd-scan"] ?? 0);
-	const line = `[subagent async-run GC] sweep examined=${summary.examined} collectable=${eligible.length} dryRun=${options.dryRun === true} wouldDelete=${summary.wouldPrune} wouldBytes=${summary.bytesWouldReclaim} deleted=${summary.pruned} bytes=${summary.bytesReclaimed} blockedUnreadable=${blockedUnreadable} blockedWorldAccessible=${summary.keptWorldAccessible} scanned_readable_foreign=${summary.scannedReadableForeign} foreign_unreadable_fd_tables=${summary.fdScan.foreignUnreadable} skipped_unreadable_foreign_proven_unreachable=${summary.skippedUnreadableForeignProvenUnreachable} kept_unreadable_foreign_reachable=${summary.keptUnreadableForeignReachable} kept_unknown_uid=${summary.keptUnknownUid} kept_acl=${summary.keptAcl} kept_foreign_owner=${summary.keptForeignOwner} kept_stat_error=${summary.keptStatError} kept_missing_status=${summary.keptMissingStatus} kept_unreadable_status_foreign=${summary.keptUnreadableStatusForeign} status_errors=${JSON.stringify(summary.statusErrors)} keptOwnerAlive=${summary.keptOwnerAlive} outcomes=${JSON.stringify(summary.outcomes)} kept=${JSON.stringify(summary.kept)} bytesBefore=${summary.bytesBefore} bytesAfter=${summary.bytesAfter} fdScanComplete=${summary.fdScan.complete} unreadableFds=${summary.fdScan.unreadable}`;
+	const line = `[subagent async-run GC] sweep examined=${summary.examined} collectable=${eligible.length} dryRun=${options.dryRun === true} wouldDelete=${summary.wouldPrune} wouldBytes=${summary.bytesWouldReclaim} deleted=${summary.pruned} bytes=${summary.bytesReclaimed} blockedUnreadable=${blockedUnreadable} blockedWorldAccessible=${summary.keptWorldAccessible} scanned_readable_foreign=${summary.scannedReadableForeign} foreign_unreadable_fd_tables=${summary.fdScan.foreignUnreadable} proc_status_errors=${JSON.stringify(summary.fdScan.procStatusErrors)} fd_table_errors=${JSON.stringify(summary.fdScan.fdTableErrors)} fd_entry_errors=${JSON.stringify(summary.fdScan.fdEntryErrors)} same_uid_fd_errors=${JSON.stringify(summary.fdScan.sameUidFdErrorCodes)} foreign_fd_errors=${JSON.stringify(summary.fdScan.foreignFdErrorCodes)} skipped_unreadable_foreign_proven_unreachable=${summary.skippedUnreadableForeignProvenUnreachable} kept_unreadable_foreign_reachable=${summary.keptUnreadableForeignReachable} acl_scan_candidates=${summary.aclScanCandidates} kept_unknown_uid=${summary.keptUnknownUid} kept_acl=${summary.keptAcl} kept_foreign_owner=${summary.keptForeignOwner} kept_stat_error=${summary.keptStatError} kept_missing_status=${summary.keptMissingStatus} kept_unreadable_status_foreign=${summary.keptUnreadableStatusForeign} status_errors=${JSON.stringify(summary.statusErrors)} keptOwnerAlive=${summary.keptOwnerAlive} outcomes=${JSON.stringify(summary.outcomes)} kept=${JSON.stringify(summary.kept)} bytesBefore=${summary.bytesBefore} bytesAfter=${summary.bytesAfter} fdScanComplete=${summary.fdScan.complete} unreadableFds=${summary.fdScan.unreadable}`;
 	options.log?.(line);
 	return summary;
 }
