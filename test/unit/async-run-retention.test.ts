@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import * as fs from "node:fs";
+import fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -152,6 +152,52 @@ describe("async run retention", () => {
 		assert.ok(summary.bytesAfter <= oneRunBytes);
 	});
 
+	it("indexes nested routes once instead of rescanning them per run", () => {
+		const root = fixture();
+		for (let i = 0; i < 300; i++) addRun(root, `run-${i}`, "running", 1);
+		for (let i = 0; i < 400; i++) {
+			const route = path.join(root.nestedEventsDir, `route-${i}`);
+			fs.mkdirSync(route);
+			fs.writeFileSync(path.join(route, "route.json"), JSON.stringify({ rootRunId: `run-${i % 300}` }));
+		}
+		const originalReaddir = fs.readdirSync;
+		const originalReadFile = fs.readFileSync;
+		let routeDirReads = 0;
+		let routeFileReads = 0;
+		fs.readdirSync = ((target: fs.PathLike, ...args: unknown[]) => {
+			if (path.resolve(String(target)) === path.resolve(root.nestedEventsDir)) routeDirReads++;
+			return (originalReaddir as (...values: unknown[]) => unknown)(target, ...args);
+		}) as typeof fs.readdirSync;
+		fs.readFileSync = ((target: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+			if (typeof target === "string" && target.endsWith(`${path.sep}route.json`)) routeFileReads++;
+			return (originalReadFile as (...values: unknown[]) => unknown)(target, ...args);
+		}) as typeof fs.readFileSync;
+		try {
+			const summary = gc(root);
+			assert.equal(summary.examined, 300);
+			assert.equal(routeDirReads, 1);
+			assert.equal(routeFileReads, 400);
+			assert.ok(routeDirReads + routeFileReads < 300 * 400);
+		} finally {
+			fs.readdirSync = originalReaddir;
+			fs.readFileSync = originalReadFile;
+		}
+	});
+
+	it("honors PI_SUBAGENTS_GC=off as a kill switch", async () => {
+		const previous = process.env.PI_SUBAGENTS_GC;
+		process.env.PI_SUBAGENTS_GC = "off";
+		const lines: string[] = [];
+		try {
+			const summary = await (await import("../../src/runs/background/async-run-retention.ts")).runAsyncRunGc({ log: (line) => lines.push(line) });
+			assert.equal(summary, null);
+			assert.deepEqual(lines, ["[subagent async-run GC] disabled=env"]);
+		} finally {
+			if (previous === undefined) delete process.env.PI_SUBAGENTS_GC;
+			else process.env.PI_SUBAGENTS_GC = previous;
+		}
+	});
+
 	it("counts retention keeps and emits one summary line", () => {
 		const root = fixture();
 		addRun(root, "fresh", "complete", Date.now());
@@ -159,7 +205,7 @@ describe("async run retention", () => {
 		const summary = gc(root, { minAgeMs: 48 * 60 * 60 * 1000, log: (line) => lines.push(line) });
 		assert.equal(summary.kept["younger-than-min-age"], 1);
 		assert.equal(lines.length, 1);
-		assert.match(lines[0], /examined=1 pruned=0/);
+		assert.match(lines[0], /pruned=0.*examined=1/);
 		assert.match(lines[0], /younger-than-min-age/);
 	});
 });

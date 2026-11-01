@@ -1,4 +1,4 @@
-import * as fs from "node:fs";
+import fs from "node:fs";
 import * as path from "node:path";
 import { ASYNC_RUN_GC_BUDGET_BYTES } from "../../shared/settings.ts";
 import { ASYNC_DIR, RESULTS_DIR, TEMP_ROOT_DIR } from "../../shared/types.ts";
@@ -20,6 +20,10 @@ export interface FdScanResult {
 
 export interface AsyncRunGcSummary {
 	examined: number;
+	candidatesSeen: number;
+	considered: number;
+	deferredByBudget: number;
+	elapsedMs: number;
 	pruned: number;
 	kept: Record<string, number>;
 	bytesReclaimed: number;
@@ -181,36 +185,43 @@ function readStatus(runDir: string): { status: Record<string, unknown> | null; r
 	}
 }
 
-function nestedRoutePaths(nestedEventsDir: string, rootRunId: string): string[] {
+function nestedRouteIndex(nestedEventsDir: string): Map<string, string[]> {
 	let entries: fs.Dirent[];
 	try {
 		entries = fs.readdirSync(nestedEventsDir, { withFileTypes: true });
 	} catch (error) {
-		if (isNotFound(error)) return [];
+		if (isNotFound(error)) return new Map();
 		throw error;
 	}
-	const routes: string[] = [];
+	const routesByRoot = new Map<string, string[]>();
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
 		const routeRoot = path.join(nestedEventsDir, entry.name);
 		try {
 			const metadata: unknown = JSON.parse(fs.readFileSync(path.join(routeRoot, "route.json"), "utf8"));
-			if (isRecord(metadata) && metadata.rootRunId === rootRunId) routes.push(routeRoot);
+			if (!isRecord(metadata) || typeof metadata.rootRunId !== "string") continue;
+			const routes = routesByRoot.get(metadata.rootRunId) ?? [];
+			routes.push(routeRoot);
+			routesByRoot.set(metadata.rootRunId, routes);
 		} catch {
 			// Unknown route metadata is not attributable and is left untouched.
 		}
 	}
-	return routes;
+	return routesByRoot;
 }
 
-function associatedPaths(id: string, asyncDir: string, resultsDir: string, nestedEventsDir: string): string[] {
+function nestedRoutePaths(routeIndex: Map<string, string[]>, rootRunId: string): string[] {
+	return routeIndex.get(rootRunId) ?? [];
+}
+
+function associatedPaths(id: string, asyncDir: string, resultsDir: string, routeIndex: Map<string, string[]>): string[] {
 	const runDir = path.join(asyncDir, id);
 	const paths = [runDir];
 	const directResult = path.join(resultsDir, `${id}.json`);
 	if (fs.existsSync(directResult)) paths.push(directResult);
 	const nestedResults = path.join(resultsDir, "nested", id);
 	if (fs.existsSync(nestedResults)) paths.push(nestedResults);
-	paths.push(...nestedRoutePaths(nestedEventsDir, id));
+	paths.push(...nestedRoutePaths(routeIndex, id));
 	return paths;
 }
 
@@ -227,7 +238,7 @@ function existingBytes(paths: string[]): number {
 	return total;
 }
 
-function listCandidates(asyncDir: string, resultsDir: string, nestedEventsDir: string): RunCandidate[] {
+function listCandidates(asyncDir: string, resultsDir: string, routeIndex: Map<string, string[]>): RunCandidate[] {
 	let entries: fs.Dirent[];
 	try {
 		entries = fs.readdirSync(asyncDir, { withFileTypes: true });
@@ -250,7 +261,7 @@ function listCandidates(asyncDir: string, resultsDir: string, nestedEventsDir: s
 			: typeof status?.lastUpdate === "number" && Number.isFinite(status.lastUpdate)
 				? status.lastUpdate
 				: statusMtime;
-		const paths = associatedPaths(id, asyncDir, resultsDir, nestedEventsDir);
+		const paths = associatedPaths(id, asyncDir, resultsDir, routeIndex);
 		return {
 			id,
 			status,
@@ -272,16 +283,22 @@ export function pruneAsyncRunDirs(options: AsyncRunGcOptions = {}): AsyncRunGcSu
 	const keepRecentTerminal = options.keepRecentTerminal ?? ASYNC_RUN_GC_KEEP_RECENT_TERMINAL;
 	const minAgeMs = options.minAgeMs ?? ASYNC_RUN_GC_MIN_AGE_MS;
 	const now = options.now ?? Date.now();
+	const startedAt = Date.now();
 	const procRoot = options.procRoot ?? "/proc";
 	const isAlive = options.isPidAlive ?? isProcessAlive;
 	const scan = options.scanOpenFds ?? scanProcOpenFds;
-	const candidates = listCandidates(asyncDir, resultsDir, nestedEventsDir);
+	const routeIndex = nestedRouteIndex(nestedEventsDir);
+	const candidates = listCandidates(asyncDir, resultsDir, routeIndex);
 	const totalPaths = [...new Set(candidates.flatMap((candidate) => candidate.paths))];
 	const fdScan = totalPaths.length
 		? scan(totalPaths, procRoot)
 		: { complete: true, unreadable: 0, openPaths: [] };
 	const summary: AsyncRunGcSummary = {
 		examined: candidates.length,
+		candidatesSeen: candidates.length,
+		considered: candidates.length,
+		deferredByBudget: 0,
+		elapsedMs: 0,
 		pruned: 0,
 		kept: {},
 		bytesReclaimed: 0,
@@ -321,16 +338,23 @@ export function pruneAsyncRunDirs(options: AsyncRunGcOptions = {}): AsyncRunGcSu
 		}
 	}
 	summary.bytesAfter = bytesAfter;
-	const line = `[subagent async-run GC] examined=${summary.examined} pruned=${summary.pruned} kept=${JSON.stringify(summary.kept)} bytesReclaimed=${summary.bytesReclaimed} bytesBefore=${summary.bytesBefore} bytesAfter=${summary.bytesAfter} fdScanComplete=${summary.fdScan.complete} unreadableFds=${summary.fdScan.unreadable}`;
+	summary.elapsedMs = Date.now() - startedAt;
+	const line = `[subagent async-run GC] candidatesSeen=${summary.candidatesSeen} considered=${summary.considered} pruned=${summary.pruned} deferredByBudget=${summary.deferredByBudget} bytesReclaimed=${summary.bytesReclaimed} elapsedMs=${summary.elapsedMs} examined=${summary.examined} kept=${JSON.stringify(summary.kept)} bytesBefore=${summary.bytesBefore} bytesAfter=${summary.bytesAfter} fdScanComplete=${summary.fdScan.complete} unreadableFds=${summary.fdScan.unreadable}`;
 	options.log?.(line);
 	return summary;
 }
 
 let cleanupInFlight = false;
 export async function runAsyncRunGc(options: AsyncRunGcOptions = {}): Promise<AsyncRunGcSummary | null> {
+	if (process.env.PI_SUBAGENTS_GC?.toLowerCase() === "off") {
+		options.log?.("[subagent async-run GC] disabled=env");
+		return null;
+	}
 	if (cleanupInFlight) return null;
 	cleanupInFlight = true;
 	try {
+		// Let startup timers, I/O, and signal callbacks run before filesystem work begins.
+		await new Promise<void>((resolve) => setImmediate(resolve));
 		return pruneAsyncRunDirs(options);
 	} finally {
 		cleanupInFlight = false;
