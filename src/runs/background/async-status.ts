@@ -263,24 +263,38 @@ export function summarizeAsyncStatus(asyncDir: string, status: AsyncStatus & { c
 	return statusToSummary(asyncDir, status, [], undefined, now);
 }
 
+function runStateRank(state: AsyncRunSummary["state"]): number {
+	switch (state) {
+		case "running": return 0;
+		case "queued": return 1;
+		case "failed": return 2;
+		case "stopped": return 2;
+		case "paused": return 2;
+		case "complete": return 3;
+	}
+}
+
+/**
+ * Total order for run listings: state rank, then newest first, then id.
+ *
+ * The id tie-break is load-bearing rather than cosmetic. A batch spawns its
+ * runs inside one millisecond, so `lastUpdate` is frequently equal, and a
+ * comparator that returns 0 for two distinct runs leaves their order to
+ * `readdirSync`. That made the rendered "Still active: ..." list differ between
+ * two reads of the same state, which flaked any assertion on that order under
+ * load and handed the model a list whose order changed for no reason.
+ */
+export function compareAsyncRuns(a: AsyncRunSummary, b: AsyncRunSummary): number {
+	const byState = runStateRank(a.state) - runStateRank(b.state);
+	if (byState !== 0) return byState;
+	const aTime = a.lastUpdate ?? a.endedAt ?? a.startedAt;
+	const bTime = b.lastUpdate ?? b.endedAt ?? b.startedAt;
+	if (bTime !== aTime) return bTime - aTime;
+	return a.id.localeCompare(b.id);
+}
+
 function sortRuns(runs: AsyncRunSummary[]): AsyncRunSummary[] {
-	const rank = (state: AsyncRunSummary["state"]): number => {
-		switch (state) {
-			case "running": return 0;
-			case "queued": return 1;
-			case "failed": return 2;
-			case "stopped": return 2;
-			case "paused": return 2;
-			case "complete": return 3;
-		}
-	};
-	return [...runs].sort((a, b) => {
-		const byState = rank(a.state) - rank(b.state);
-		if (byState !== 0) return byState;
-		const aTime = a.lastUpdate ?? a.endedAt ?? a.startedAt;
-		const bTime = b.lastUpdate ?? b.endedAt ?? b.startedAt;
-		return bTime - aTime;
-	});
+	return [...runs].sort(compareAsyncRuns);
 }
 
 export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions = {}): AsyncRunSummary[] {

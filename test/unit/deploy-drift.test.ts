@@ -22,9 +22,10 @@ function fixture(): Fixture {
 	return { root, source, runtime, artifacts };
 }
 
-function run(args: string[], cwd?: string) {
+function run(args: string[], cwd?: string, env?: NodeJS.ProcessEnv) {
 	return spawnSync("python3", [SCRIPT, ...args], {
 		cwd,
+		env,
 		encoding: "utf8",
 		maxBuffer: 1024 * 1024,
 	});
@@ -32,6 +33,11 @@ function run(args: string[], cwd?: string) {
 
 function preflight(f: Fixture, ...args: string[]) {
 	return run(["--runtime", f.runtime, "--source", f.source, ...args]);
+}
+
+/** Run preflight with a private temp root so baseline exports cannot collide. */
+function preflightInTemp(tempDir: string, f: Fixture, ...args: string[]) {
+	return run(["--runtime", f.runtime, "--source", f.source, ...args], undefined, { ...process.env, TMPDIR: tempDir, TEMP: tempDir, TMP: tempDir });
 }
 
 function withFixture(test: (f: Fixture) => void): void {
@@ -280,8 +286,16 @@ function stampDeployed(f: GitFixture, commit = headOf(f)): void {
 	fs.writeFileSync(path.join(f.runtime, ".deployed-commit"), `commit: ${commit}\ntree: ${tree.stdout.trim()}\n`);
 }
 
-function baselineTempDirs(): string[] {
-	return fs.readdirSync(os.tmpdir()).filter((name: string) => name.startsWith("pi-deploy-baseline-"));
+/**
+ * Names of the baseline exports present in `dir`.
+ *
+ * The directory is a parameter rather than `os.tmpdir()` on purpose: the
+ * machine-global temp namespace is shared with every other test run, including
+ * runs in sibling worktrees, so a snapshot taken there can change between the
+ * snapshot and the assertion for reasons this process did not cause.
+ */
+function baselineTempDirs(dir: string): string[] {
+	return fs.readdirSync(dir).filter((name: string) => name.startsWith("pi-deploy-baseline-"));
 }
 
 describe("deploy drift preflight baseline", () => {
@@ -580,11 +594,13 @@ describe("deploy drift preflight baseline", () => {
 	it("cleans up its temporary baseline export", () => {
 		withGitFixture((f) => {
 			stampDeployed(f);
-			const before = baselineTempDirs();
+			const privateTemp = path.join(f.root, "tmp");
+			fs.mkdirSync(privateTemp, { recursive: true });
+			const before = baselineTempDirs(privateTemp);
 			fs.writeFileSync(path.join(f.runtime, "tracked.txt"), "edited by hand in the runtime\n");
-			const result = preflight(f, "--save-drift", f.artifacts);
+			const result = preflightInTemp(privateTemp, f, "--save-drift", f.artifacts);
 			assert.equal(result.status, 2, result.stderr);
-			assert.deepEqual(baselineTempDirs(), before);
+			assert.deepEqual(baselineTempDirs(privateTemp), before);
 		});
 	});
 });

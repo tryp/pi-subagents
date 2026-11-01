@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { formatAsyncRunList, listAsyncRuns, summarizeAsyncStatus } from "../../src/runs/background/async-status.ts";
+import { compareAsyncRuns, formatAsyncRunList, listAsyncRuns, summarizeAsyncStatus } from "../../src/runs/background/async-status.ts";
 import { inspectSubagentFleet } from "../../src/runs/background/fleet-view.ts";
 
 function createAsyncDir(root: string, id: string, status: Record<string, unknown>): string {
@@ -73,6 +73,34 @@ describe("async status helpers", () => {
 			assert.equal(runs[0]?.steps[1]?.agent, "worker");
 			assert.equal(runs[0]?.steps[1]?.status, "running");
 			assert.match(formatAsyncRunList(runs), /output: .*output-1\.log/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("orders runs with identical timestamps deterministically by id", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-status-order-"));
+		try {
+			// A batch spawns its runs inside one millisecond, so every run in this
+			// fixture shares lastUpdate. readdir order is filesystem-dependent, which
+			// made the rendered "Still active" list differ between two reads of the
+			// same state and made any assertion on that order flake under load.
+			const created = ["run-f", "run-e", "run-d", "run-c", "run-b", "run-a"];
+			for (const id of created) {
+				createAsyncDir(root, id, { runId: id, mode: "single", state: "running", startedAt: 100, lastUpdate: 200 });
+			}
+			const runs = listAsyncRuns(root, { states: ["running"] });
+			assert.deepEqual(runs.map((run) => run.id), [...created].sort());
+			// The comparator itself must be total: two distinct runs are never
+			// "equal", so no ordering decision is left to readdir.
+			for (const left of runs) {
+				for (const right of runs) {
+					if (left.id === right.id) continue;
+					const forward = compareAsyncRuns(left, right);
+					assert.notEqual(forward, 0, `${left.id} vs ${right.id} must not compare equal`);
+					assert.equal(Math.sign(forward), -Math.sign(compareAsyncRuns(right, left)));
+				}
+			}
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
