@@ -6,6 +6,7 @@ import { afterEach, describe, it } from "node:test";
 import {
 	ASYNC_RUN_GC_BUDGET_BYTES,
 	pruneAsyncRunDirs,
+	scanProcOpenFds,
 	type AsyncRunGcOptions,
 } from "../../src/runs/background/async-run-retention.ts";
 
@@ -54,6 +55,19 @@ function addRun(
 	return runDir;
 }
 
+function fakeProc(root: ReturnType<typeof fixture>, pid: string, uidLine?: string, fdTable: "directory" | "file" | "missing" = "missing", fdTarget?: string): string {
+	const procRoot = path.join(root.root, "proc");
+	const procDir = path.join(procRoot, pid);
+	fs.mkdirSync(procDir, { recursive: true });
+	if (uidLine !== undefined) fs.writeFileSync(path.join(procDir, "status"), `Name:\tfake\n${uidLine}\n`);
+	if (fdTable === "directory") {
+		fs.mkdirSync(path.join(procDir, "fd"));
+		if (fdTarget) fs.symlinkSync(fdTarget, path.join(procDir, "fd", "0"));
+	}
+	if (fdTable === "file") fs.writeFileSync(path.join(procDir, "fd"), "not a directory");
+	return procRoot;
+}
+
 function gc(root: ReturnType<typeof fixture>, options: Partial<AsyncRunGcOptions> = {}) {
 	return pruneAsyncRunDirs({
 		asyncDir: root.asyncDir,
@@ -63,7 +77,7 @@ function gc(root: ReturnType<typeof fixture>, options: Partial<AsyncRunGcOptions
 		budgetBytes: 0,
 		keepRecentTerminal: 0,
 		minAgeMs: 0,
-		scanOpenFds: () => ({ complete: true, unreadable: 0, openPaths: [] }),
+		scanOpenFds: () => ({ complete: true, unreadable: 0, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, scanTruncated: false, unreadableForeignUids: [], openPaths: [] }),
 		...options,
 	});
 }
@@ -91,7 +105,21 @@ describe("async run retention", () => {
 		assert.equal(summary.kept.paused, 1);
 		assert.equal(summary.kept.nonterminal, 2);
 		assert.equal(summary.kept["missing-status"], 1);
+		assert.equal(summary.keptMissingStatus, 1);
+		assert.equal(summary.statusErrors.ENOENT, 1);
 		assert.equal(summary.kept["unreadable-status"], 1);
+		assert.equal(summary.statusErrors.malformed, 1);
+	});
+
+	it("classifies status EACCES separately from ENOENT and keeps the unreadable status", () => {
+		const root = fixture();
+		const runDir = addRun(root, "inaccessible-status", "complete", 1);
+		fs.chmodSync(path.join(runDir, "status.json"), 0);
+		const summary = gc(root);
+		assert.equal(fs.existsSync(runDir), true);
+		assert.equal(summary.keptUnreadableStatusForeign, 1);
+		assert.equal(summary.kept["unreadable-status-foreign"], 1);
+		assert.equal(summary.statusErrors.EACCES, 1);
 	});
 
 	it("keeps runs with a live or permission-denied recorded PID and prunes dead PIDs", () => {
@@ -109,17 +137,112 @@ describe("async run retention", () => {
 		const open = addRun(root, "open", "complete", 1);
 		addRun(root, "incomplete", "failed", 1);
 		const summary = gc(root, {
-			scanOpenFds: (paths) => ({ complete: true, unreadable: 0, openPaths: [open] }),
+			scanOpenFds: (paths) => ({ complete: true, unreadable: 0, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, scanTruncated: false, unreadableForeignUids: [], openPaths: [open] }),
 		});
 		assert.equal(fs.existsSync(open), true);
 		assert.equal(fs.existsSync(path.join(root.asyncDir, "incomplete")), false);
 		assert.equal(summary.kept["open-fd"], 1);
 		const conservative = gc(root, {
-			scanOpenFds: () => ({ complete: false, unreadable: 7, openPaths: [] }),
+			scanOpenFds: () => ({ complete: false, unreadable: 7, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, scanTruncated: false, unreadableForeignUids: [], openPaths: [] }),
 		});
 		assert.equal(fs.existsSync(open), true);
 		assert.equal(conservative.kept["incomplete-fd-scan"], 1);
 		assert.equal(conservative.fdScan.unreadable, 7);
+	});
+
+	it("prunes when unreadable foreign fd tables cannot reach any candidate path", () => {
+		const root = fixture();
+		const runDir = addRun(root, "foreign-only", "complete", 1);
+		const foreignUid = (process.getuid?.() ?? 1000) + 1;
+		const procRoot = fakeProc(root, "901", `Uid:\t${foreignUid}\t${foreignUid}\t${foreignUid}\t${foreignUid}`, "file");
+		const lines: string[] = [];
+		const summary = gc(root, { procRoot, scanOpenFds: scanProcOpenFds, log: (line) => lines.push(line) });
+		assert.equal(fs.existsSync(runDir), false);
+		assert.equal(summary.pruned, 1);
+		assert.equal(summary.skippedUnreadableForeignProvenUnreachable, 1);
+		assert.equal(summary.keptUnreadableForeignReachable, 0);
+		assert.equal(summary.keptSameUidUnreadable, 0);
+		assert.match(lines[0]!, /sweep examined=1 collectable=1 .*deleted=1/);
+		assert.match(lines[0]!, /blockedUnreadable=0 blockedWorldAccessible=0/);
+	});
+
+	it("keeps a candidate when an unreadable foreign fd table could reach its world-readable tree", () => {
+		const root = fixture();
+		const runDir = addRun(root, "foreign-world", "complete", 1);
+		fs.chmodSync(root.root, 0o755);
+		fs.chmodSync(root.asyncDir, 0o755);
+		fs.chmodSync(runDir, 0o755);
+		const foreignUid = (process.getuid?.() ?? 1000) + 1;
+		const procRoot = fakeProc(root, "902", `Uid:\t${foreignUid}\t${foreignUid}\t${foreignUid}\t${foreignUid}`, "file");
+		const summary = gc(root, { procRoot, scanOpenFds: scanProcOpenFds });
+		assert.equal(fs.existsSync(runDir), true);
+		assert.equal(summary.keptUnreadableForeignReachable, 1);
+		assert.equal(summary.kept["unreadable-foreign-reachable"], 1);
+	});
+
+	it("scans readable foreign fd tables and keeps a candidate they hold open", () => {
+		const root = fixture();
+		const runDir = addRun(root, "readable-foreign-open", "complete", 1);
+		const foreignUid = (process.getuid?.() ?? 1000) + 1;
+		const procRoot = fakeProc(root, "906", `Uid:\t${foreignUid}\t${foreignUid}\t${foreignUid}\t${foreignUid}`, "directory", runDir);
+		const summary = gc(root, { procRoot, scanOpenFds: scanProcOpenFds });
+		assert.equal(fs.existsSync(runDir), true);
+		assert.equal(summary.scannedReadableForeign, 1);
+		assert.equal(summary.kept["open-fd"], 1);
+		assert.equal(summary.skippedUnreadableForeignProvenUnreachable, 0);
+	});
+
+	it("keeps candidates when a same-uid fd table is unreadable", () => {
+		const root = fixture();
+		const runDir = addRun(root, "same-uid-unreadable", "complete", 1);
+		const uid = process.getuid?.() ?? 1000;
+		const procRoot = fakeProc(root, "903", `Uid:\t${uid}\t${uid}\t${uid}\t${uid}`, "file");
+		const summary = gc(root, { procRoot, scanOpenFds: scanProcOpenFds });
+		assert.equal(fs.existsSync(runDir), true);
+		assert.equal(summary.keptSameUidUnreadable, 1);
+		assert.equal(summary.kept["same-uid-unreadable-fd"], 1);
+	});
+
+	it("keeps candidates when process uid cannot be verified", () => {
+		const root = fixture();
+		const runDir = addRun(root, "uid-unverifiable", "complete", 1);
+		const procRoot = fakeProc(root, "904", "State:\tS");
+		const summary = gc(root, { procRoot, scanOpenFds: scanProcOpenFds });
+		assert.equal(fs.existsSync(runDir), true);
+		assert.equal(summary.keptUidUnverifiable, 1);
+		assert.equal(summary.kept["uid-unverifiable"], 1);
+	});
+
+	it("accounts for every examined candidate in a mixed sweep", () => {
+		const root = fixture();
+		const privateRun = addRun(root, "private", "complete", 1);
+		const worldRun = addRun(root, "world", "complete", 1);
+		const openRun = addRun(root, "open", "complete", 1);
+		addRun(root, "owner-alive", "complete", 1, { pid: 905 });
+		fs.chmodSync(root.root, 0o711);
+		fs.chmodSync(root.asyncDir, 0o711);
+		fs.chmodSync(privateRun, 0o700);
+		fs.chmodSync(worldRun, 0o711);
+		fs.chmodSync(openRun, 0o700);
+		const lines: string[] = [];
+		const summary = gc(root, {
+			isPidAlive: (pid) => pid === 905,
+			scanOpenFds: () => ({ complete: true, unreadable: 0, foreignUid: 1, scannedReadableForeign: 1, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, scanTruncated: false, unreadableForeignUids: [], openPaths: [openRun] }),
+			log: (line) => lines.push(line),
+		});
+		assert.equal(fs.existsSync(privateRun), false);
+		assert.equal(fs.existsSync(worldRun), false);
+		assert.equal(fs.existsSync(openRun), true);
+		assert.equal(fs.existsSync(path.join(root.asyncDir, "owner-alive")), true);
+		assert.equal(summary.pruned, 2);
+		assert.equal(summary.scannedReadableForeign, 1);
+		assert.equal(summary.keptWorldAccessible, 0);
+		assert.equal(summary.kept["live-pid"], 1);
+		assert.equal(summary.keptOwnerAlive, 1);
+		assert.equal(summary.kept["open-fd"], 1);
+		assert.equal(summary.pruned + summary.wouldPrune + Object.values(summary.kept).reduce((sum, count) => sum + count, 0), summary.examined);
+		assert.equal(Object.values(summary.outcomes).reduce((sum, count) => sum + count, 0), summary.examined);
+		assert.match(lines[0]!, /sweep examined=4 collectable=2 .*deleted=2/);
 	});
 
 	it("preserves the 20 newest terminal runs and anything under 48 hours", () => {
@@ -132,6 +255,19 @@ describe("async run retention", () => {
 		assert.equal(summary.kept["retention-floor"], 20);
 		assert.equal(fs.existsSync(path.join(root.asyncDir, "run-21")), true);
 		assert.equal(summary.kept["younger-than-min-age"], 1);
+	});
+
+	it("dry-run reports would-delete counts and bytes without deleting candidate data", () => {
+		const root = fixture();
+		const runDir = addRun(root, "dry-run", "complete", 1, { resultBytes: 32 });
+		const bytesBefore = fs.statSync(path.join(runDir, "status.json")).size + fs.statSync(path.join(runDir, "output.log")).size + 32;
+		const summary = gc(root, { dryRun: true });
+		assert.equal(fs.existsSync(runDir), true);
+		assert.equal(fs.existsSync(path.join(root.resultsDir, "dry-run.json")), true);
+		assert.equal(summary.pruned, 0);
+		assert.equal(summary.wouldPrune, 1);
+		assert.equal(summary.bytesWouldReclaim, bytesBefore);
+		assert.equal(summary.bytesAfter, summary.bytesBefore);
 	});
 
 	it("prunes oldest first only until the configured byte budget is met and removes related trees", () => {
@@ -205,7 +341,7 @@ describe("async run retention", () => {
 		const summary = gc(root, { minAgeMs: 48 * 60 * 60 * 1000, log: (line) => lines.push(line) });
 		assert.equal(summary.kept["younger-than-min-age"], 1);
 		assert.equal(lines.length, 1);
-		assert.match(lines[0], /pruned=0.*examined=1/);
+		assert.match(lines[0], /sweep examined=1 collectable=0 .*deleted=0/);
 		assert.match(lines[0], /younger-than-min-age/);
 	});
 });

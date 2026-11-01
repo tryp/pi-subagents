@@ -9,7 +9,7 @@ const summary = pruneAsyncRunDirs({
 	nestedEventsDir,
 	resultsDir,
 	budgetBytes: Number.MAX_SAFE_INTEGER,
-	scanOpenFds: () => ({ complete: true, unreadable: 0, openPaths: [] }),
+	scanOpenFds: () => ({ complete: true, unreadable: 0, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, scanTruncated: false, unreadableForeignUids: [], openPaths: [] }),
 	log: (line) => console.log(line),
 });
 console.log(JSON.stringify({ wallMs: +(performance.now() - started).toFixed(1), ...summary }));
