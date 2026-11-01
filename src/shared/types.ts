@@ -57,6 +57,7 @@ export interface WorkflowGraphNode {
 	outputName?: string;
 	structured?: boolean;
 	acceptanceStatus?: AcceptanceLedgerStatus;
+	acceptanceReason?: string;
 	error?: string;
 }
 
@@ -949,6 +950,8 @@ export interface AsyncStatus {
 		transcriptError?: string;
 		activityState?: ActivityState;
 		lastActivityAt?: number;
+		lastChildEventAt?: number;
+		heartbeatAt?: number;
 		currentTool?: string;
 		currentToolArgs?: string;
 		currentToolStartedAt?: number;
@@ -962,6 +965,12 @@ export interface AsyncStatus {
 		durationMs?: number;
 		exitCode?: number | null;
 		timeoutMs?: number;
+		effectiveLimits?: {
+			turnBudget: { maxTurns?: number; graceTurns?: number; source: "run-level" | "step-level" | "default" | "none" };
+			toolBudget: { hard?: number; soft?: number; block?: string[] | "*"; source: "run-level" | "step-level" | "default" | "none" };
+			timeoutMs: { value?: number; source: "run-level" | "step-level" | "default" | "none" };
+		};
+		acceptanceReason?: string;
 		deadlineAt?: number;
 		timedOut?: boolean;
 		stopped?: boolean;

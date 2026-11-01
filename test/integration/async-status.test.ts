@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { formatAsyncRunList, listAsyncRuns } from "../../src/runs/background/async-status.ts";
+import { formatAsyncRunList, listAsyncRuns, summarizeAsyncStatus } from "../../src/runs/background/async-status.ts";
 import { inspectSubagentFleet } from "../../src/runs/background/fleet-view.ts";
 
 function createAsyncDir(root: string, id: string, status: Record<string, unknown>): string {
@@ -14,6 +14,30 @@ function createAsyncDir(root: string, id: string, status: Record<string, unknown
 }
 
 describe("async status helpers", () => {
+	it("projects persisted child liveness and limits with age computed at read time", () => {
+		const lastChildEventAt = 1_000;
+		const summary = summarizeAsyncStatus("/tmp/run", {
+			runId: "run",
+			mode: "chain",
+			state: "running",
+			startedAt: 0,
+			lastUpdate: 1_000,
+			steps: [{
+				agent: "worker",
+				status: "running",
+				lastChildEventAt,
+				effectiveLimits: {
+					turnBudget: { maxTurns: 8, source: "run-level" },
+					toolBudget: { hard: 12, source: "step-level" },
+					timeoutMs: { value: 60_000, source: "run-level" },
+				},
+			}],
+		}, 4_000);
+		assert.equal(summary.steps?.[0]?.lastChildEventAt, lastChildEventAt);
+		assert.equal(summary.steps?.[0]?.lastChildEventAgeMs, 3_000);
+		assert.deepEqual(summary.steps?.[0]?.effectiveLimits?.toolBudget, { hard: 12, source: "step-level" });
+	});
+
 	it("lists only requested states and includes flattened step summaries", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-status-"));
 		try {

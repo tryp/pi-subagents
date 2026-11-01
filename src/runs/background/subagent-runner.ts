@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import { startRunnerHeartbeat } from "./runner-heartbeat.ts";
 import type { Message } from "@earendil-works/pi-ai";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { createChildTranscriptWriter, type ChildTranscriptWriter } from "../../shared/child-transcript.ts";
@@ -1482,6 +1483,29 @@ async function runSingleStep(
 	};
 }
 
+type LimitSource = "run-level" | "step-level" | "default" | "none";
+
+function effectiveLimitsFor(step: SubagentStep, config: SubagentRunConfig) {
+	const turnSource: LimitSource = config.turnBudget ? "run-level" : "none";
+	const toolSource: LimitSource = step.toolBudget ? "step-level" : config.toolBudget ? "run-level" : "none";
+	const timeoutSource: LimitSource = step.timeoutMs !== undefined ? "step-level" : config.timeoutMs !== undefined ? "run-level" : "none";
+	const toolBudget = step.toolBudget ?? config.toolBudget;
+	const timeoutMs = step.timeoutMs ?? config.timeoutMs;
+	return {
+		turnBudget: { ...(config.turnBudget ? { maxTurns: config.turnBudget.maxTurns, graceTurns: config.turnBudget.graceTurns } : {}), source: turnSource },
+		toolBudget: { ...(toolBudget ? { hard: toolBudget.hard, ...(toolBudget.soft !== undefined ? { soft: toolBudget.soft } : {}), block: toolBudget.block } : {}), source: toolSource },
+		timeoutMs: { ...(timeoutMs !== undefined ? { value: timeoutMs } : {}), source: timeoutSource },
+	};
+}
+
+function acceptanceReasonFor(ledger: import("../../shared/types.ts").AcceptanceLedger | undefined): string | undefined {
+	if (!ledger) return undefined;
+	if (ledger.parentDecision?.reason) return ledger.parentDecision.reason;
+	if (ledger.status === "rejected") return acceptanceFailureMessage(ledger) ?? "Acceptance rejected.";
+	if (ledger.status === "accepted" || ledger.status === "reviewed") return "Acceptance checks passed.";
+	return undefined;
+}
+
 type RunnerStatusStep = NonNullable<AsyncStatus["steps"]>[number] & {
 	exitCode?: number | null;
 };
@@ -1655,6 +1679,7 @@ async function runSubagent(
 	let interrupted = false;
 	let currentActivityState: ActivityState | undefined;
 	let activityTimer: NodeJS.Timeout | undefined;
+	let heartbeatTimer: (() => void) | undefined;
 	let timeoutTimer: NodeJS.Timeout | undefined;
 	let timedOut = false;
 	let stopped = false;
@@ -1685,6 +1710,7 @@ async function runSubagent(
 					outputName: task.outputName,
 					structured: task.structured,
 					...(task.timeoutMs !== undefined ? { timeoutMs: task.timeoutMs } : {}),
+					effectiveLimits: effectiveLimitsFor(task, config),
 					status: "pending",
 					...(task.toolBudget ? { toolBudget: initialToolBudgetState(task.toolBudget) } : {}),
 					...(task.sessionFile ? { sessionFile: task.sessionFile } : {}),
@@ -1707,6 +1733,7 @@ async function runSubagent(
 				label: step.label ?? step.parallel.label ?? `Dynamic fanout (${step.collect.as})`,
 				outputName: step.collect.as,
 				structured: Boolean(step.collect.outputSchema),
+				effectiveLimits: effectiveLimitsFor(step.parallel, config),
 				status: "pending",
 				...(step.parallel.toolBudget ? { toolBudget: initialToolBudgetState(step.parallel.toolBudget) } : {}),
 				recentTools: [],
@@ -1723,6 +1750,7 @@ async function runSubagent(
 				outputName: step.outputName,
 				structured: step.structured,
 				...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}),
+				effectiveLimits: effectiveLimitsFor(step, config),
 				status: "pending",
 				...(step.toolBudget ? { toolBudget: initialToolBudgetState(step.toolBudget) } : {}),
 				...(step.sessionFile ? { sessionFile: step.sessionFile } : {}),
@@ -1807,6 +1835,7 @@ async function runSubagent(
 					node.status = normalize(step.status);
 					node.error = step.error;
 					node.acceptanceStatus = step.acceptance?.status;
+				node.acceptanceReason = step.acceptanceReason;
 				}
 				if (statusPayload.currentStep === node.flatIndex) graph.currentNodeId = node.id;
 			}
@@ -2033,6 +2062,7 @@ async function runSubagent(
 		groupNode.status = status;
 		groupNode.error = error;
 		groupNode.acceptanceStatus = acceptance?.status ?? groupNode.acceptanceStatus;
+		groupNode.acceptanceReason = acceptanceReasonFor(acceptance) ?? groupNode.acceptanceReason;
 	};
 
 	const stepOutputActivityAt = (index: number): number => {
@@ -2333,6 +2363,7 @@ async function runSubagent(
 			});
 			if (!next) return;
 			step.watchdog = next;
+			step.lastChildEventAt = now;
 			step.lastActivityAt = now;
 			statusPayload.lastActivityAt = now;
 			statusPayload.lastUpdate = now;
@@ -2437,6 +2468,7 @@ async function runSubagent(
 			);
 		}
 		syncTopLevelCurrentTool();
+		step.lastChildEventAt = now;
 		step.lastActivityAt = now;
 		statusPayload.lastActivityAt = now;
 		statusPayload.lastUpdate = now;
@@ -2531,6 +2563,20 @@ async function runSubagent(
 		if (changed) writeStatusPayload();
 		return changed;
 	};
+	heartbeatTimer = startRunnerHeartbeat(
+		() => statusPayload.state === "running" && statusPayload.steps.some((step) => step.status === "running"),
+		() => {
+			const now = Date.now();
+			for (let index = 0; index < statusPayload.steps.length; index++) {
+				const step = statusPayload.steps[index]!;
+				if (step.status !== "running") continue;
+				step.heartbeatAt = now;
+				appendJsonl(eventsPath, JSON.stringify({ type: "subagent.child.heartbeat", ts: now, runId: id, childIndex: index, lastChildEventAt: step.lastChildEventAt, turnCount: step.turnCount, toolCount: step.toolCount }));
+			}
+			statusPayload.lastUpdate = now;
+			writeStatusPayload();
+		},
+	);
 	if (controlConfig.enabled) {
 		activityTimer = setInterval(() => {
 			if (statusPayload.state !== "running") return;
@@ -2939,6 +2985,8 @@ async function runSubagent(
 				resetStepLiveDetail(statusPayload.steps[fi]);
 				statusPayload.steps[fi].startedAt = taskStartTime;
 				statusPayload.steps[fi].lastActivityAt = taskStartTime;
+				statusPayload.steps[fi].lastChildEventAt = taskStartTime;
+				statusPayload.steps[fi].heartbeatAt = taskStartTime;
 				statusPayload.outputFile = path.join(asyncDir, `output-${fi}.log`);
 				statusPayload.lastActivityAt = taskStartTime;
 				statusPayload.lastUpdate = taskStartTime;
@@ -3005,6 +3053,7 @@ async function runSubagent(
 				statusPayload.steps[fi].structuredOutputPath = singleResult.structuredOutputPath;
 				statusPayload.steps[fi].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
 				statusPayload.steps[fi].acceptance = singleResult.acceptance;
+				statusPayload.steps[fi].acceptanceReason = acceptanceReasonFor(singleResult.acceptance);
 				statusPayload.steps[fi].watchdog = singleResult.watchdog;
 				statusPayload.lastUpdate = taskEndTime;
 				writeStatusPayload();
@@ -3259,6 +3308,10 @@ async function runSubagent(
 						statusPayload.steps[fi].endedAt = undefined;
 						statusPayload.steps[fi].durationMs = undefined;
 						statusPayload.steps[fi].lastActivityAt = taskStartTime;
+						statusPayload.steps[fi].lastChildEventAt = taskStartTime;
+						statusPayload.steps[fi].heartbeatAt = taskStartTime;
+				statusPayload.steps[fi].lastChildEventAt = taskStartTime;
+				statusPayload.steps[fi].heartbeatAt = taskStartTime;
 						statusPayload.outputFile = path.join(asyncDir, `output-${fi}.log`);
 						statusPayload.lastActivityAt = taskStartTime;
 						statusPayload.lastUpdate = taskStartTime;
@@ -3340,6 +3393,7 @@ async function runSubagent(
 						statusPayload.steps[fi].structuredOutputPath = singleResult.structuredOutputPath;
 						statusPayload.steps[fi].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
 						statusPayload.steps[fi].acceptance = singleResult.acceptance;
+				statusPayload.steps[fi].acceptanceReason = acceptanceReasonFor(singleResult.acceptance);
 						statusPayload.steps[fi].watchdog = singleResult.watchdog;
 						statusPayload.lastUpdate = taskEndTime;
 						writeStatusPayload();
@@ -3511,6 +3565,8 @@ async function runSubagent(
 			statusPayload.steps[flatIndex].skills = seqStep.skills;
 			statusPayload.steps[flatIndex].startedAt = stepStartTime;
 			statusPayload.steps[flatIndex].lastActivityAt = stepStartTime;
+			statusPayload.steps[flatIndex].lastChildEventAt = stepStartTime;
+			statusPayload.steps[flatIndex].heartbeatAt = stepStartTime;
 			statusPayload.lastActivityAt = stepStartTime;
 			statusPayload.lastUpdate = stepStartTime;
 			statusPayload.outputFile = path.join(asyncDir, `output-${flatIndex}.log`);
@@ -3682,6 +3738,7 @@ async function runSubagent(
 			statusPayload.steps[flatIndex].structuredOutputPath = singleResult.structuredOutputPath;
 			statusPayload.steps[flatIndex].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
 			statusPayload.steps[flatIndex].acceptance = singleResult.acceptance;
+			statusPayload.steps[flatIndex].acceptanceReason = acceptanceReasonFor(singleResult.acceptance);
 			statusPayload.steps[flatIndex].watchdog = singleResult.watchdog;
 			if (stepTokens) {
 				statusPayload.steps[flatIndex].tokens = stepTokens;
@@ -3793,6 +3850,8 @@ async function runSubagent(
 		}
 	}
 
+	heartbeatTimer?.();
+	heartbeatTimer = undefined;
 	if (activityTimer) {
 		clearInterval(activityTimer);
 		activityTimer = undefined;

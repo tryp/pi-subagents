@@ -19,6 +19,11 @@ interface AsyncRunStepSummary {
 	status: AsyncJobStep["status"];
 	activityState?: ActivityState;
 	lastActivityAt?: number;
+	lastChildEventAt?: number;
+	lastChildEventAgeMs?: number;
+	heartbeatAt?: number;
+	effectiveLimits?: AsyncJobStep["effectiveLimits"];
+	acceptanceReason?: string;
 	currentTool?: string;
 	currentToolArgs?: string;
 	currentToolStartedAt?: number;
@@ -144,7 +149,7 @@ function deriveAsyncActivityState(asyncDir: string, status: AsyncStatus): { acti
 	};
 }
 
-function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string }, nestedWarnings: string[] = [], nestedRoute?: NestedRoute): AsyncRunSummary {
+function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string }, nestedWarnings: string[] = [], nestedRoute?: NestedRoute, now = Date.now()): AsyncRunSummary {
 	if (status.sessionId !== undefined && typeof status.sessionId !== "string") {
 		throw new Error(`Invalid async status '${path.join(asyncDir, "status.json")}': sessionId must be a string.`);
 	}
@@ -175,6 +180,13 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			status: step.status,
 			...(stepActivityState ? { activityState: stepActivityState } : {}),
 			...(stepLastActivityAt ? { lastActivityAt: stepLastActivityAt } : {}),
+			...(step.status === "running" && step.lastChildEventAt !== undefined ? {
+				lastChildEventAt: step.lastChildEventAt,
+				lastChildEventAgeMs: Math.max(0, now - step.lastChildEventAt),
+			} : {}),
+			...(step.heartbeatAt !== undefined ? { heartbeatAt: step.heartbeatAt } : {}),
+			...(step.effectiveLimits ? { effectiveLimits: step.effectiveLimits } : {}),
+			...(step.acceptanceReason ? { acceptanceReason: step.acceptanceReason } : {}),
 			...(step.currentTool ? { currentTool: step.currentTool } : {}),
 			...(step.currentToolArgs ? { currentToolArgs: step.currentToolArgs } : {}),
 			...(step.currentToolStartedAt ? { currentToolStartedAt: step.currentToolStartedAt } : {}),
@@ -247,8 +259,8 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 	};
 }
 
-export function summarizeAsyncStatus(asyncDir: string, status: AsyncStatus & { cwd?: string }): AsyncRunSummary {
-	return statusToSummary(asyncDir, status);
+export function summarizeAsyncStatus(asyncDir: string, status: AsyncStatus & { cwd?: string }, now = Date.now()): AsyncRunSummary {
+	return statusToSummary(asyncDir, status, [], undefined, now);
 }
 
 function sortRuns(runs: AsyncRunSummary[]): AsyncRunSummary[] {
@@ -317,7 +329,7 @@ export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions
 				nestedWarnings.push(`Nested status unavailable: ${getErrorMessage(error)}`);
 			}
 		}
-		const summary = statusToSummary(asyncDir, status, nestedWarnings, nestedRoute);
+		const summary = statusToSummary(asyncDir, status, nestedWarnings, nestedRoute, options.now?.() ?? Date.now());
 		runs.push(summary);
 	}
 
