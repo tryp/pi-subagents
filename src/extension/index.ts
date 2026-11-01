@@ -23,6 +23,7 @@ import { discoverAgents } from "../agents/agents.ts";
 import { cleanupAllArtifactDirs, cleanupOldArtifacts, getArtifactsDir } from "../shared/artifacts.ts";
 import { resolveCurrentSessionId } from "../shared/session-identity.ts";
 import { cleanupOldChainDirs } from "../shared/settings.ts";
+import { ASYNC_RUN_GC_STARTUP_DELAY_MS, runAsyncRunGc } from "../runs/background/async-run-retention.ts";
 import { clearLegacyResultAnimationTimer, renderSubagentResult } from "../tui/render.ts";
 import { SubagentParams } from "./schemas.ts";
 import { validateChainInput } from "./chain-validation.ts";
@@ -220,6 +221,28 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	ensureAccessibleDir(RESULTS_DIR);
 	ensureAccessibleDir(ASYNC_DIR);
 	cleanupOldChainDirs();
+	const asyncRunGcTimer = process.env.NODE_TEST_CONTEXT
+		? null
+		: setTimeout(() => {
+			void runAsyncRunGc({
+				log: (line) => {
+					try {
+						pi.appendEntry("subagent_async_run_gc", { line });
+					} catch {
+						// GC telemetry is best-effort; startup must stay available.
+					}
+				},
+			}).catch((error: unknown) => {
+				try {
+					pi.appendEntry("subagent_async_run_gc", {
+						line: `[subagent async-run GC] failed: ${error instanceof Error ? error.message : String(error)}`,
+					});
+				} catch {
+					// GC telemetry is best-effort; startup must stay available.
+				}
+			});
+		}, ASYNC_RUN_GC_STARTUP_DELAY_MS);
+	asyncRunGcTimer?.unref?.();
 
 	const config = loadConfig();
 	const waitToolConfig = resolveWaitToolConfig(config.waitTool);
@@ -279,6 +302,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	primeExistingResults();
 
 	const runtimeCleanup = () => {
+		if (asyncRunGcTimer) clearTimeout(asyncRunGcTimer);
 		disposeBackgroundWorkProvider();
 		disposeBackgroundWorkProvider = () => {};
 		disposeSubagentNotify();
@@ -616,6 +640,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", () => {
+		if (asyncRunGcTimer) clearTimeout(asyncRunGcTimer);
 		disposeBackgroundWorkProvider();
 		disposeBackgroundWorkProvider = () => {};
 		disposeSubagentNotify();
