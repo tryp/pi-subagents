@@ -94,14 +94,20 @@ export interface AsyncRunSummary {
 	nestedWarnings?: string[];
 }
 
-interface AsyncRunListOptions {
+export interface AsyncRunListOptions {
 	states?: Array<AsyncRunSummary["state"]>;
 	sessionId?: string;
 	limit?: number;
 	resultsDir?: string;
 	kill?: (pid: number, signal?: NodeJS.Signals | 0) => boolean;
 	now?: () => number;
-	reconcile?: boolean;
+	reconcile?: boolean | "yielding";
+	/** Internal bounded scan input; callers normally let listAsyncRuns enumerate the directory. */
+	entryNames?: string[];
+	nestedRouteIndex?: Map<string, NestedRoute>;
+	/** Internal cancellation and scheduling controls used by the yielding reconciliation mode. */
+	shouldContinue?: () => boolean;
+	yielding?: YieldingAsyncRunListOptions;
 }
 
 function getErrorMessage(error: unknown): string {
@@ -297,10 +303,17 @@ function sortRuns(runs: AsyncRunSummary[]): AsyncRunSummary[] {
 	return [...runs].sort(compareAsyncRuns);
 }
 
-export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions = {}): AsyncRunSummary[] {
+export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions & { reconcile: "yielding" }): Promise<AsyncRunSummary[]>;
+export function listAsyncRuns(asyncDirRoot: string, options?: AsyncRunListOptions): AsyncRunSummary[];
+export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions = {}): AsyncRunSummary[] | Promise<AsyncRunSummary[]> {
+	if (options.reconcile === "yielding") {
+		return listAsyncRunsYielding(asyncDirRoot, { ...options, reconcile: true }, options.shouldContinue, options.yielding);
+	}
 	let entries: string[];
 	try {
-		entries = fs.readdirSync(asyncDirRoot).filter((entry) => isAsyncRunDir(asyncDirRoot, entry));
+		entries = options.entryNames
+			? options.entryNames.filter((entry) => isAsyncRunDir(asyncDirRoot, entry))
+			: fs.readdirSync(asyncDirRoot).filter((entry) => isAsyncRunDir(asyncDirRoot, entry));
 	} catch (error) {
 		if (isNotFoundError(error)) return [];
 		throw new Error(`Failed to list async runs in '${asyncDirRoot}': ${getErrorMessage(error)}`, {
@@ -315,9 +328,12 @@ export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions
 	// the directory once per run. The index is built lazily on first use, so
 	// load-time restoration (which only wants queued/running runs) skips it
 	// entirely when no active runs match.
-	let nestedRouteIndex: Map<string, NestedRoute> | undefined;
+	let nestedRouteIndex = options.nestedRouteIndex;
 	const resolveNestedRoute = (rootRunId: string): NestedRoute | undefined => {
-		if (!nestedRouteIndex) nestedRouteIndex = buildNestedRouteIndex();
+		if (!nestedRouteIndex) {
+			nestedRouteIndex = buildNestedRouteIndex();
+			options.nestedRouteIndex = nestedRouteIndex;
+		}
 		return nestedRouteIndex.get(rootRunId);
 	};
 	for (const entry of entries) {
@@ -347,6 +363,51 @@ export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions
 		runs.push(summary);
 	}
 
+	const sorted = sortRuns(runs);
+	return options.limit !== undefined ? sorted.slice(0, options.limit) : sorted;
+}
+
+/** Enumerate active runs asynchronously, yielding after each run so restoration cannot monopolize input. */
+export interface YieldingAsyncRunListOptions {
+	sliceBudgetMs?: number;
+	now?: () => number;
+	yieldToEventLoop?: () => Promise<void>;
+	onSlice?: (entryName: string, elapsedMs: number, budgetMs: number) => void;
+}
+
+export async function listAsyncRunsYielding(
+	asyncDirRoot: string,
+	options: AsyncRunListOptions = {},
+	shouldContinue: () => boolean = () => true,
+	yielding: YieldingAsyncRunListOptions = {},
+): Promise<AsyncRunSummary[]> {
+	const budgetMs = yielding.sliceBudgetMs ?? 10;
+	if (!Number.isFinite(budgetMs) || budgetMs <= 0) throw new Error("sliceBudgetMs must be a positive finite number");
+	const now = yielding.now ?? (() => performance.now());
+	const yieldToEventLoop = yielding.yieldToEventLoop ?? (() => new Promise<void>((resolve) => setImmediate(resolve)));
+	const runs: AsyncRunSummary[] = [];
+	let directory: fs.Dir;
+	try {
+		directory = await fs.promises.opendir(asyncDirRoot);
+	} catch (error) {
+		if (isNotFoundError(error)) return [];
+		throw new Error(`Failed to list async runs in '${asyncDirRoot}': ${getErrorMessage(error)}`, {
+			cause: error instanceof Error ? error : undefined,
+		});
+	}
+
+	let sliceStartedAt = now();
+	for await (const entry of directory) {
+		if (!shouldContinue()) break;
+		if (!entry.isDirectory()) continue;
+		runs.push(...listAsyncRuns(asyncDirRoot, { ...options, entryNames: [entry.name] }));
+		const sliceElapsedMs = Math.max(0, now() - sliceStartedAt);
+		yielding.onSlice?.(entry.name, sliceElapsedMs, budgetMs);
+		if (sliceElapsedMs > budgetMs) {
+			await yieldToEventLoop();
+			sliceStartedAt = now();
+		}
+	}
 	const sorted = sortRuns(runs);
 	return options.limit !== undefined ? sorted.slice(0, options.limit) : sorted;
 }

@@ -54,6 +54,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events" | "appendE
 	handleComplete: (data: unknown) => void;
 	resetJobs: (ctx?: ExtensionContext) => void;
 	restoreActiveJobs: (ctx?: ExtensionContext) => void;
+	restoreActiveJobsYielding: (ctx: ExtensionContext | undefined, shouldContinue: () => boolean) => Promise<void>;
 } {
 	const completionRetentionMs = options.completionRetentionMs ?? 10000;
 	const pollIntervalMs = options.pollIntervalMs ?? POLL_INTERVAL_MS;
@@ -480,16 +481,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events" | "appendE
 		}
 	};
 
-	const restoreActiveJobs = (ctx?: ExtensionContext) => {
-		if (ctx?.hasUI) state.lastUiContext = ctx;
-		if (!state.currentSessionId) return;
-		let runs: AsyncRunSummary[];
-		try {
-			runs = listAsyncRuns(asyncDirRoot, { states: ["queued", "running"], sessionId: state.currentSessionId, resultsDir, kill: options.kill, now: options.now });
-		} catch (error) {
-			console.error(`Failed to restore active async jobs from '${asyncDirRoot}':`, error);
-			return;
-		}
+	const applyRestoredRuns = (runs: AsyncRunSummary[]) => {
 		for (const run of runs) {
 			const job = summaryToJob(run);
 			state.asyncJobs.set(run.id, job);
@@ -500,5 +492,27 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events" | "appendE
 		if (state.lastUiContext?.hasUI) rerenderWidget(state.lastUiContext);
 	};
 
-	return { ensurePoller, refreshWidget, handleStarted, handleComplete, resetJobs, restoreActiveJobs };
+	const restoreActiveJobs = (ctx?: ExtensionContext) => {
+		if (ctx?.hasUI) state.lastUiContext = ctx;
+		if (!state.currentSessionId) return;
+		try {
+			applyRestoredRuns(listAsyncRuns(asyncDirRoot, { states: ["queued", "running"], sessionId: state.currentSessionId, resultsDir, kill: options.kill, now: options.now }));
+		} catch (error) {
+			console.error(`Failed to restore active async jobs from '${asyncDirRoot}':`, error);
+		}
+	};
+
+	const restoreActiveJobsYielding = async (ctx: ExtensionContext | undefined, shouldContinue: () => boolean) => {
+		if (ctx?.hasUI) state.lastUiContext = ctx;
+		if (!state.currentSessionId || !shouldContinue()) return;
+		// This is the deferred reconcile phase: each entry is reconciled by the
+		// yielding scanner, which returns to the event loop before the next entry.
+		const runs = await listAsyncRuns(asyncDirRoot, {
+			states: ["queued", "running"], sessionId: state.currentSessionId, resultsDir, kill: options.kill, now: options.now,
+			reconcile: "yielding", shouldContinue,
+		});
+		if (shouldContinue()) applyRestoredRuns(runs);
+	};
+
+	return { ensurePoller, refreshWidget, handleStarted, handleComplete, resetJobs, restoreActiveJobs, restoreActiveJobsYielding };
 }

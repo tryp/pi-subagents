@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { compareAsyncRuns, formatAsyncRunList, listAsyncRuns, summarizeAsyncStatus } from "../../src/runs/background/async-status.ts";
+import { compareAsyncRuns, formatAsyncRunList, listAsyncRuns, listAsyncRunsYielding, summarizeAsyncStatus } from "../../src/runs/background/async-status.ts";
 import { inspectSubagentFleet } from "../../src/runs/background/fleet-view.ts";
 
 function createAsyncDir(root: string, id: string, status: Record<string, unknown>): string {
@@ -73,6 +73,72 @@ describe("async status helpers", () => {
 			assert.equal(runs[0]?.steps[1]?.agent, "worker");
 			assert.equal(runs[0]?.steps[1]?.status, "running");
 			assert.match(formatAsyncRunList(runs), /output: .*output-1\.log/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("yielding restoration scan matches sync results while allowing event-loop work between entries", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-status-yielding-"));
+		try {
+			for (const id of ["run-c", "run-b", "run-a"]) {
+				createAsyncDir(root, id, { runId: id, sessionId: "session-1", mode: "single", state: "running", startedAt: 100, lastUpdate: 200, steps: [] });
+			}
+			const sync = listAsyncRuns(root, { states: ["running"], sessionId: "session-1", reconcile: false });
+			let eventLoopRan = false;
+			const pending = listAsyncRunsYielding(root, { states: ["running"], sessionId: "session-1", reconcile: false });
+			setImmediate(() => { eventLoopRan = true; });
+			const yielding = await pending;
+			assert.deepEqual(yielding.map((run) => run.id), sync.map((run) => run.id));
+			assert.equal(eventLoopRan, true, "scan yields to the event loop between run entries");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("yields only when reconciliation crosses the elapsed-time budget", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-status-budget-"));
+		try {
+			for (let index = 0; index < 4; index++) {
+				const id = `run-${String(index).padStart(2, "0")}`;
+				createAsyncDir(root, id, { runId: id, sessionId: "session-1", mode: "single", state: "complete", startedAt: 100, lastUpdate: 200, steps: [] });
+			}
+			const scan = async (clockStep: number) => {
+				let fakeTime = 0;
+				const events: string[] = [];
+				const overBudgetEntries: string[] = [];
+				const runs = await listAsyncRuns(root, {
+					states: ["complete"], sessionId: "session-1", now: () => { fakeTime += clockStep; return fakeTime; },
+					reconcile: "yielding", shouldContinue: () => true,
+					yielding: {
+						sliceBudgetMs: 10,
+						now: () => fakeTime,
+						onSlice: (entry, elapsedMs, budgetMs) => {
+							if (elapsedMs > budgetMs) overBudgetEntries.push(entry);
+							events.push(`entry:${entry}`);
+						},
+						yieldToEventLoop: async () => {
+							events.push("yield");
+							await new Promise<void>((resolve) => setImmediate(resolve));
+						},
+					},
+				});
+				assert.equal(runs.length, 4);
+				assert.equal(events.filter((event) => event.startsWith("entry:")).length, 4);
+				for (const entry of overBudgetEntries) {
+					const eventIndex = events.indexOf(`entry:${entry}`);
+					assert.equal(events[eventIndex + 1], "yield", "over-budget entry yields before the next entry");
+				}
+				return { events, overBudgetEntries };
+			};
+
+			const fast = await scan(1);
+			assert.deepEqual(fast.overBudgetEntries, []);
+			assert.equal(fast.events.includes("yield"), false, "under-budget entries do not cause event-loop yields");
+
+			const slow = await scan(6);
+			assert.ok(slow.overBudgetEntries.length > 0, "fake clock crosses the 10ms budget during reconciliation");
+			assert.ok(slow.events.includes("yield"), "over-budget entries cause event-loop yields");
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

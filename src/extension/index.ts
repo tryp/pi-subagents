@@ -29,6 +29,7 @@ import { SubagentParams } from "./schemas.ts";
 import { validateChainInput } from "./chain-validation.ts";
 import { createSubagentExecutor, type SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
 import { createAsyncJobTracker } from "../runs/background/async-job-tracker.ts";
+import { createStartupReconciliationController, STARTUP_RECONCILIATION_DISABLE_ENV } from "./startup-maintenance.ts";
 import { createResultWatcher } from "../runs/background/result-watcher.ts";
 import { createScheduledRunManager } from "../runs/background/scheduled-runs.ts";
 import { registerSlashCommands } from "../slash/slash-commands.ts";
@@ -221,6 +222,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	ensureAccessibleDir(RESULTS_DIR);
 	ensureAccessibleDir(ASYNC_DIR);
 	cleanupOldChainDirs();
+	const startupReconciliation = createStartupReconciliationController();
 	const asyncRunGcTimer = process.env.NODE_TEST_CONTEXT
 		? null
 		: setTimeout(() => {
@@ -302,6 +304,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	primeExistingResults();
 
 	const runtimeCleanup = () => {
+		startupReconciliation.dispose();
 		if (asyncRunGcTimer) clearTimeout(asyncRunGcTimer);
 		disposeBackgroundWorkProvider();
 		disposeBackgroundWorkProvider = () => {};
@@ -320,7 +323,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	};
 	globalStore[runtimeCleanupStoreKey] = runtimeCleanup;
 
-	const { ensurePoller, refreshWidget, handleStarted, handleComplete, resetJobs, restoreActiveJobs } = createAsyncJobTracker(pi, state, ASYNC_DIR, {
+	const { ensurePoller, refreshWidget, handleStarted, handleComplete, resetJobs, restoreActiveJobsYielding } = createAsyncJobTracker(pi, state, ASYNC_DIR, {
 		widgetEnabled: config.asyncWidget !== false,
 	});
 	let executorExecute: ((id: string, params: SubagentParamsLike, signal: AbortSignal, onUpdate: ((r: AgentToolResult<Details>) => void) | undefined, ctx: ExtensionContext) => Promise<AgentToolResult<Details>>) | undefined;
@@ -627,7 +630,23 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		cleanupSessionArtifacts(ctx);
 		clearPendingForegroundControlNotices(state);
 		resetJobs(ctx);
-		restoreActiveJobs(ctx);
+		startupReconciliation.invalidate();
+		if (process.env[STARTUP_RECONCILIATION_DISABLE_ENV] !== "1") {
+			startupReconciliation.schedule(async (isCurrent) => {
+				try {
+					await restoreActiveJobsYielding(ctx, isCurrent);
+				} catch (error) {
+					if (!isCurrent()) return;
+					try {
+						pi.appendEntry("subagent_startup_maintenance", {
+							line: `stale-run restoration failed: ${error instanceof Error ? error.message : String(error)}`,
+						});
+					} catch {
+						// Maintenance diagnostics are silent if the session log is unavailable.
+					}
+				}
+			});
+		}
 		scheduledRunManager.bindSession(ctx);
 		restoreSlashFinalSnapshots(ctx.sessionManager.getEntries());
 		primeExistingResults();
@@ -640,6 +659,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", () => {
+		startupReconciliation.dispose();
 		if (asyncRunGcTimer) clearTimeout(asyncRunGcTimer);
 		disposeBackgroundWorkProvider();
 		disposeBackgroundWorkProvider = () => {};

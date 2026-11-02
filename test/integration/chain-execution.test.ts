@@ -24,6 +24,7 @@ import {
 	events,
 } from "../support/helpers.ts";
 import { INTERCOM_DETACH_REQUEST_EVENT } from "../../src/shared/types.ts";
+import { SHARED_CONTEXT_CLOSE_DELIMITER, SHARED_CONTEXT_OPEN_DELIMITER } from "../../src/runs/shared/shared-context.ts";
 
 interface TestSequentialStep {
 	agent: string;
@@ -221,13 +222,20 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
 		const firstPrompt = readCallArgs(0).join("\\n");
 		const secondPrompt = readCallArgs(1).join("\\n");
-		for (const prompt of [firstPrompt, secondPrompt]) {
-			assert.ok(prompt.includes(sharedContext));
-			assert.ok(prompt.indexOf(sharedContext) < prompt.indexOf("First step") || prompt.indexOf(sharedContext) < prompt.indexOf("Use result:"));
-		}
+		const extractPreamble = (prompt: string) => {
+			const start = prompt.indexOf(SHARED_CONTEXT_OPEN_DELIMITER);
+			assert.notEqual(start, -1, "shared-context opening delimiter is present");
+			const end = prompt.indexOf(SHARED_CONTEXT_CLOSE_DELIMITER, start);
+			assert.notEqual(end, -1, "shared-context closing delimiter is present");
+			return prompt.slice(start, end + SHARED_CONTEXT_CLOSE_DELIMITER.length + 2);
+		};
+		const firstPreamble = extractPreamble(firstPrompt);
+		const secondPreamble = extractPreamble(secondPrompt);
+		assert.equal(firstPreamble, `${SHARED_CONTEXT_OPEN_DELIMITER}\n${sharedContext}\n${SHARED_CONTEXT_CLOSE_DELIMITER}\n\n`);
+		assert.equal(secondPreamble, firstPreamble, "shared-context preamble bytes including delimiters are identical across steps");
 		assert.ok(firstPrompt.includes("First step"));
 		assert.ok(secondPrompt.includes("Use result: first result"));
-		assert.ok(secondPrompt.includes(sharedContext), "{previous} in sharedContext remains literal");
+		assert.ok(secondPreamble.includes("{previous}"), "{previous} in sharedContext remains literal");
 	});
 
 	it("runs a 2-step chain", async () => {
