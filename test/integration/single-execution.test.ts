@@ -1639,6 +1639,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 	});
 
 	it("keeps sibling system prompts identical when output paths and turn budgets differ", async () => {
+		assert.ok(runSync, "runSync is available");
 		mockPi.onCall({ output: "first child" });
 		mockPi.onCall({ output: "second child" });
 		const agents = [makeAgent("worker", { systemPrompt: "Shared worker instructions.", systemPromptMode: "replace" })];
