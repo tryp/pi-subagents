@@ -27,6 +27,7 @@ EXECUTION (use exactly ONE mode):
 • SINGLE: { agent, task? } - one task; omit task for self-contained agents
 • CHAIN: { chain: [{agent:"agent-a"}, {parallel:[{agent:"agent-b",count:3}]}] } - sequential pipeline with optional parallel fan-out
 • PARALLEL: { tasks: [{agent,task,count?,output?,reads?,progress?}, ...], concurrency?: number, worktree?: true } - concurrent execution (worktree: isolate each task in a git worktree)
+• For cache-friendly PARALLEL batches, prefer one agent and one model across children (use the top-level model default). Keep shared contextFiles lists identical and ordered; sibling system prompts are batch-stable by default, with per-child directives in user messages.
 • Optional context: { context: "fresh" | "fork" } (explicit value overrides every child; when omitted, each requested agent uses its own defaultContext, otherwise "fresh"; inspect agent defaults via { action: "list" })
 • Fork thinking: model strings accept a thinking suffix (provider/model:off|minimal|low|medium|high|xhigh|max). Forking over a parent transcript that carries signed Anthropic thinking blocks forces thinking off only when a child's effective primary or fallback model resolves to the Anthropic provider or anthropic-messages API; unresolved models are treated conservatively. The result notes affected children, including on failures. Use fresh context when an Anthropic child needs thinking.
 • Optional timeout: { timeoutMs } sets a run-level max runtime for foreground and async/background runs
@@ -89,6 +90,7 @@ export const COMPACT_SUBAGENT_TOOL_DESCRIPTION = `Delegate to subagents, or mana
 EXECUTE (omit action):
 • SINGLE {agent,task?}; PARALLEL {tasks:[{agent,task,count?,output?,outputMode?,reads?,progress?}],concurrency?,worktree?}; CHAIN {chain:[{agent,task?},{parallel:[{agent,task,count?}]}]}.
 • Every task also takes cwd, skill, model; chain keys beyond those shapes: as, collect, expand, outputSchema, phase, label, failFast, contextFiles. Templates: {task}, {previous}, {chain_dir}, {outputs.name}.
+• Cache-friendly PARALLEL: prefer one agent/model across children; top-level model is the default. Keep shared contextFiles identical and ordered. Sibling system prompts are batch-stable; per-child directives go in user messages.
 • context "fresh"|"fork" overrides the agent's defaultContext. model "provider/model[:thinking]" with thinking off|minimal|low|medium|high|xhigh|max.
 • Limits: timeoutMs; rlimits {cpuSeconds,fileSizeMb,openFiles,coreSizeMb} (Linux only, inherited, only lowerable, no memory/process cap); turnBudget {maxTurns,graceTurns?}; toolBudget {soft,hard,block?}: soft nudges, hard blocks the named tools ("*" = all).
 

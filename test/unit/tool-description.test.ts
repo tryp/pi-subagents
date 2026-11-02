@@ -48,6 +48,9 @@ describe("registered subagent tool description", () => {
 		assert.match(description, /proactive skill subagent suggestions/i);
 		assert.doesNotMatch(description, /disabled builtins/i);
 		assert.match(description, /output\?,reads\?,progress\?/i);
+		assert.match(description, /cache-friendly PARALLEL batches, prefer one agent and one model.*top-level model default/i);
+		assert.match(description, /contextFiles lists identical and ordered/i);
+		assert.match(description, /system prompts are batch-stable by default.*per-child directives in user messages/i);
 		assert.match(description, /timeoutMs/i);
 		assert.match(description, /timeoutMs/i);
 		assert.match(description, /foreground and async\/background runs/i);
@@ -139,6 +142,9 @@ describe("registered subagent tool description", () => {
 			assert.ok(compact.includes(parameter), `compact mode must keep ${parameter}`);
 		}
 		assert.match(compact, /provider\/model\[:thinking\]/, "compact mode must keep the thinking-suffix syntax");
+		assert.match(compact, /Cache-friendly PARALLEL: prefer one agent\/model across children; top-level model is the default/i);
+		assert.match(compact, /contextFiles identical and ordered/i);
+		assert.match(compact, /Sibling system prompts are batch-stable; per-child directives go in user messages/i);
 		assert.match(compact, /view "fleet"\|"transcript"/);
 		assert.match(compact, /scheduledRuns\.enabled/);
 		assert.match(compact, /\{action:"help"\}/, "compact mode must point at the reference");
