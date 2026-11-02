@@ -51,7 +51,7 @@ import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
 import { validateRlimitsConfig, rlimitsEnforceabilityError } from "../shared/rlimits.ts";
 import { resolvePrlimitPath } from "../shared/pi-spawn.ts";
 import { resolveChildDeadline, resolveTimeout } from "../shared/timeout.ts";
-import { finalizeSingleOutput, injectSingleOutputInstruction, normalizeSingleOutputOverride, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
+import { finalizeSingleOutput, normalizeSingleOutputOverride, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, readStatus, resolveChildCwd, sumResultsCost, sumResultsUsage } from "../../shared/utils.ts";
 import { DEFAULT_GLOBAL_CONCURRENCY_LIMIT, Semaphore } from "../shared/parallel-utils.ts";
 import {
@@ -2541,11 +2541,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			: { prefix: "", suffix: "" };
 		const outputPath = resolveSingleOutputPath(behavior?.output, input.ctx.cwd, taskCwd, input.outputBaseDir);
 		const agentConfig = input.agents.find((agent) => agent.name === task.agent);
-		const taskText = injectSingleOutputInstruction(
-			`${readInstructions.prefix}${input.taskTexts[index]!}${progressInstructions.suffix}`,
-			outputPath,
-			agentConfig,
-		);
+		const taskText = `${readInstructions.prefix}${input.taskTexts[index]!}${progressInstructions.suffix}`;
 		const interruptController = new AbortController();
 		if (input.foregroundControl) {
 			input.foregroundControl.currentAgent = task.agent;
@@ -3187,8 +3183,6 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 	if (validationError) {
 		return { content: [{ type: "text", text: validationError }], isError: true, details: { mode: "single", results: [] } };
 	}
-	task = injectSingleOutputInstruction(task, outputPath, agentConfig);
-
 	let effectiveSkills: string[] | undefined;
 	if (skillOverride === false) {
 		effectiveSkills = [];

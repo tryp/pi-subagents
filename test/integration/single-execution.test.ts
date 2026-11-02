@@ -1610,7 +1610,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(fs.existsSync(path.join(tempDir, "context.md")), false);
 	});
 
-	it("makes task-level output overrides authoritative in the child system prompt", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+	it("keeps task-level output overrides in the child user message", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		mockPi.onCall({ output: "override report" });
 		const overridePath = path.join(tempDir, "custom-report.md");
 		const executor = makeExecutor([
@@ -1634,9 +1634,51 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.isError, undefined);
 		assert.match(taskArg, new RegExp(`Write your findings to exactly this path: ${escapeRegExp(overridePath)}`));
 		assert.match(systemPrompt, /Output format \(`default-report\.md`\):/);
-		assert.match(systemPrompt, /Runtime output path override:/);
-		assert.match(systemPrompt, new RegExp(`Write your findings to exactly this path: ${escapeRegExp(overridePath)}`));
-		assert.match(systemPrompt, /Ignore any other output filename or output path mentioned elsewhere/);
+		assert.doesNotMatch(systemPrompt, new RegExp(escapeRegExp(overridePath)));
+		assert.doesNotMatch(systemPrompt, /Runtime output path override:/);
+	});
+
+	it("keeps sibling system prompts identical when output paths and turn budgets differ", async () => {
+		mockPi.onCall({ output: "first child" });
+		mockPi.onCall({ output: "second child" });
+		const agents = [makeAgent("worker", { systemPrompt: "Shared worker instructions.", systemPromptMode: "replace" })];
+		const firstPath = path.join(tempDir, "first.md");
+		const secondPath = path.join(tempDir, "second.md");
+		const contextPath = path.join(tempDir, "context.md");
+		fs.writeFileSync(contextPath, "explicit context marker", "utf-8");
+
+		await runSync(tempDir, agents, "worker", "First task", {
+			outputPath: firstPath,
+			turnBudget: { maxTurns: 2, graceTurns: 1 },
+			contextFiles: { required: [contextPath] },
+		});
+		const firstCall = readCall();
+		await runSync(tempDir, agents, "worker", "Second task", {
+			outputPath: secondPath,
+			turnBudget: { maxTurns: 5, graceTurns: 0 },
+		});
+		const secondCall = readCall();
+		const firstSystemPrompt = firstCall.systemPrompts[0]?.text ?? "";
+		const secondSystemPrompt = secondCall.systemPrompts[0]?.text ?? "";
+		const firstUserMessage = firstCall.args.at(-1) ?? "";
+		const secondUserMessage = secondCall.args.at(-1) ?? "";
+
+		assert.match(firstSystemPrompt, /^Shared worker instructions\.\n\n## Runtime task directives/);
+		assert.equal(secondSystemPrompt, firstSystemPrompt, "replace-mode prompt stays byte-identical across siblings");
+		assert.ok(firstCall.args.includes("--system-prompt"), "replace mode still selects --system-prompt");
+		assert.ok(!firstCall.args.includes("--append-system-prompt"), "replace mode does not become append mode");
+		const contextIndex = firstUserMessage.indexOf("explicit context marker");
+		const taskIndex = firstUserMessage.indexOf("First task");
+		const outputIndex = firstUserMessage.indexOf(firstPath);
+		const budgetIndex = firstUserMessage.indexOf("soft budget of 2 assistant turns");
+		assert.ok(contextIndex >= 0 && contextIndex < taskIndex, "existing explicit-context prefix remains before the task");
+		assert.ok(taskIndex < outputIndex && outputIndex < budgetIndex, "per-child directives follow the existing context/task ordering");
+		assert.match(firstUserMessage, new RegExp(escapeRegExp(firstPath)));
+		assert.match(secondUserMessage, /Second task/);
+		assert.match(secondUserMessage, new RegExp(escapeRegExp(secondPath)));
+		assert.match(secondUserMessage, /soft budget of 5 assistant turns/);
+		assert.doesNotMatch(firstSystemPrompt, /Turn budget|first\.md/);
+		assert.doesNotMatch(secondSystemPrompt, /Turn budget|second\.md/);
 	});
 
 	it("persists read-only file-only output without requiring a child write tool", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
@@ -1661,12 +1703,11 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.isError, undefined);
 		assert.equal(fs.readFileSync(outputPath, "utf-8"), "complete read-only analysis");
 		assert.match(result.content[0]?.text ?? "", /Output saved to:/);
-		for (const instruction of [taskArg, systemPrompt]) {
-			assert.match(instruction, /Return the complete artifact in your final response\./);
-			assert.match(instruction, /runtime will persist it to exactly this path:/);
-			assert.match(instruction, /Do not call contact_supervisor merely because no write-capable tool is available\./);
-			assert.doesNotMatch(instruction, /Write your findings to exactly this path/);
-		}
+		assert.match(taskArg, /Return the complete artifact in your final response\./);
+		assert.match(taskArg, /runtime will persist it to exactly this path:/);
+		assert.match(taskArg, /Do not call contact_supervisor merely because no write-capable tool is available\./);
+		assert.doesNotMatch(taskArg, /Write your findings to exactly this path/);
+		assert.doesNotMatch(systemPrompt, new RegExp(escapeRegExp(outputPath)));
 	});
 
 	it("treats string false as disabled output in foreground single runs", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {

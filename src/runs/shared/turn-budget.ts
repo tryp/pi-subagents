@@ -23,10 +23,10 @@ export function resolveTurnBudgetConfig(
 	return { turnBudget: { maxTurns: budget.maxTurns, graceTurns } };
 }
 
-export function appendTurnBudgetSystemPrompt(systemPrompt: string, budget: ResolvedTurnBudget | undefined): string {
-	if (!budget) return systemPrompt;
+export function formatTurnBudgetPrompt(budget: ResolvedTurnBudget | undefined): string {
+	if (!budget) return "";
 	const grace = budget.graceTurns === 1 ? "1 additional assistant turn" : `${budget.graceTurns} additional assistant turns`;
-	const block = [
+	return [
 		"## Turn budget",
 		`This child run has a soft budget of ${budget.maxTurns} assistant turn${budget.maxTurns === 1 ? "" : "s"}.`,
 		`After that, ${grace} may be allowed only for a final wrap-up.`,
@@ -34,6 +34,11 @@ export function appendTurnBudgetSystemPrompt(systemPrompt: string, budget: Resol
 		"This runner uses process-mode execution, so live steering after launch may be unavailable; treat this instruction as the wrap-up request.",
 		"If you continue past the soft budget plus grace turns, the supervisor may abort the process and return only partial output.",
 	].join("\n");
+}
+
+export function appendTurnBudgetSystemPrompt(systemPrompt: string, budget: ResolvedTurnBudget | undefined): string {
+	const block = formatTurnBudgetPrompt(budget);
+	if (!block) return systemPrompt;
 	return systemPrompt.trim() ? `${systemPrompt.trim()}\n\n${block}` : block;
 }
 

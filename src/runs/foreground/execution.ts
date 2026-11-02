@@ -56,7 +56,7 @@ import { RLIMITS_ENV, decodeRlimitsEnv, resourceLimitExceededMessage, resourceLi
 import { readStructuredOutput } from "../shared/structured-output.ts";
 import { prepareContextDelivery, writeContextDeliveryReceipt } from "../shared/context-delivery.ts";
 import { readChildToolDiagnosticError } from "../shared/tool-availability.ts";
-import { captureSingleOutputSnapshot, extractChildWrittenOutput, formatSavedOutputReference, injectOutputPathSystemPrompt, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
+import { captureSingleOutputSnapshot, extractChildWrittenOutput, formatSavedOutputReference, injectSingleOutputInstruction, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import {
 	buildModelCandidates,
 	formatModelAttemptNote,
@@ -74,7 +74,7 @@ import {
 	summarizeRecentMutatingFailures,
 } from "../shared/long-running-guard.ts";
 import { acceptanceFailureMessage, buildSkippedAcceptanceLedger, evaluateAcceptance, formatAcceptancePrompt, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
-import { appendTurnBudgetSystemPrompt, formatTurnBudgetOutput, initialTurnBudgetState, turnBudgetDecision, turnBudgetDeferredNote, turnBudgetDeferredState, turnBudgetExceededMessage, turnBudgetSoftNote, turnBudgetState } from "../shared/turn-budget.ts";
+import { formatTurnBudgetPrompt, formatTurnBudgetOutput, initialTurnBudgetState, turnBudgetDecision, turnBudgetDeferredNote, turnBudgetDeferredState, turnBudgetExceededMessage, turnBudgetSoftNote, turnBudgetState } from "../shared/turn-budget.ts";
 import { initialToolBudgetState, toolBudgetState } from "../shared/tool-budget.ts";
 import { resolveWatchdogConfig } from "../../watchdog/settings.ts";
 import { createBoundedByteTail, createBoundedLineReader, formatProtocolOutputLimit, MAX_CHILD_STDERR_BYTES, projectChildLifecycle, type ChildLifecycleAction, type ProtocolOutputLimit } from "../shared/child-protocol.ts";
@@ -88,6 +88,10 @@ import {
 
 const artifactOutputByResult = new WeakMap<SingleResult, string>();
 const acceptanceOutputByResult = new WeakMap<SingleResult, string>();
+const RUNTIME_TASK_DIRECTIVE_POLICY = [
+	"## Runtime task directives",
+	"The runner may place per-run output-path and turn-budget directives after the task in the first user message. Treat those runtime directives as authoritative over conflicting defaults earlier in this prompt and follow them.",
+].join("\n");
 
 function emptyUsage(): Usage {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
@@ -223,7 +227,7 @@ async function runSingleAttempt(
 		tools: agent.tools,
 		extensions: agent.extensions,
 		subagentOnlyExtensions: agent.subagentOnlyExtensions,
-		systemPrompt: appendTurnBudgetSystemPrompt(shared.systemPrompt, options.turnBudget),
+		systemPrompt: shared.systemPrompt,
 		mcpDirectTools: agent.mcpDirectTools,
 		cwd: options.cwd ?? runtimeCwd,
 		promptFileStem: agent.name,
@@ -1266,6 +1270,11 @@ export async function runSync(
 	const acceptancePrompt = formatAcceptancePrompt(effectiveAcceptance);
 	const taskWithContext = contextDelivery.prompt ? `${contextDelivery.prompt}\n\n${task}` : task;
 	const taskWithAcceptance = acceptancePrompt ? `${taskWithContext}\n${acceptancePrompt}` : taskWithContext;
+	const taskWithOutputDirective = injectSingleOutputInstruction(taskWithAcceptance, options.outputPath, agent);
+	const turnBudgetPrompt = formatTurnBudgetPrompt(options.turnBudget);
+	const taskWithDirectives = turnBudgetPrompt
+		? `${taskWithOutputDirective}\n\n---\n${turnBudgetPrompt}`
+		: taskWithOutputDirective;
 	const sessionEnabled = Boolean(options.sessionFile || options.sessionDir) || shareEnabled;
 	const skillNames = options.skills ?? agent.skills ?? [];
 	const skillCwd = options.cwd ?? runtimeCwd;
@@ -1295,8 +1304,7 @@ export async function runSync(
 	if (memoryInjection) {
 		systemPrompt = systemPrompt ? `${systemPrompt}\n\n${memoryInjection}` : memoryInjection;
 	}
-	systemPrompt = injectOutputPathSystemPrompt(systemPrompt, options.outputPath, agent);
-
+	systemPrompt = systemPrompt ? `${systemPrompt}\n\n${RUNTIME_TASK_DIRECTIVE_POLICY}` : RUNTIME_TASK_DIRECTIVE_POLICY;
 	const candidates = buildModelCandidates(
 		options.modelOverride ?? agent.model,
 		agent.fallbackModels,
@@ -1319,7 +1327,7 @@ export async function runSync(
 		ensureArtifactsDir(options.artifactsDir);
 		writeContextDeliveryReceipt(artifactPathsResult.metadataPath.replace(/_meta\.json$/, `_${contextDelivery.receipt.attemptId}_context-receipt.json`), contextDelivery.receipt);
 		if (options.artifactConfig?.includeInput !== false) {
-				writeArtifact(artifactPathsResult.inputPath, `# Task for ${agentName}\n\n${taskWithAcceptance}`);
+				writeArtifact(artifactPathsResult.inputPath, `# Task for ${agentName}\n\n${taskWithDirectives}`);
 		}
 		if (options.artifactConfig?.includeJsonl !== false) {
 			jsonlPath = artifactPathsResult.jsonlPath;
@@ -1333,7 +1341,7 @@ export async function runSync(
 				childIndex: options.index,
 				cwd: options.cwd ?? runtimeCwd,
 			});
-			transcriptWriter.writeInitialUserMessage(taskWithAcceptance);
+			transcriptWriter.writeInitialUserMessage(taskWithDirectives);
 		}
 	}
 
@@ -1403,7 +1411,7 @@ export async function runSync(
 	for (let i = 0; i < modelsToTry.length; i++) {
 		const candidate = modelsToTry[i];
 		const outputSnapshot = captureSingleOutputSnapshot(options.outputPath);
-		const result = await runSingleAttempt(runtimeCwd, agent, taskWithAcceptance, candidate, detachedAwareOptions, {
+		const result = await runSingleAttempt(runtimeCwd, agent, taskWithDirectives, candidate, detachedAwareOptions, {
 			sessionEnabled,
 			systemPrompt,
 			resolvedSkillNames: resolvedSkills.length > 0 ? resolvedSkills.map((skill) => skill.name) : undefined,
