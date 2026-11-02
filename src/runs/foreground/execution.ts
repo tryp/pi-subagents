@@ -31,6 +31,7 @@ import {
 	truncateOutput,
 	getSubagentDepthEnv,
 } from "../../shared/types.ts";
+import { formatSharedContextPreamble } from "../shared/shared-context.ts";
 import {
 	DEFAULT_CONTROL_CONFIG,
 	buildControlEvent,
@@ -1268,7 +1269,7 @@ export async function runSync(
 		dynamicGroup: options.acceptanceContext?.dynamicGroup,
 	});
 	const acceptancePrompt = formatAcceptancePrompt(effectiveAcceptance);
-	const taskWithContext = contextDelivery.prompt ? `${contextDelivery.prompt}\n\n${task}` : task;
+	const taskWithContext = `${formatSharedContextPreamble(options.sharedContext)}${contextDelivery.prompt ? `${contextDelivery.prompt}\n\n` : ""}${task}`;
 	const taskWithAcceptance = acceptancePrompt ? `${taskWithContext}\n${acceptancePrompt}` : taskWithContext;
 	const taskWithOutputDirective = injectSingleOutputInstruction(taskWithAcceptance, options.outputPath, agent);
 	const turnBudgetPrompt = formatTurnBudgetPrompt(options.turnBudget);

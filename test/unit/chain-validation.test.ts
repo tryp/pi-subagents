@@ -69,6 +69,21 @@ function expectInvalid(args: unknown, ...patterns: RegExp[]): void {
 }
 
 describe("chain input validation", { skip: !schemasAvailable ? "typebox not available" : undefined }, () => {
+	it("accepts batchStability.sharedContext for parallel and chain and rejects unknown fields clearly", () => {
+		assert.doesNotThrow(() => validateChainInput({ tasks: [{ agent: "worker", task: "do X" }], batchStability: { sharedContext: "shared" } }));
+		assert.doesNotThrow(() => validateChainInput({ chain: [{ agent: "worker", task: "do X" }], batchStability: { sharedContext: "shared" } }));
+		expectInvalid(
+			{ tasks: [{ agent: "worker", task: "do X" }], batchStability: { sharedContex: "typo" } },
+			/batchStability validation failed/,
+			/"sharedContex" is not allowed/,
+			/Allowed properties: sharedContext/,
+		);
+		expectInvalid(
+			{ agent: "worker", task: "single" , batchStability: { sharedContext: "shared" } },
+			/supported only for PARALLEL.*or CHAIN/,
+		);
+	});
+
 	it("is a no-op when chain is absent or not an array", () => {
 		assert.doesNotThrow(() => validateChainInput({}));
 		assert.doesNotThrow(() => validateChainInput({ agent: "worker", task: "do X" }));

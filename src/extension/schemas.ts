@@ -240,6 +240,13 @@ const ControlOverrides = Type.Object({
 	})),
 });
 
+export const BatchStabilitySchema = Type.Object({
+	sharedContext: Type.Optional(Type.String()),
+}, {
+	additionalProperties: false,
+	description: "PARALLEL/CHAIN only: sharedContext is verbatim, identical per child/step, never interpolated; absent/empty adds no bytes. Only sharedContext accepted; unknown fields rejected.",
+});
+
 const SubagentParamsSchema = Type.Object({
 	agent: Type.Optional(Type.String({ description: "Agent name (SINGLE mode) or target for management get/update/delete" })),
 	task: Type.Optional(Type.String({ description: "Task (SINGLE mode, optional for self-contained agents)" })),
@@ -289,6 +296,7 @@ const SubagentParamsSchema = Type.Object({
 		description: "Create isolated git worktrees for parallel tasks; requires clean git state."
 	})),
 	chain: Type.Optional(Type.Array(ChainItem, { description: "CHAIN mode: sequential steps; each result becomes {previous}. append-step takes one tail step and may use {chain_dir}/{outputs.name}." })),
+	batchStability: Type.Optional(BatchStabilitySchema),
 	context: Type.Optional(Type.String({
 		enum: ["fresh", "fork"],
 		description: "'fresh' or 'fork' to branch from parent session. Explicit context overrides every child in the invocation. If omitted, each requested agent uses its own defaultContext; agents without defaultContext: 'fork' run fresh.",

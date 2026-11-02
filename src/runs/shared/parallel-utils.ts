@@ -14,6 +14,8 @@ export interface RunnerSubagentStep {
 	outputName?: string;
 	structured?: boolean;
 	contextFiles?: { required?: string[]; optional?: string[] };
+	/** Exact invocation-level preamble shared by every child/step. */
+	sharedContext?: string;
 	cwd?: string;
 	/** Isolate this single step in a dedicated git worktree, created and cleaned up by the runner. */
 	worktree?: boolean;

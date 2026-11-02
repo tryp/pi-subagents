@@ -18,6 +18,7 @@
  */
 
 import {
+	BatchStabilitySchema,
 	ChainItem,
 	ParallelTaskSchema,
 	DynamicParallelTemplateSchema,
@@ -42,6 +43,7 @@ export const DYNAMIC_TEMPLATE_KEYS = allowedKeysOf(DynamicParallelTemplateSchema
 export const EXPAND_KEYS = allowedKeysOf(DynamicExpandSchema);
 export const EXPAND_FROM_KEYS = allowedKeysOf(ExpandFromSchema);
 export const COLLECT_KEYS = allowedKeysOf(DynamicCollectSchema);
+const BATCH_STABILITY_KEYS = allowedKeysOf(BatchStabilitySchema);
 
 const CHAIN_STEP_EXAMPLE = '{"agent": "worker", "task": "do X"}';
 const PARALLEL_TASK_EXAMPLE = '{"agent": "worker", "task": "do X"}';
@@ -113,7 +115,16 @@ function checkNoExtraKeys(
  */
 export function validateChainInput(args: unknown): void {
 	if (!isPlainObject(args)) return;
-	const chain = (args as Record<string, unknown>).chain;
+	const batchStability = args.batchStability;
+	if (batchStability !== undefined) {
+		const path = "batchStability validation failed";
+		expectObject(batchStability, path, BATCH_STABILITY_KEYS, '{"sharedContext":"common instructions"}');
+		checkNoExtraKeys(batchStability, path, BatchStabilitySchema, BATCH_STABILITY_KEYS, '{"sharedContext":"common instructions"}');
+		if (!(Array.isArray(args.tasks) && args.tasks.length > 0) && !(Array.isArray(args.chain) && args.chain.length > 0)) {
+			throw new Error("subagent batchStability is supported only for PARALLEL (tasks) or CHAIN (chain) execution.");
+		}
+	}
+	const chain = args.chain;
 	if (!Array.isArray(chain)) return;
 
 	chain.forEach((step, index) => {

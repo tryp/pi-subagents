@@ -119,6 +119,7 @@ interface ParallelChainRunInput {
 	/** True when this agent forks the parent session; a `subagents.defaultModel` must not outrank the parent's model there. */
 	forkedForAgent?: (agentName: string) => boolean;
 	shareEnabled: boolean;
+	sharedContext?: string;
 	artifactConfig: ArtifactConfig;
 	artifactsDir: string;
 	signal?: AbortSignal;
@@ -354,6 +355,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				structuredOutput: structuredRuntime,
 				acceptance: task.acceptance,
 				contextFiles: task.contextFiles,
+				sharedContext: input.sharedContext,
 				acceptanceContext: { mode: "chain", dynamic: input.dynamic && task.acceptance === undefined },
 				...resolveChildDeadline(input.timeoutMs, input.deadlineAt, task.timeoutMs),
 				turnBudget: input.turnBudget,
@@ -463,6 +465,7 @@ interface ChainExecutionParams {
 		interrupt?: () => boolean;
 	};
 	chainSkills?: string[];
+	sharedContext?: string;
 	chainDir?: string;
 	dynamicFanoutMaxItems?: number;
 	maxSubagentDepth: number;
@@ -761,6 +764,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					sessionFileForTask,
 					thinkingOverrideForTask,
 					shareEnabled,
+					sharedContext: params.sharedContext,
 					artifactConfig,
 					artifactsDir,
 					signal,
@@ -983,6 +987,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				sessionFileForTask,
 				thinkingOverrideForTask,
 				shareEnabled,
+				sharedContext: params.sharedContext,
 				artifactConfig,
 				artifactsDir,
 				signal,
@@ -1264,6 +1269,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				structuredOutput: structuredRuntime,
 				acceptance: seqStep.acceptance,
 				contextFiles: seqStep.contextFiles,
+				sharedContext: params.sharedContext,
 				acceptanceContext: { mode: "chain" },
 				...resolveChildDeadline(params.timeoutMs, deadlineAt, seqStep.timeoutMs),
 				turnBudget: params.turnBudget,

@@ -1266,6 +1266,8 @@ export interface RunSyncOptions {
 	};
 	acceptance?: AcceptanceInput;
 	contextFiles?: { required?: string[]; optional?: string[] };
+	/** Exact invocation-level user preamble shared by every child in a PARALLEL/CHAIN run. */
+	sharedContext?: string;
 	acceptanceContext?: {
 		mode?: SubagentRunMode;
 		async?: boolean;

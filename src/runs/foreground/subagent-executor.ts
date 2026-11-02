@@ -157,6 +157,7 @@ export interface SubagentParamsLike {
 	task?: string;
 	message?: string;
 	chain?: ChainStep[];
+	batchStability?: { sharedContext?: string };
 	tasks?: TaskParam[];
 	concurrency?: number;
 	worktree?: boolean;
@@ -2086,6 +2087,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			shareEnabled,
 			sessionRoot,
 			chainSkills: [],
+			sharedContext: params.batchStability?.sharedContext,
 			sessionFilesByFlatIndex: params.tasks.map((task, index) => sessionFileForTask(task.agent, index, task.model)),
 			thinkingOverridesByFlatIndex: params.tasks.map((task, index) => thinkingOverrideForTask(task.agent, index, task.model)),
 			maxSubagentDepth: currentMaxSubagentDepth,
@@ -2128,6 +2130,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			shareEnabled,
 			sessionRoot,
 			chainSkills,
+			sharedContext: params.batchStability?.sharedContext,
 			sessionFilesByFlatIndex: collectChainSessionFiles(chain, sessionFileForTask, deps.config.chain?.dynamicFanout?.maxItems),
 			thinkingOverridesByFlatIndex: collectChainThinkingOverrides(chain, thinkingOverrideForTask, deps.config.chain?.dynamicFanout?.maxItems),
 			dynamicFanoutMaxItems: deps.config.chain?.dynamicFanout?.maxItems,
@@ -2272,6 +2275,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		foregroundControl,
 		nestedRoute: foregroundControl?.nestedRoute,
 		chainSkills,
+		sharedContext: params.batchStability?.sharedContext,
 		chainDir: params.chainDir ?? getProjectChainRunsDir(effectiveCwd),
 		dynamicFanoutMaxItems: deps.config.chain?.dynamicFanout?.maxItems,
 		maxSubagentDepth: currentMaxSubagentDepth,
@@ -2327,6 +2331,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 			shareEnabled,
 			sessionRoot,
 			chainSkills: chainResult.requestedAsync.chainSkills,
+			sharedContext: params.batchStability?.sharedContext,
 			sessionFilesByFlatIndex: collectChainSessionFiles(asyncChain, sessionFileForTask, deps.config.chain?.dynamicFanout?.maxItems),
 			thinkingOverridesByFlatIndex: collectChainThinkingOverrides(asyncChain, thinkingOverrideForTask, deps.config.chain?.dynamicFanout?.maxItems),
 			dynamicFanoutMaxItems: deps.config.chain?.dynamicFanout?.maxItems,
@@ -2420,6 +2425,7 @@ interface ForegroundParallelRunInput {
 	timeoutMs?: number;
 	deadlineAt?: number;
 	turnBudget?: ResolvedTurnBudget;
+	sharedContext?: string;
 	toolBudgets: (ResolvedToolBudget | undefined)[];
 	rlimitsList: (ResolvedRlimits | undefined)[];
 }
@@ -2589,6 +2595,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			skills: effectiveSkills === false ? [] : effectiveSkills,
 			acceptance: task.acceptance,
 			contextFiles: task.contextFiles,
+			sharedContext: input.sharedContext,
 			acceptanceContext: { mode: "parallel" },
 			...resolveChildDeadline(input.timeoutMs, input.deadlineAt, task.timeoutMs),
 			turnBudget: input.turnBudget,
@@ -2947,6 +2954,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			timeoutMs: data.timeoutMs,
 			deadlineAt,
 			turnBudget: data.turnBudget,
+			sharedContext: params.batchStability?.sharedContext,
 			toolBudgets,
 			rlimitsList,
 		});

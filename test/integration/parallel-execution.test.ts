@@ -191,6 +191,47 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		}
 	});
 
+	it("broadcasts exact batch sharedContext bytes before sibling-specific task and output content", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "Done" });
+		const executor = makeExecutor([
+			makeAgent("agent-a", { systemPrompt: "Private system A", systemPromptMode: "replace" }),
+			makeAgent("agent-b", { systemPrompt: "Private system B", systemPromptMode: "replace" }),
+		]);
+		const sharedContext = "Shared {task} and {previous}\\n keep exact bytes. ";
+		fs.writeFileSync(path.join(tempDir, "context-a.md"), "Private context A");
+		fs.writeFileSync(path.join(tempDir, "context-b.md"), "Private context B");
+		const result = await executor.execute(
+			"parallel-shared-context",
+			{
+				tasks: [
+					{ agent: "agent-a", task: "Sibling task A", output: "sibling-a.md", contextFiles: { required: ["context-a.md"] } },
+					{ agent: "agent-b", task: "Sibling task B", output: "sibling-b.md", contextFiles: { required: ["context-b.md"] } },
+				],
+				batchStability: { sharedContext },
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined);
+		const callFiles = fs.readdirSync(mockPi.dir).filter((name: string) => name.startsWith("call-")).sort();
+		assert.equal(callFiles.length, 2);
+		const calls = callFiles.map((name: string) => JSON.parse(fs.readFileSync(path.join(mockPi.dir, name), "utf-8")) as { args: string[]; systemPrompts: Array<{ text?: string }> });
+		const promptArgs = calls.map((call: { args: string[] }) => call.args.join("\\n"));
+		const expectedPreamble = (await import("../../src/runs/shared/shared-context.ts")).formatSharedContextPreamble(sharedContext);
+		for (const prompt of promptArgs) {
+			assert.ok(prompt.includes(expectedPreamble), "each child receives the same exact preamble bytes");
+			assert.equal(prompt.split(expectedPreamble).length - 1, 1, "system-prompt replace mode must not drop or duplicate the user preamble");
+			assert.ok(prompt.indexOf(sharedContext) < prompt.indexOf("Sibling task "), "shared bytes precede per-child task text");
+		}
+		assert.ok(promptArgs.some((prompt: string) => prompt.includes("Sibling task A") && prompt.includes("sibling-a.md") && prompt.includes("Private context A") && !prompt.includes("Private context B")));
+		assert.ok(promptArgs.some((prompt: string) => prompt.includes("Sibling task B") && prompt.includes("sibling-b.md") && prompt.includes("Private context B") && !prompt.includes("Private context A")));
+		const systemPromptTexts = calls.map((call: { systemPrompts: Array<{ text?: string }> }) => call.systemPrompts.map((record) => record.text ?? "").join("\\n"));
+		assert.ok(systemPromptTexts.some((text: string) => text.includes("Private system A") && !text.includes("Private system B")));
+		assert.ok(systemPromptTexts.some((text: string) => text.includes("Private system B") && !text.includes("Private system A")));
+	});
+
 	it("does not apply agent acceptance defaults to top-level parallel tasks", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		mockPi.onCall({ output: "parallel response without explicit acceptance" });
 		const executor = makeExecutor([

@@ -205,6 +205,31 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		);
 	}
 
+	it("uses identical literal sharedContext across sequential steps without interpolating {previous}", async () => {
+		mockPi.onCall({ output: "first result" });
+		const sharedContext = "Shared {task} / {previous} stays literal";
+		const runChain = executeChain;
+		if (!runChain) throw new Error("Chain execution module is unavailable");
+		const result = await runChain(
+			makeChainParams(
+				[{ agent: "analyst", task: "First step" }, { agent: "reporter", task: "Use result: {previous}" }],
+				[makeAgent("analyst"), makeAgent("reporter")],
+				{ sharedContext },
+			),
+		);
+
+		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		const firstPrompt = readCallArgs(0).join("\\n");
+		const secondPrompt = readCallArgs(1).join("\\n");
+		for (const prompt of [firstPrompt, secondPrompt]) {
+			assert.ok(prompt.includes(sharedContext));
+			assert.ok(prompt.indexOf(sharedContext) < prompt.indexOf("First step") || prompt.indexOf(sharedContext) < prompt.indexOf("Use result:"));
+		}
+		assert.ok(firstPrompt.includes("First step"));
+		assert.ok(secondPrompt.includes("Use result: first result"));
+		assert.ok(secondPrompt.includes(sharedContext), "{previous} in sharedContext remains literal");
+	});
+
 	it("runs a 2-step chain", async () => {
 		mockPi.onCall({ output: "Analysis complete: found 3 issues" });
 		const agents = [makeAgent("analyst"), makeAgent("reporter")];

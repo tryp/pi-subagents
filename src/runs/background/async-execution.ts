@@ -141,6 +141,7 @@ interface AsyncChainParams {
 	shareEnabled: boolean;
 	sessionRoot?: string;
 	chainSkills?: string[];
+	sharedContext?: string;
 	sessionFilesByFlatIndex?: (string | undefined)[];
 	thinkingOverridesByFlatIndex?: (AgentConfig["thinking"] | undefined)[];
 	progressDir?: string;
@@ -244,6 +245,7 @@ export interface AsyncRunnerStepBuildParams {
 	availableModels?: AvailableModelInfo[];
 	cwd?: string;
 	chainSkills?: string[];
+	sharedContext?: string;
 	sessionFilesByFlatIndex?: (string | undefined)[];
 	thinkingOverridesByFlatIndex?: (AgentConfig["thinking"] | undefined)[];
 	progressDir?: string;
@@ -705,6 +707,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			outputName: s.as,
 			structured: Boolean(s.outputSchema),
 			contextFiles: s.contextFiles,
+			...(params.sharedContext ? { sharedContext: params.sharedContext } : {}),
 			cwd: stepCwd,
 			model,
 			thinking: resolveEffectiveThinking(model, effectiveThinking),
@@ -924,6 +927,7 @@ export function executeAsyncChain(
 		availableModels: params.availableModels,
 		cwd,
 		chainSkills: params.chainSkills,
+		sharedContext: params.sharedContext,
 		sessionFilesByFlatIndex,
 		thinkingOverridesByFlatIndex,
 		progressDir: params.progressDir ?? (artifactsDir ? path.join(artifactsDir, "progress", id) : resultMode === "parallel" ? path.join(asyncDir, "progress") : undefined),
