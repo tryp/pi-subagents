@@ -56,6 +56,79 @@ MUTATIONS = [
         test_command=("test/unit/compaction-tail.test.ts", "classifies a second abort after the one recovery as non-retryable"),
         expected_test="classifies a second abort after the one recovery as non-retryable",
     ),
+
+    Mutation(
+        name="marker never set",
+        source="src/runs/shared/abort-recovery.ts",
+        old='''\t\tif (event.type === "compaction_start") {
+\t\t\tthis.compactionTimes.push(observedAt);
+\t\t\tthis.recompute();
+\t\t}''',
+        new='''\t\tif (event.type === "compaction_start") {
+\t\t\tthis.recompute();
+\t\t}''',
+        test_command=("test/unit/abort-recovery.test.ts", "recognizes the observed settle-then-manual-compaction order"),
+        expected_test="recognizes the observed settle-then-manual-compaction order",
+    ),
+    Mutation(
+        name="nearest compaction replaced by latest",
+        source="src/runs/shared/abort-recovery.ts",
+        old='''\t\tconst nearestDistance = this.compactionTimes.reduce(
+\t\t\t(nearest, at) => Math.min(nearest, Math.abs(settlementAt - at)),
+\t\t\tNumber.POSITIVE_INFINITY,
+\t\t);''',
+        new='''\t\tconst nearestDistance = this.compactionTimes.length > 0
+\t\t\t? Math.abs(settlementAt - this.compactionTimes[this.compactionTimes.length - 1])
+\t\t\t: Number.POSITIVE_INFINITY;''',
+        test_command=("test/unit/abort-recovery.test.ts", "uses the nearest compaction to the last settlement"),
+        expected_test="uses the nearest compaction to the last settlement",
+    ),
+    Mutation(
+        name="marker not reset on agent_start",
+        source="src/runs/shared/abort-recovery.ts",
+        old='''\t\tif (event.type === "agent_start" || event.type === "auto_retry_start") {
+\t\t\tthis.reset();
+\t\t\treturn;
+\t\t}''',
+        new='''\t\tif (event.type === "agent_start" || event.type === "auto_retry_start") {
+\t\t\tthis.verified = false;
+\t\t\treturn;
+\t\t}''',
+        test_command=("test/unit/abort-recovery.test.ts", "resets on a new agent turn, auto-retry"),
+        expected_test="resets on a new agent turn, auto-retry",
+    ),
+    Mutation(
+        name="resume allowed twice",
+        source="src/runs/shared/abort-recovery.ts",
+        old='\tif (input.alreadyResumed) return settle("resume already attempted");\n',
+        new='',
+        test_command=("test/unit/abort-recovery.test.ts", "settles a second abort once with the unsafe-recovery diagnostic"),
+        expected_test="settles a second abort once with the unsafe-recovery diagnostic",
+    ),
+    Mutation(
+        name="sessionAvailable gate removed",
+        source="src/runs/shared/abort-recovery.ts",
+        old='\tif (!input.sessionAvailable) return settle("retained session unavailable");\n',
+        new='',
+        test_command=("test/unit/abort-recovery.test.ts", "fails closed for every refusal gate"),
+        expected_test="fails closed for every refusal gate",
+    ),
+    Mutation(
+        name="afterCompactionSettlement gate removed",
+        source="src/runs/shared/abort-recovery.ts",
+        old='\tif (!input.afterCompactionSettlement) return settle("compaction settlement not verified");\n',
+        new='',
+        test_command=("test/unit/abort-recovery.test.ts", "fails closed for every refusal gate"),
+        expected_test="fails closed for every refusal gate",
+    ),
+    Mutation(
+        name="diagnostic dropped on settle",
+        source="src/runs/shared/abort-recovery.ts",
+        old='\t\t...(compactionAbortCandidate\n\t\t\t? { diagnostic: `Compaction-induced child abort could not be resumed safely: ${reason}.` }\n\t\t\t: {}),\n',
+        new='',
+        test_command=("test/unit/abort-recovery.test.ts", "carries a recovery diagnostic when a verified compaction abort cannot safely resume"),
+        expected_test="carries a recovery diagnostic when a verified compaction abort cannot safely resume",
+    ),
 ]
 
 
