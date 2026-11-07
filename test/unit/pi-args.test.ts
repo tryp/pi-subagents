@@ -122,13 +122,13 @@ afterEach(() => {
 });
 
 describe("buildPiArgs session wiring", () => {
-	it("uses --session when sessionFile is provided", () => {
+	it("reuses the existing --session file when building a continuation attempt", () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-args-session-"));
 		try {
 			const sessionFile = path.join(tempDir, "nested", "session.jsonl");
 			const { args } = buildPiArgs({
 				baseArgs: ["-p"],
-				task: "hello",
+				task: "The prior run ended from a provider/transport abort. Continue from the current files and transcript.",
 				sessionEnabled: true,
 				sessionFile,
 				sessionDir: "/tmp/should-not-be-used",
@@ -138,6 +138,7 @@ describe("buildPiArgs session wiring", () => {
 
 			assert.ok(args.includes("--session"));
 			assert.ok(args.includes(sessionFile));
+			assert.equal(args.at(-1), "Task: The prior run ended from a provider/transport abort. Continue from the current files and transcript.");
 			assert.ok(fs.existsSync(path.dirname(sessionFile)));
 			assert.ok(!args.includes("--session-dir"), "--session-dir should not be emitted with --session");
 			assert.ok(!args.includes("--no-session"), "--no-session should not be emitted with --session");

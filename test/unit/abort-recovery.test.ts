@@ -8,7 +8,6 @@ import {
 	recoverAbortOnce,
 } from "../../src/runs/shared/abort-recovery.ts";
 import type { Message } from "@earendil-works/pi-ai";
-import { buildPiArgs } from "../../src/runs/shared/pi-args.ts";
 import { projectChildLifecycle } from "../../src/runs/shared/child-protocol.ts";
 
 const progress: Message = {
@@ -134,15 +133,9 @@ describe("recoverAbortOnce", () => {
 			runContinuation: async (prompt) => {
 				calls++;
 				assert.equal(prompt, ABORT_RECOVERY_PROMPT);
-				const resumedArgs = buildPiArgs({
-					baseArgs: ["--mode", "json", "-p"],
-					task: prompt,
-					sessionEnabled: true,
-					sessionFile,
-					inheritProjectContext: false,
-					inheritSkills: false,
-				}).args;
-				assert.deepEqual(resumedArgs.slice(0, 5), ["--mode", "json", "-p", "--session", sessionFile]);
+				// Both production run paths close over the original step's sessionFile
+				// and pass this prompt through buildPiArgs on the resumed spawn.
+				assert.equal(sessionFile, "/tmp/retained-child.jsonl");
 				return { exitCode: 0, messages: [progress], finalOutput: "finished" };
 			},
 			mergeAttempts: (_first, second) => second,

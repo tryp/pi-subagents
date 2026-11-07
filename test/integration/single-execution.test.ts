@@ -326,6 +326,59 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(output, "Hello from mock agent");
 	});
 
+	it("resumes a child once in the retained session after settle-then-compaction abort", async () => {
+		if (!runSync || !getFinalOutput) return;
+		const sessionFile = path.join(tempDir, "child-session.jsonl");
+		fs.writeFileSync(sessionFile, "", "utf-8");
+		const outputPath = path.join(tempDir, "implemented.ts");
+		fs.writeFileSync(outputPath, "before", "utf-8");
+		const editId = "recover-edit-1";
+		const aborted = {
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [],
+				stopReason: "aborted",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+			},
+		};
+		mockPi.onCall({
+			steps: [
+				{
+					jsonl: [
+						{ type: "tool_execution_start", toolName: "edit", args: { path: outputPath, oldText: "before", newText: "after" } },
+					{ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", id: editId, name: "edit", arguments: { path: outputPath, oldText: "before", newText: "after" } }], stopReason: "toolUse", usage: { input: 50, output: 10, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } } },
+					{ type: "tool_result_end", message: { role: "toolResult", toolCallId: editId, toolName: "edit", isError: false, content: [{ type: "text", text: `Edited ${outputPath}` }] } },
+					{ type: "tool_execution_end", toolName: "edit" },
+					aborted,
+					{ type: "agent_settled" },
+				],
+				},
+				{ jsonl: [{ type: "compaction_start", reason: "manual" }], delay: 12 },
+			],
+			writeFiles: [{ path: outputPath, content: "after" }],
+			exitCode: 1,
+		});
+		mockPi.onCall({ jsonl: [events.assistantMessage("Continued and finished.")] });
+
+		const result = await runSync(tempDir, [makeAgent("echo", { completionGuard: false })], "echo", "Implement and validate", { sessionFile });
+
+		assert.equal(result.exitCode, 0, JSON.stringify({ error: result.error, messages: result.messages, sessionFile: result.sessionFile }));
+		assert.equal(getFinalOutput(result.messages), "Continued and finished.");
+		assert.equal(mockPi.callCount(), 2, "one failed child plus exactly one continuation");
+		const calls = fs.readdirSync(mockPi.dir)
+			.filter((name) => name.startsWith("call-") && name.endsWith(".json"))
+			.sort()
+			.map((name) => JSON.parse(fs.readFileSync(path.join(mockPi.dir, name), "utf-8")) as { args: string[] });
+		assert.equal(calls.length, 2);
+		for (const call of calls) {
+			const sessionIndex = call.args.indexOf("--session");
+			assert.notEqual(sessionIndex, -1);
+			assert.equal(call.args[sessionIndex + 1], sessionFile);
+		}
+		assert.ok(calls[1]?.args.some((arg) => arg.includes("The prior run ended from a provider/transport abort after useful progress")));
+	});
+
 	it("treats action='single' with execution fields as single execution", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		mockPi.onCall({ output: "single alias finished" });
 		const executor = makeExecutor([makeAgent("echo")]);
