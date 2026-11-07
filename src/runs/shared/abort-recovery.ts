@@ -20,6 +20,7 @@ const TOOL_FAILURE_PREFIX = /^[\w.:@/-]+ failed (?:(?:\(exit \d+\):)|(?:with exi
 export interface CompactionSettlementEvent {
 	type?: string;
 	willRetry?: unknown;
+	reason?: unknown;
 }
 
 /** Tracks only the latest settlement and nearest compaction within a bounded window. */
@@ -39,8 +40,7 @@ export class CompactionSettlementTracker {
 			return;
 		}
 		if (event.type === "compaction_end" && event.willRetry === true) {
-			this.nearestCompactionAt = undefined;
-			this.verified = false;
+			this.reset();
 			return;
 		}
 		if (event.type === "agent_settled") {
@@ -181,7 +181,7 @@ export function planAbortRecovery(input: PlanAbortRecoveryInput): AbortRecoveryP
 
 export interface AbortRecoveryAttempt {
 	exitCode: number | null;
-	messages: readonly Message[];
+	messages?: readonly Message[];
 	error?: string;
 	processSignal?: string | null;
 	stopped?: boolean;

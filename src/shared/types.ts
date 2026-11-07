@@ -654,6 +654,8 @@ export interface SingleResult {
 	interrupted?: boolean;
 	timedOut?: boolean;
 	stopped?: boolean;
+	processSignal?: string | null;
+	afterCompactionSettlement?: boolean;
 	turnBudget?: TurnBudgetState;
 	turnBudgetExceeded?: boolean;
 	wrapUpRequested?: boolean;

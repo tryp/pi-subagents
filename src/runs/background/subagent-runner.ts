@@ -69,6 +69,7 @@ import { outputEntryFromAsyncResult, resolveOutputReferences } from "../shared/c
 import { createStructuredOutputRuntime, readStructuredOutput } from "../shared/structured-output.ts";
 import { readChildToolDiagnosticError } from "../shared/tool-availability.ts";
 import { classifyCompactedThenAborted } from "../shared/compaction-tail.ts";
+import { CompactionSettlementTracker, recoverAbortOnce } from "../shared/abort-recovery.ts";
 import { prepareContextDelivery, writeContextDeliveryReceipt } from "../shared/context-delivery.ts";
 import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelStep, validateDynamicCollection } from "../shared/dynamic-fanout.ts";
 import { nestedSummaryFromAsyncStatus, projectNestedEvents, resolveNestedAsyncDir, writeNestedEvent } from "../shared/nested-events.ts";
@@ -445,6 +446,8 @@ interface RunPiStreamingResult {
 	interrupted?: boolean;
 	timedOut?: boolean;
 	stopped?: boolean;
+	processSignal?: string | null;
+	afterCompactionSettlement?: boolean;
 	turnBudget?: TurnBudgetState;
 	turnBudgetExceeded?: boolean;
 	wrapUpRequested?: boolean;
@@ -494,6 +497,7 @@ function runPiStreaming(
 		const rawStdoutTail = createBoundedByteTail();
 		const messages: Message[] = [];
 		const usage = emptyUsage();
+		const compactionSettlement = new CompactionSettlementTracker();
 		let model: string | undefined;
 		let writerRegistrationError: string | undefined;
 		if (typeof child.pid === "number") {
@@ -564,8 +568,12 @@ function runPiStreaming(
 
 			appendChildEvent(event);
 			transcriptWriter?.writeChildEvent(event);
-			if (event.type === "agent_settled") agentSettledReceived = true;
-			applyChildLifecycle(projectChildLifecycle(event));
+			const lifecycleAction = projectChildLifecycle(event);
+			if (event.type !== "agent_settled" || lifecycleAction === "start-drain") {
+				compactionSettlement.record(event, Date.now());
+			}
+			if (event.type === "agent_settled" && lifecycleAction === "start-drain") agentSettledReceived = true;
+			applyChildLifecycle(lifecycleAction);
 
 			if (isChildWatchdogStatusEvent(event)) {
 				if (!childWatchdogConfig) return;
@@ -847,6 +855,8 @@ function runPiStreaming(
 				interrupted,
 				timedOut,
 				stopped,
+				processSignal: signal,
+				afterCompactionSettlement: compactionSettlement.afterCompactionSettlement,
 				turnBudget,
 				turnBudgetExceeded,
 				wrapUpRequested: turnBudget?.outcome === "wrap-up-requested" || turnBudget?.outcome === "termination-deferred" || turnBudgetExceeded || undefined,
@@ -1190,6 +1200,7 @@ async function runSingleStep(
 		}
 	};
 	let finalResult: RunPiStreamingResult | undefined;
+	let abortRecoveryAttempted = false;
 	let finalOutputSnapshot: SingleOutputSnapshot | undefined;
 	let completionGuardTriggeredFinal = false;
 	let turnBudget = ctx.turnBudget ? initialTurnBudgetState(ctx.turnBudget) : undefined;
@@ -1217,62 +1228,104 @@ async function runSingleStep(
 				childIndex: ctx.flatIndex,
 			})
 			: undefined;
-		const { args, env, tempDir, toolDiagnosticPath } = buildPiArgs({
-			parentSessionId: step.parentSessionId,
-			baseArgs: ["--mode", "json", "-p"],
-			task,
-			sessionEnabled,
-			sessionDir,
-			sessionFile: step.sessionFile,
-			model: candidate,
-			inheritProjectContext: step.inheritProjectContext,
-			inheritSkills: step.inheritSkills,
-			requireReadTool: Boolean(step.skills?.length),
-			tools: step.tools,
-			extensions: step.extensions,
-			subagentOnlyExtensions: step.subagentOnlyExtensions,
-			systemPrompt: appendTurnBudgetSystemPrompt(step.systemPrompt ?? "", ctx.turnBudget),
-			systemPromptMode: step.systemPromptMode,
-			mcpDirectTools: step.mcpDirectTools,
-			cwd: step.cwd ?? ctx.cwd,
-			promptFileStem: step.agent,
-			intercomSessionName: ctx.childIntercomTarget,
-			orchestratorIntercomTarget: ctx.orchestratorIntercomTarget,
-			runId: ctx.id,
-			childAgentName: step.agent,
-			childIndex: ctx.flatIndex,
-			parentEventSink: ctx.nestedRoute?.eventSink,
-			parentControlInbox: ctx.nestedRoute?.controlInbox,
-			parentRootRunId: ctx.nestedRoute?.rootRunId,
-			parentCapabilityToken: ctx.nestedRoute?.capabilityToken,
-			steerInboxDir: ctx.steerInboxDir,
-			steerCapabilityPath: ctx.steerCapabilityPath,
-			steerAckDir: ctx.steerAckDir,
-			structuredOutput: effectiveStructuredOutput,
-			toolBudget: step.toolBudget,
-			rlimits: step.rlimits,
-			childWatchdog,
-			waitToolEnabled: step.waitToolEnabled,
+		const attemptTempDirs: string[] = [];
+		let toolDiagnosticPath: string | undefined;
+		const runAttempt = async (attemptTask: string): Promise<RunPiStreamingResult> => {
+			const built = buildPiArgs({
+				parentSessionId: step.parentSessionId,
+				baseArgs: ["--mode", "json", "-p"],
+				task: attemptTask,
+				sessionEnabled,
+				sessionDir,
+				sessionFile: step.sessionFile,
+				model: candidate,
+				inheritProjectContext: step.inheritProjectContext,
+				inheritSkills: step.inheritSkills,
+				requireReadTool: Boolean(step.skills?.length),
+				tools: step.tools,
+				extensions: step.extensions,
+				subagentOnlyExtensions: step.subagentOnlyExtensions,
+				systemPrompt: appendTurnBudgetSystemPrompt(step.systemPrompt ?? "", ctx.turnBudget),
+				systemPromptMode: step.systemPromptMode,
+				mcpDirectTools: step.mcpDirectTools,
+				cwd: step.cwd ?? ctx.cwd,
+				promptFileStem: step.agent,
+				intercomSessionName: ctx.childIntercomTarget,
+				orchestratorIntercomTarget: ctx.orchestratorIntercomTarget,
+				runId: ctx.id,
+				childAgentName: step.agent,
+				childIndex: ctx.flatIndex,
+				parentEventSink: ctx.nestedRoute?.eventSink,
+				parentControlInbox: ctx.nestedRoute?.controlInbox,
+				parentRootRunId: ctx.nestedRoute?.rootRunId,
+				parentCapabilityToken: ctx.nestedRoute?.capabilityToken,
+				steerInboxDir: ctx.steerInboxDir,
+				steerCapabilityPath: ctx.steerCapabilityPath,
+				steerAckDir: ctx.steerAckDir,
+				structuredOutput: effectiveStructuredOutput,
+				toolBudget: step.toolBudget,
+				rlimits: step.rlimits,
+				childWatchdog,
+				waitToolEnabled: step.waitToolEnabled,
+			});
+			if (built.tempDir) attemptTempDirs.push(built.tempDir);
+			toolDiagnosticPath = built.toolDiagnosticPath;
+			return runPiStreaming(
+				built.args,
+				step.cwd ?? ctx.cwd,
+				ctx.outputFile,
+				built.env,
+				ctx.piPackageRoot,
+				ctx.piArgv1,
+				step.maxSubagentDepth,
+				{ eventsPath, runId: ctx.id, stepIndex: ctx.flatIndex, agent: step.agent },
+				ctx.registerInterrupt,
+				ctx.onChildEvent,
+				transcriptWriter,
+				registerChildTimeout,
+				effectiveTimeoutMessage,
+				ctx.registerStop,
+				ctx.stopMessage,
+				ctx.registerTurnBudgetAbort,
+				ctx.onWriterProcess,
+			);
+		};
+		let run = await runAttempt(task);
+		const recovery = await recoverAbortOnce({
+			initial: run,
+			planInput: (attempt, alreadyResumed) => ({
+				messages: attempt.messages,
+				error: attempt.error,
+				processSignal: attempt.processSignal,
+				sessionAvailable: Boolean(step.sessionFile && fs.existsSync(step.sessionFile)),
+				alreadyResumed: alreadyResumed || abortRecoveryAttempted,
+				stopped: attempt.stopped || ctx.stopSignal?.aborted,
+				interrupted: attempt.interrupted,
+				timedOut: attempt.timedOut || ctx.timeoutSignal?.aborted || ctx.skipAcceptance?.(),
+				toolBudgetExhausted: attempt.toolBudgetBlocked || attempt.turnBudgetExceeded,
+				structuredOutputFailed: false,
+				acceptanceFailed: false,
+				afterCompactionSettlement: attempt.afterCompactionSettlement,
+			}),
+			runContinuation: runAttempt,
+			mergeAttempts: (first, resumed) => {
+				const combinedUsage = emptyUsage();
+				for (const key of ["input", "output", "cacheRead", "cacheWrite", "cost", "turns"] as const) {
+					combinedUsage[key] = first.usage[key] + resumed.usage[key];
+				}
+				return {
+					...resumed,
+					messages: [...first.messages, ...resumed.messages],
+					usage: combinedUsage,
+					afterCompactionSettlement: first.afterCompactionSettlement || resumed.afterCompactionSettlement,
+				};
+			},
 		});
-		const run = await runPiStreaming(
-			args,
-			step.cwd ?? ctx.cwd,
-			ctx.outputFile,
-			env,
-			ctx.piPackageRoot,
-			ctx.piArgv1,
-			step.maxSubagentDepth,
-			{ eventsPath, runId: ctx.id, stepIndex: ctx.flatIndex, agent: step.agent },
-			ctx.registerInterrupt,
-			ctx.onChildEvent,
-			transcriptWriter,
-			registerChildTimeout,
-			effectiveTimeoutMessage,
-			ctx.registerStop,
-			ctx.stopMessage,
-			ctx.registerTurnBudgetAbort,
-			ctx.onWriterProcess,
-		);
+		run = recovery.result;
+		if (recovery.resumed) {
+			abortRecoveryAttempted = true;
+			attemptNotes.push("[abort-recovery] provider/transport abort after useful progress; resuming the retained child session once.");
+		}
 		if (run.turnBudget) turnBudget = run.turnBudget;
 		else if (ctx.turnBudget) {
 			const assistantMessages = run.messages.filter((message) => message.role === "assistant");
@@ -1295,7 +1348,7 @@ async function runSingleStep(
 		const toolAvailabilityError = run.exitCode === 0 && !run.error
 			? readChildToolDiagnosticError(toolDiagnosticPath)
 			: undefined;
-		cleanupTempDir(tempDir);
+		for (const attemptTempDir of attemptTempDirs) cleanupTempDir(attemptTempDir);
 
 		const hiddenError = run.exitCode === 0 && !run.error && !toolAvailabilityError ? detectSubagentError(run.messages) : null;
 		const missingStructuredOutput = effectiveStructuredOutput

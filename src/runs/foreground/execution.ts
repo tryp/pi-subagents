@@ -32,6 +32,7 @@ import {
 	getSubagentDepthEnv,
 } from "../../shared/types.ts";
 import { formatSharedContextPreamble } from "../shared/shared-context.ts";
+import { CompactionSettlementTracker, recoverAbortOnce } from "../shared/abort-recovery.ts";
 import {
 	DEFAULT_CONTROL_CONFIG,
 	buildControlEvent,
@@ -320,6 +321,7 @@ async function runSingleAttempt(
 	}
 	const spawnEnv = { ...process.env, ...sharedEnv, ...getSubagentDepthEnv(options.maxSubagentDepth) };
 	let observedMutationAttempt = false;
+	const compactionSettlement = new CompactionSettlementTracker();
 
 	const exitCode = await new Promise<number>((resolve) => {
 		const spawnSpec = getPiSpawnCommand(args, { rlimits: decodeRlimitsEnv(spawnEnv[RLIMITS_ENV]) });
@@ -726,8 +728,12 @@ async function runSingleAttempt(
 				return;
 			}
 			shared.transcriptWriter?.writeChildEvent(evt);
-			if (evt.type === "agent_settled") agentSettledReceived = true;
-			applyChildLifecycle(projectChildLifecycle(evt));
+			const lifecycleAction = projectChildLifecycle(evt);
+			if (evt.type !== "agent_settled" || lifecycleAction === "start-drain") {
+				compactionSettlement.record(evt, Date.now());
+			}
+			if (evt.type === "agent_settled" && lifecycleAction === "start-drain") agentSettledReceived = true;
+			applyChildLifecycle(lifecycleAction);
 
 			if (isChildWatchdogStatusEvent(evt)) {
 				if (!childWatchdog) return;
@@ -934,6 +940,7 @@ async function runSingleAttempt(
 			clearFinalDrainTimers();
 		});
 		proc.on("close", (code, signal) => {
+			result.processSignal = signal;
 			clearFinalDrainTimers();
 			clearStdioGuard();
 			void jsonlWriter.close().catch(() => {
@@ -1061,6 +1068,7 @@ async function runSingleAttempt(
 		}
 	});
 	result.exitCode = exitCode;
+	result.afterCompactionSettlement = compactionSettlement.afterCompactionSettlement;
 	if (interruptedByControl) {
 		result.exitCode = 0;
 		result.interrupted = true;
@@ -1408,11 +1416,12 @@ export async function runSync(
 		: options;
 
 	let lastResult: SingleResult | undefined;
+	let abortRecoveryAttempted = false;
 	const modelsToTry = candidates.length > 0 ? candidates : [undefined];
 	for (let i = 0; i < modelsToTry.length; i++) {
 		const candidate = modelsToTry[i];
 		const outputSnapshot = captureSingleOutputSnapshot(options.outputPath);
-		const result = await runSingleAttempt(runtimeCwd, agent, taskWithDirectives, candidate, detachedAwareOptions, {
+		const runAttempt = (attemptTask: string) => runSingleAttempt(runtimeCwd, agent, attemptTask, candidate, detachedAwareOptions, {
 			sessionEnabled,
 			systemPrompt,
 			resolvedSkillNames: resolvedSkills.length > 0 ? resolvedSkills.map((skill) => skill.name) : undefined,
@@ -1424,6 +1433,47 @@ export async function runSync(
 			outputSnapshot,
 			originalTask: task,
 		});
+		const firstAttempt = await runAttempt(taskWithDirectives);
+		const recovery = await recoverAbortOnce<SingleResult>({
+			initial: firstAttempt,
+			planInput: (attempt, alreadyResumed) => ({
+				messages: attempt.messages ?? [],
+				error: attempt.error,
+				processSignal: attempt.processSignal,
+				sessionAvailable: Boolean(options.sessionFile && existsSync(options.sessionFile)),
+				alreadyResumed: alreadyResumed || abortRecoveryAttempted,
+				stopped: attempt.stopped || options.signal?.aborted,
+				interrupted: attempt.interrupted,
+				timedOut: attempt.timedOut,
+				toolBudgetExhausted: attempt.toolBudgetBlocked || attempt.turnBudgetExceeded,
+				structuredOutputFailed: false,
+				acceptanceFailed: attempt.acceptance?.status === "rejected",
+				currentTool: attempt.progress?.currentTool,
+				afterCompactionSettlement: attempt.afterCompactionSettlement,
+			}),
+			runContinuation: runAttempt,
+			mergeAttempts: (first, resumed) => {
+				const usage = emptyUsage();
+				sumUsage(usage, first.usage);
+				sumUsage(usage, resumed.usage);
+				return {
+					...resumed,
+					messages: [...(first.messages ?? []), ...(resumed.messages ?? [])],
+					usage,
+					afterCompactionSettlement: first.afterCompactionSettlement || resumed.afterCompactionSettlement,
+					progressSummary: {
+						toolCount: (first.progressSummary?.toolCount ?? 0) + (resumed.progressSummary?.toolCount ?? 0),
+						tokens: usage.input + usage.output,
+						durationMs: (first.progressSummary?.durationMs ?? 0) + (resumed.progressSummary?.durationMs ?? 0),
+					},
+				};
+			},
+		});
+		const result = recovery.result;
+		if (recovery.resumed) {
+			abortRecoveryAttempted = true;
+			attemptNotes.push("[abort-recovery] provider/transport abort after useful progress; resuming the retained child session once.");
+		}
 		lastResult = result;
 		if (result.model) attemptedModels.push(result.model);
 		else if (candidate) attemptedModels.push(candidate);

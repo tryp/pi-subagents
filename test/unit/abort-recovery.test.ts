@@ -8,19 +8,21 @@ import {
 	recoverAbortOnce,
 } from "../../src/runs/shared/abort-recovery.ts";
 import type { Message } from "@earendil-works/pi-ai";
+import { buildPiArgs } from "../../src/runs/shared/pi-args.ts";
+import { projectChildLifecycle } from "../../src/runs/shared/child-protocol.ts";
 
 const progress: Message = {
 	role: "assistant",
 	content: [{ type: "text", text: "Implemented and committed the core changes." }],
 	stopReason: "stop",
 	usage: { input: 500, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 520, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-} as Message;
+} as unknown as Message;
 const aborted: Message = {
 	role: "assistant",
 	content: [],
 	stopReason: "aborted",
 	usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-} as Message;
+} as unknown as Message;
 
 function tracker() {
 	return new CompactionSettlementTracker();
@@ -30,6 +32,15 @@ function tracked(...events: Array<{ type: string; at: number; willRetry?: boolea
 	const value = tracker();
 	for (const { at, ...event } of events) value.record(event, at);
 	return value.afterCompactionSettlement;
+}
+
+interface RecoveryTestAttempt {
+	exitCode: number;
+	messages: Message[];
+	error?: string;
+	processSignal?: string | null;
+	afterCompactionSettlement?: boolean;
+	finalOutput?: string;
 }
 
 function base(overrides: Partial<Parameters<typeof planAbortRecovery>[0]> = {}) {
@@ -43,14 +54,20 @@ function base(overrides: Partial<Parameters<typeof planAbortRecovery>[0]> = {}) 
 	});
 }
 
+function settleReason(overrides: Partial<Parameters<typeof planAbortRecovery>[0]> = {}): string {
+	const plan = base(overrides);
+	assert.equal(plan.action, "settle");
+	return plan.action === "settle" ? plan.reason : "unexpected resume";
+}
+
 describe("CompactionSettlementTracker", () => {
 	it("recognizes the observed settle-then-manual-compaction order at +12ms with willRetry false", () => {
 		assert.equal(DEFAULT_COMPACTION_SETTLEMENT_WINDOW_MS, 5000);
-		assert.equal(tracked(
-			{ type: "agent_settled", at: 1_794_019_388_624 },
-			{ type: "compaction_start", at: 1_794_019_388_636, reason: "manual" },
-			{ type: "compaction_end", at: 1_794_019_388_700, willRetry: false },
-		), true);
+		const settle = { type: "agent_settled", at: 1_794_019_388_624 };
+		const compaction = { type: "compaction_start", at: 1_794_019_388_636, reason: "manual" };
+		assert.equal(projectChildLifecycle({ type: settle.type }), "start-drain");
+		assert.equal(tracked(settle, compaction), true);
+		assert.equal(tracked(settle, compaction, { type: "compaction_end", at: 1_794_019_388_700, willRetry: false }), true);
 	});
 
 	it("recognizes compaction-before-settlement and uses the nearest compaction to the last settlement", () => {
@@ -91,6 +108,7 @@ describe("CompactionSettlementTracker", () => {
 			{ type: "agent_settled", at: 100 },
 			{ type: "compaction_start", at: 110 },
 			{ type: "compaction_end", at: 120, willRetry: true },
+			{ type: "compaction_start", at: 130 },
 		), false);
 	});
 });
@@ -98,9 +116,12 @@ describe("CompactionSettlementTracker", () => {
 describe("recoverAbortOnce", () => {
 	it("resumes the same retained child session once and accepts its completion", async () => {
 		const sessionFile = "/tmp/retained-child.jsonl";
-		const initial = { exitCode: 1, messages: [progress, aborted], error: "This operation was aborted", processSignal: "SIGTERM", afterCompactionSettlement: true };
+		const observed = tracker();
+		observed.record({ type: "agent_settled" }, 1_794_019_388_624);
+		observed.record({ type: "compaction_start", reason: "manual" }, 1_794_019_388_636);
+		const initial: RecoveryTestAttempt = { exitCode: 1, messages: [progress, aborted], error: "This operation was aborted", processSignal: "SIGTERM", afterCompactionSettlement: observed.afterCompactionSettlement };
 		let calls = 0;
-		const recovered = await recoverAbortOnce({
+		const recovered = await recoverAbortOnce<RecoveryTestAttempt>({
 			initial,
 			planInput: (attempt, alreadyResumed) => ({
 				messages: attempt.messages,
@@ -113,7 +134,15 @@ describe("recoverAbortOnce", () => {
 			runContinuation: async (prompt) => {
 				calls++;
 				assert.equal(prompt, ABORT_RECOVERY_PROMPT);
-				assert.equal(sessionFile, "/tmp/retained-child.jsonl");
+				const resumedArgs = buildPiArgs({
+					baseArgs: ["--mode", "json", "-p"],
+					task: prompt,
+					sessionEnabled: true,
+					sessionFile,
+					inheritProjectContext: false,
+					inheritSkills: false,
+				}).args;
+				assert.deepEqual(resumedArgs.slice(0, 5), ["--mode", "json", "-p", "--session", sessionFile]);
 				return { exitCode: 0, messages: [progress], finalOutput: "finished" };
 			},
 			mergeAttempts: (_first, second) => second,
@@ -125,9 +154,9 @@ describe("recoverAbortOnce", () => {
 	});
 
 	it("settles a second abort once with the unsafe-recovery diagnostic", async () => {
-		const initial = { exitCode: 1, messages: [progress, aborted], error: "first abort", afterCompactionSettlement: true };
+		const initial: RecoveryTestAttempt = { exitCode: 1, messages: [progress, aborted], error: "first abort", afterCompactionSettlement: true };
 		let calls = 0;
-		const recovered = await recoverAbortOnce({
+		const recovered = await recoverAbortOnce<RecoveryTestAttempt>({
 			initial,
 			planInput: (attempt, alreadyResumed) => ({
 				messages: attempt.messages,
@@ -157,14 +186,14 @@ describe("planAbortRecovery", () => {
 	it("keeps explicit stop authoritative even with compaction markers", () => {
 		const plan = base({ stopped: true });
 		assert.equal(plan.action, "settle");
-		assert.equal(plan.reason, "explicit stop or interrupt");
+		assert.equal(plan.action === "settle" ? plan.reason : "unexpected resume", "explicit stop or interrupt");
 	});
 
 	it("requires terminal assistant abort evidence with zero output usage", () => {
-		assert.equal(base({ messages: [progress] }).reason, "terminal assistant abort evidence not verified");
-		assert.equal(base({ messages: [progress, { ...aborted, usage: { ...aborted.usage!, output: 1 } } as Message] }).reason, "terminal assistant abort evidence not verified");
-		assert.equal(base({ messages: [progress, { ...aborted, stopReason: "error", errorMessage: "invalid schema" } as Message] }).reason, "terminal assistant abort evidence not verified");
-		assert.equal(base({ messages: [progress, { ...aborted, stopReason: "error", errorMessage: "Connection reset by provider transport" } as Message] }).action, "resume");
+		assert.equal(settleReason({ messages: [progress] }), "terminal assistant abort evidence not verified");
+		assert.equal(settleReason({ messages: [progress, { role: "assistant", content: [], stopReason: "aborted", usage: { output: 1 } } as unknown as Message] }), "terminal assistant abort evidence not verified");
+		assert.equal(settleReason({ messages: [progress, { ...aborted, stopReason: "error", errorMessage: "invalid schema" } as unknown as Message] }), "terminal assistant abort evidence not verified");
+		assert.equal(base({ messages: [progress, { ...aborted, stopReason: "error", errorMessage: "Connection reset by provider transport" } as unknown as Message] }).action, "resume");
 	});
 
 	it("fails closed for every refusal gate", () => {
@@ -185,9 +214,7 @@ describe("planAbortRecovery", () => {
 			["no useful progress", { messages: [aborted] }, "no useful prior progress"],
 		];
 		for (const [name, overrides, reason] of gates) {
-			const plan = base(overrides);
-			assert.equal(plan.action, "settle", name);
-			assert.equal(plan.reason, reason, name);
+			assert.equal(settleReason(overrides), reason, name);
 		}
 	});
 
