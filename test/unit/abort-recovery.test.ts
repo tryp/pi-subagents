@@ -200,7 +200,7 @@ describe("planAbortRecovery", () => {
 			["session unavailable", { sessionAvailable: false }, "retained session unavailable"],
 			["stopped", { stopped: true }, "explicit stop or interrupt"],
 			["interrupted", { interrupted: true }, "explicit stop or interrupt"],
-			["process signal", { processSignal: "SIGKILL", afterCompactionSettlement: false }, "process terminated by signal"],
+			["process signal", { processSignal: "SIGKILL", afterCompactionSettlement: false }, "process terminated by signal: SIGKILL"],
 			["timeout", { timedOut: true }, "elapsed timeout"],
 			["tool budget", { toolBudgetExhausted: true }, "budget exhausted"],
 			["usage budget", { usageBudgetExhausted: true }, "budget exhausted"],
@@ -216,11 +216,20 @@ describe("planAbortRecovery", () => {
 		}
 	});
 
-	it("allows the terminal drain signal only for a verified compaction abort candidate", () => {
+	it("exempts only the runner drain SIGTERM for a verified compaction abort candidate", () => {
 		assert.equal(base({ processSignal: "SIGTERM" }).action, "resume");
 		assert.deepEqual(base({ processSignal: "SIGTERM", afterCompactionSettlement: false }), {
 			action: "settle",
-			reason: "process terminated by signal",
+			reason: "process terminated by signal: SIGTERM",
+		});
+		assert.deepEqual(base({ processSignal: "SIGKILL" }), {
+			action: "settle",
+			reason: "process terminated by signal: SIGKILL",
+			diagnostic: "Compaction-induced child abort could not be resumed safely: process terminated by signal: SIGKILL.",
+		});
+		assert.deepEqual(base({ processSignal: "SIGKILL", afterCompactionSettlement: false }), {
+			action: "settle",
+			reason: "process terminated by signal: SIGKILL",
 		});
 	});
 

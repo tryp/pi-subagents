@@ -171,9 +171,12 @@ export function planAbortRecovery(input: PlanAbortRecoveryInput): AbortRecoveryP
 	if (input.alreadyResumed) return settle("resume already attempted");
 	if (!input.sessionAvailable) return settle("retained session unavailable");
 	if (input.stopped || input.interrupted) return settle("explicit stop or interrupt");
-	// The process runner's terminal drain sends SIGTERM after settlement. That
-	// cleanup signal is non-authoritative only for a verified abort candidate.
-	if (input.processSignal && !compactionAbortCandidate) return settle("process terminated by signal");
+	// The process runner's terminal drain sends SIGTERM after settlement. Only
+	// that cleanup signal is non-authoritative; other signals (especially SIGKILL)
+	// remain authoritative even when the transcript resembles a compaction abort.
+	if (input.processSignal && !(input.processSignal === "SIGTERM" && compactionAbortCandidate)) {
+		return settle(`process terminated by signal: ${input.processSignal}`);
+	}
 	if (input.timedOut) return settle("elapsed timeout");
 	if (input.toolBudgetExhausted || input.usageBudgetExhausted) return settle("budget exhausted");
 	if (input.structuredOutputFailed) return settle("structured output failure");
