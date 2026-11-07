@@ -249,7 +249,7 @@ function applyStepDiagnosis(
 	result: Pick<StepResult, "failureKind" | "retryable" | "compaction">,
 ): void {
 	if (result.failureKind) step.failureKind = result.failureKind;
-	if (result.retryable) step.retryable = true;
+	if (result.retryable !== undefined) step.retryable = result.retryable;
 	if (result.compaction) step.compaction = result.compaction;
 }
 

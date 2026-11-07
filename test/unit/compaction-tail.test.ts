@@ -169,7 +169,7 @@ describe("classifyCompactedThenAborted", () => {
 	it("keeps a refused recovery as diagnosed retryable compacted_then_aborted", () => {
 		const diagnosis = classifyCompactedThenAborted({
 			sessionFile: compactedSession(1),
-			error: "This operation was aborted\\nCompaction-induced child abort could not be resumed safely: no useful prior progress.",
+			error: "Compaction-induced child abort could not be resumed safely: no useful prior progress.",
 			exitCode: 1,
 			recoveryAttempted: false,
 		});

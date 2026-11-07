@@ -157,7 +157,11 @@ export interface CompactionFailureDiagnosis {
 export function classifyCompactedThenAborted(input: CompactedThenAbortedInput): CompactionFailureDiagnosis {
 	if (input.exitCode === 0 || input.exitCode === null || input.exitCode === undefined) return {};
 	if (input.stopped || input.timedOut || input.interrupted) return {};
-	if (!isAbortFailure(input.error)) return {};
+	// A recovery refusal's diagnostic is emitted only after the planner verified
+	// terminal abort evidence; preserve that proof when the child runner's final
+	// error string contains only the diagnostic rather than the raw provider error.
+	const recoveryAbortDiagnostic = input.error?.includes("Compaction-induced child abort could not be resumed safely:") === true;
+	if (!isAbortFailure(input.error) && !recoveryAbortDiagnostic) return {};
 	const compaction = diagnoseCompactionTail(input.sessionFile, { tailEntryBudget: input.tailEntryBudget });
 	const maxTailEntriesAfter = input.maxTailEntriesAfter ?? DEFAULT_MAX_TAIL_ENTRIES_AFTER_COMPACTION;
 	const failureKind =

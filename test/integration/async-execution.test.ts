@@ -93,6 +93,8 @@ interface AsyncStatusPayload {
 		tokens?: { total: number };
 		totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
 		acceptance?: { status?: string };
+		failureKind?: string;
+		retryable?: boolean;
 		turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; terminationDeferredAtTurn?: number; exceededAtTurn?: number };
 		turnBudgetExceeded?: boolean;
 		wrapUpRequested?: boolean;
@@ -545,7 +547,10 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 
 	it("background refuses abort recovery when required structured output is missing", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		const sessionFile = path.join(tempDir, "background-missing-structured-session.jsonl");
-		fs.writeFileSync(sessionFile, "", "utf-8");
+		fs.writeFileSync(sessionFile, [
+			JSON.stringify({ type: "message", id: "m1", timestamp: "2026-11-07T00:00:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "prior progress" }] } }),
+			JSON.stringify({ type: "compaction", id: "c1", timestamp: "2026-11-07T00:00:01.000Z", summary: "compacted", firstKeptEntryId: "m1", tokensBefore: 200_350, details: { reason: "manual" } }),
+		].join("\n") + "\n", "utf-8");
 		const aborted = {
 			type: "message_end",
 			message: {
@@ -576,8 +581,64 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			maxSubagentDepth: 2,
 		});
 		const payload = await readAsyncPayload(id);
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
 		assert.equal(payload.success, false);
 		assert.equal(mockPi.callCount(), 1, "missing required structured output must refuse the continuation");
+		assert.match(payload.results[0]?.error ?? "", /Compaction-induced child abort could not be resumed safely: structured output failure/);
+		assert.equal(status.steps?.[0]?.failureKind, "compacted_then_aborted");
+		assert.equal(status.steps?.[0]?.retryable, true);
+	});
+
+	it("background reports a second abort after its one continuation as non-retryable", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		const sessionFile = path.join(tempDir, "background-second-abort-session.jsonl");
+		fs.writeFileSync(sessionFile, [
+			JSON.stringify({ type: "message", id: "m1", timestamp: "2026-11-07T00:00:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "prior progress" }] } }),
+			JSON.stringify({ type: "compaction", id: "c1", timestamp: "2026-11-07T00:00:01.000Z", summary: "compacted", firstKeptEntryId: "m1", tokensBefore: 200_350, details: { reason: "manual" } }),
+		].join("\n") + "\n", "utf-8");
+		const aborted = {
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [],
+				stopReason: "aborted",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+			},
+		};
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [...events.completedWrite(path.join(tempDir, "second-abort-output.txt"), "first progress"), aborted, { type: "agent_settled" }] },
+				{ delay: 12, jsonl: [{ type: "compaction_start", reason: "manual" }] },
+			],
+			exitCode: 1,
+		});
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.assistantMessage("continued progress"), aborted, { type: "agent_settled" }] },
+				{ delay: 12, jsonl: [{ type: "compaction_start", reason: "manual" }] },
+			],
+			stderr: "This operation was aborted",
+			exitCode: 1,
+		});
+		const id = `async-compaction-recovery-second-abort-${Date.now().toString(36)}`;
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Continue after the compaction abort",
+			agentConfig: makeAgent("worker", { completionGuard: false }),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			sessionFile,
+			maxSubagentDepth: 2,
+			acceptance: false,
+		});
+		const payload = await readAsyncPayload(id);
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(payload.success, false);
+		assert.equal(mockPi.callCount(), 2, "the recovery attempt is bounded to one continuation");
+		assert.equal(status.steps?.[0]?.failureKind, "compacted_abort_after_resume", JSON.stringify({ status: status.steps?.[0], result: payload.results[0] }));
+		assert.equal(status.steps?.[0]?.retryable, false);
+		assert.match(payload.results[0]?.error ?? "", /resume already attempted/);
 	});
 
 	it("does not let resumed background output launder a failed acceptance check", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
