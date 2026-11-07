@@ -17,6 +17,7 @@ import {
 	type ArtifactPaths,
 	type AsyncParallelGroupStatus,
 	type AsyncStatus,
+	type AsyncStepFailureKind,
 	type ChainOutputMap,
 	type CostSummary,
 	type ModelAttempt,
@@ -26,6 +27,7 @@ import {
 	type ResolvedTurnBudget,
 	type ResolvedToolBudget,
 	type SavedOutputReference,
+	type StepCompactionDiagnosis,
 	type SubagentRunMode,
 	type ToolBudgetState,
 	type TurnBudgetState,
@@ -66,6 +68,7 @@ import { RLIMITS_ENV, decodeRlimitsEnv, resourceLimitExceededMessage, resourceLi
 import { outputEntryFromAsyncResult, resolveOutputReferences } from "../shared/chain-outputs.ts";
 import { createStructuredOutputRuntime, readStructuredOutput } from "../shared/structured-output.ts";
 import { readChildToolDiagnosticError } from "../shared/tool-availability.ts";
+import { classifyCompactedThenAborted } from "../shared/compaction-tail.ts";
 import { prepareContextDelivery, writeContextDeliveryReceipt } from "../shared/context-delivery.ts";
 import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelStep, validateDynamicCollection } from "../shared/dynamic-fanout.ts";
 import { nestedSummaryFromAsyncStatus, projectNestedEvents, resolveNestedAsyncDir, writeNestedEvent } from "../shared/nested-events.ts";
@@ -228,6 +231,25 @@ interface StepResult {
 	structuredOutputSchemaPath?: string;
 	acceptance?: import("../../shared/types.ts").AcceptanceLedger;
 	watchdog?: import("../../shared/types.ts").ChildWatchdogProgress;
+	/** Why the child failed when `error` alone does not say it; see AsyncStepFailureKind. */
+	failureKind?: import("../../shared/types.ts").AsyncStepFailureKind;
+	/** Set for failure kinds a parent can safely retry. */
+	retryable?: boolean;
+	/** Compaction evidence read from the tail of the child transcript. */
+	compaction?: import("../../shared/types.ts").StepCompactionDiagnosis;
+}
+
+/**
+ * Copy a child's failure diagnosis onto its status step, so a failed run can be
+ * triaged from status.json without opening the child transcript.
+ */
+function applyStepDiagnosis(
+	step: { failureKind?: AsyncStepFailureKind; retryable?: boolean; compaction?: StepCompactionDiagnosis },
+	result: Pick<StepResult, "failureKind" | "retryable" | "compaction">,
+): void {
+	if (result.failureKind) step.failureKind = result.failureKind;
+	if (result.retryable) step.retryable = true;
+	if (result.compaction) step.compaction = result.compaction;
 }
 
 const ASYNC_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
@@ -1424,6 +1446,19 @@ async function runSingleStep(
 				: acceptanceCanFailRun
 					? (finalResult?.error ? `${finalResult.error}\n${acceptanceFailure}` : acceptanceFailure)
 					: finalResult?.error;
+	// A child that finishes compacting its context can still exit nonzero on the
+	// abort that compaction caused: pi's manual compaction aborts the in-flight
+	// turn first, and a headless child reports that abort out of `prompt()`. Only
+	// the child transcript tells that apart from a real crash, so read its tail
+	// when the failure already looks like an abort (never on success).
+	const compactionDiagnosis = classifyCompactedThenAborted({
+		sessionFile: step.sessionFile,
+		error: effectiveFinalError,
+		exitCode: effectiveFinalExitCode,
+		stopped: stoppedAfterAcceptance,
+		timedOut: timedOutAfterAcceptance,
+		interrupted: finalResult?.interrupted === true,
+	});
 
 	if (artifactPaths && ctx.artifactConfig?.enabled !== false) {
 		if (ctx.artifactConfig?.includeOutput !== false) {
@@ -1471,6 +1506,8 @@ async function runSingleStep(
 		interrupted: timedOutAfterAcceptance || stoppedAfterAcceptance || turnBudgetExceeded ? false : finalResult?.interrupted,
 		timedOut: timedOutAfterAcceptance ? true : finalResult?.timedOut,
 		stopped: stoppedAfterAcceptance ? true : finalResult?.stopped,
+		...(compactionDiagnosis.failureKind ? { failureKind: compactionDiagnosis.failureKind, retryable: compactionDiagnosis.retryable === true } : {}),
+		...(compactionDiagnosis.compaction ? { compaction: compactionDiagnosis.compaction } : {}),
 		turnBudget,
 		turnBudgetExceeded: turnBudgetExceeded || undefined,
 		wrapUpRequested: finalResult?.wrapUpRequested || turnBudget?.outcome === "wrap-up-requested" || turnBudget?.outcome === "termination-deferred" || turnBudgetExceeded || undefined,
@@ -3057,6 +3094,7 @@ async function runSubagent(
 				statusPayload.steps[fi].acceptance = singleResult.acceptance;
 				statusPayload.steps[fi].acceptanceReason = acceptanceReasonFor(singleResult.acceptance);
 				statusPayload.steps[fi].watchdog = singleResult.watchdog;
+				applyStepDiagnosis(statusPayload.steps[fi], singleResult);
 				statusPayload.lastUpdate = taskEndTime;
 				writeStatusPayload();
 				appendJsonl(eventsPath, JSON.stringify({
@@ -3397,6 +3435,7 @@ async function runSubagent(
 						statusPayload.steps[fi].acceptance = singleResult.acceptance;
 				statusPayload.steps[fi].acceptanceReason = acceptanceReasonFor(singleResult.acceptance);
 						statusPayload.steps[fi].watchdog = singleResult.watchdog;
+						applyStepDiagnosis(statusPayload.steps[fi], singleResult);
 						statusPayload.lastUpdate = taskEndTime;
 						writeStatusPayload();
 
@@ -3742,6 +3781,7 @@ async function runSubagent(
 			statusPayload.steps[flatIndex].acceptance = singleResult.acceptance;
 			statusPayload.steps[flatIndex].acceptanceReason = acceptanceReasonFor(singleResult.acceptance);
 			statusPayload.steps[flatIndex].watchdog = singleResult.watchdog;
+			applyStepDiagnosis(statusPayload.steps[flatIndex], singleResult);
 			if (stepTokens) {
 				statusPayload.steps[flatIndex].tokens = stepTokens;
 				statusPayload.totalTokens = { ...previousCumulativeTokens };
@@ -3904,6 +3944,15 @@ async function runSubagent(
 		const failedStep = statusPayload.steps.find((s) => s.status === "failed");
 		if (failedStep?.agent) {
 			statusPayload.error = `Step failed: ${failedStep.agent}`;
+		}
+	}
+	// Roll a diagnosed child failure up to the run, so `status` answers "why" at the
+	// top level instead of only inside steps[].
+	if (statusPayload.state === "failed") {
+		const diagnosedStep = statusPayload.steps.find((s) => s.failureKind);
+		if (diagnosedStep?.failureKind) {
+			statusPayload.failureKind = diagnosedStep.failureKind;
+			if (diagnosedStep.retryable) statusPayload.retryable = true;
 		}
 	}
 	writeStatusPayload();

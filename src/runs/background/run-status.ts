@@ -377,10 +377,11 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 				const steeringSuffix = steeringText ? `, steering: ${steeringText}` : "";
 				const errorText = step.error ? `, error: ${step.error}` : "";
 				const acceptanceText = step.acceptance?.status ? `, acceptance: ${step.acceptance.status}` : "";
+				const failureText = step.failureKind ? `, failure: ${step.failureKind}${step.retryable ? " (retryable)" : ""}` : "";
 				const budgetText = step.turnBudget ? `, turn budget: ${step.turnBudget.turnCount}/${step.turnBudget.maxTurns}+${step.turnBudget.graceTurns} (${step.turnBudget.outcome})` : "";
 				const display = step.label ? `${step.label} (${step.agent})` : step.agent;
 				const phase = step.phase ? `[${step.phase}] ` : "";
-				lines.push(`${stepLineLabel(status, index)}: ${phase}${display} ${step.status}${modelText}${stepActivityText ? `, ${stepActivityText}` : ""}${steeringSuffix}${acceptanceText}${budgetText}${errorText}`);
+				lines.push(`${stepLineLabel(status, index)}: ${phase}${display} ${step.status}${modelText}${stepActivityText ? `, ${stepActivityText}` : ""}${steeringSuffix}${acceptanceText}${failureText}${budgetText}${errorText}`);
 				lines.push(...formatNestedRunStatusLines(step.children, { indent: "  ", commandHints: true, maxLines: 20 }));
 				const stepOutputPath = path.join(asyncDir, `output-${index}.log`);
 				if (stepOutputPath !== outputPath && fs.existsSync(stepOutputPath)) lines.push(`  Output: ${stepOutputPath}`);

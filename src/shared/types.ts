@@ -909,6 +909,10 @@ export interface AsyncStatus {
 	isNested?: boolean;
 	state: "queued" | "running" | "complete" | "failed" | "paused" | "stopped";
 	error?: string;
+	/** Rolled-up step failure kind, so a failed run's reason is readable at the top level. */
+	failureKind?: AsyncStepFailureKind;
+	/** True when the run's failure kind is safe to retry. */
+	retryable?: boolean;
 	activityState?: ActivityState;
 	lastActivityAt?: number;
 	currentTool?: string;
@@ -998,6 +1002,16 @@ export interface AsyncStatus {
 		structuredOutputSchemaPath?: string;
 		acceptance?: AcceptanceLedger;
 		watchdog?: ChildWatchdogProgress;
+		/**
+		 * Why the child failed, when the plain exit code hides it. `compacted_then_aborted`
+		 * means the child completed a context compaction and then died on the abort that
+		 * compaction caused, which is a harness-visible end rather than a crash.
+		 */
+		failureKind?: AsyncStepFailureKind;
+		/** True when the failure kind is safe to retry without redoing the task blindly. */
+		retryable?: boolean;
+		/** Tail-of-transcript compaction evidence behind `failureKind`. */
+		compaction?: StepCompactionDiagnosis;
 	}>;
 	sessionDir?: string;
 	outputFile?: string;
@@ -1005,6 +1019,23 @@ export interface AsyncStatus {
 	totalCost?: CostSummary;
 	sessionFile?: string;
 	outputs?: ChainOutputMap;
+}
+
+export type AsyncStepFailureKind = "compacted_then_aborted";
+
+/**
+ * What the end of a child transcript says about compaction.
+ *
+ * `occurred` — a `compaction` entry is present in the tail.
+ * `completed` — that entry looks fully written (summary or `firstKeptEntryId` set).
+ * `tailEntriesAfter` — how many transcript entries follow it; a small number means
+ * the child died during or right after the compaction instead of much later.
+ */
+export interface StepCompactionDiagnosis {
+	occurred: boolean;
+	completed: boolean;
+	tokensBefore?: number;
+	tailEntriesAfter: number;
 }
 
 export type AsyncJobStep = NonNullable<AsyncStatus["steps"]>[number] & {

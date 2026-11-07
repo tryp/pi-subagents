@@ -48,6 +48,12 @@ interface AsyncRunStepSummary {
 	wrapUpRequested?: boolean;
 	toolBudget?: import("../../shared/types.ts").ToolBudgetState;
 	toolBudgetBlocked?: boolean;
+	/** Why the child failed when `error` alone does not say it. */
+	failureKind?: import("../../shared/types.ts").AsyncStepFailureKind;
+	/** Set for failure kinds a parent can safely retry. */
+	retryable?: boolean;
+	/** Compaction evidence read from the tail of the child transcript. */
+	compaction?: import("../../shared/types.ts").StepCompactionDiagnosis;
 	children?: NestedRunSummary[];
 }
 
@@ -57,6 +63,10 @@ export interface AsyncRunSummary {
 	sessionId?: string;
 	state: "queued" | "running" | "complete" | "failed" | "paused" | "stopped";
 	error?: string;
+	/** Rolled-up step failure kind, so a run's reason is readable at the top level. */
+	failureKind?: import("../../shared/types.ts").AsyncStepFailureKind;
+	/** True when the run's failure kind is safe to retry. */
+	retryable?: boolean;
 	activityState?: ActivityState;
 	lastActivityAt?: number;
 	currentTool?: string;
@@ -217,6 +227,9 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.wrapUpRequested !== undefined ? { wrapUpRequested: step.wrapUpRequested } : {}),
 			...(step.toolBudget ? { toolBudget: step.toolBudget } : {}),
 			...(step.toolBudgetBlocked !== undefined ? { toolBudgetBlocked: step.toolBudgetBlocked } : {}),
+			...(step.failureKind ? { failureKind: step.failureKind } : {}),
+			...(step.retryable ? { retryable: step.retryable } : {}),
+			...(step.compaction ? { compaction: { ...step.compaction } } : {}),
 			...(step.children?.length ? { children: step.children } : {}),
 		};
 	});
@@ -227,6 +240,8 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		...(status.sessionId ? { sessionId: status.sessionId } : {}),
 		state: status.state,
 		...(status.error ? { error: status.error } : {}),
+		...(status.failureKind ? { failureKind: status.failureKind } : {}),
+		...(status.retryable ? { retryable: status.retryable } : {}),
 		activityState,
 		lastActivityAt,
 		currentTool: status.currentTool,
@@ -432,6 +447,9 @@ function formatStepLine(step: AsyncRunStepSummary): string {
 	const display = step.label ? `${step.label} (${step.agent})` : step.agent;
 	const phase = step.phase ? `[${step.phase}] ` : "";
 	const parts = [`${step.index + 1}. ${phase}${display}`, step.status];
+	// A child that compacted and then died on the compaction's own abort is a
+	// different event from a crash, so the reason is visible without the JSON.
+	if (step.failureKind) parts.push(`${step.failureKind}${step.retryable ? " (retryable)" : ""}`);
 	const activity = formatActivityFacts(step);
 	if (activity) parts.push(activity);
 	const modelThinking = formatModelThinking(step.model, step.thinking);
