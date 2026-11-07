@@ -26,7 +26,7 @@ export interface CompactionSettlementEvent {
 /** Tracks only the latest settlement and nearest compaction within a bounded window. */
 export class CompactionSettlementTracker {
 	private lastSettlementAt: number | undefined;
-	private nearestCompactionAt: number | undefined;
+	private compactionTimes: number[] = [];
 	private verified = false;
 	private readonly windowMs: number;
 
@@ -49,7 +49,7 @@ export class CompactionSettlementTracker {
 			return;
 		}
 		if (event.type === "compaction_start") {
-			this.nearestCompactionAt = observedAt;
+			this.compactionTimes.push(observedAt);
 			this.recompute();
 		}
 	}
@@ -59,14 +59,21 @@ export class CompactionSettlementTracker {
 	}
 
 	private recompute(): void {
-		this.verified = this.lastSettlementAt !== undefined
-			&& this.nearestCompactionAt !== undefined
-			&& Math.abs(this.lastSettlementAt - this.nearestCompactionAt) <= this.windowMs;
+		if (this.lastSettlementAt === undefined) {
+			this.verified = false;
+			return;
+		}
+		const settlementAt = this.lastSettlementAt;
+		const nearestDistance = this.compactionTimes.reduce(
+			(nearest, at) => Math.min(nearest, Math.abs(settlementAt - at)),
+			Number.POSITIVE_INFINITY,
+		);
+		this.verified = nearestDistance <= this.windowMs;
 	}
 
 	private reset(): void {
 		this.lastSettlementAt = undefined;
-		this.nearestCompactionAt = undefined;
+		this.compactionTimes = [];
 		this.verified = false;
 	}
 }

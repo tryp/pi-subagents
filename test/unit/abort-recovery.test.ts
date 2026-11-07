@@ -80,6 +80,11 @@ describe("CompactionSettlementTracker", () => {
 			{ type: "compaction_start", at: 190 },
 			{ type: "agent_settled", at: 200 },
 		), true);
+		assert.equal(tracked(
+			{ type: "compaction_start", at: 100 },
+			{ type: "agent_settled", at: 110 },
+			{ type: "compaction_start", at: 10_000 },
+		), true, "a distant later compaction does not replace the nearest one");
 	});
 
 	it("does not associate a compaction from an unrelated earlier turn outside the window", () => {
