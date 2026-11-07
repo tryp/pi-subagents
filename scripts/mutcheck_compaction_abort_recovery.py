@@ -17,11 +17,17 @@ NODE = shutil.which("node") or "node"
 
 MUTATIONS = [
     (
-        "marker never set",
-        """\t\tif (event.type === "compaction_start") {\n\t\t\tthis.nearestCompactionAt = observedAt;\n\t\t\tthis.recompute();\n\t\t}""",
-        """\t\tif (event.type === "compaction_start") {\n\t\t\tthis.nearestCompactionAt = observedAt;\n\t\t\tthis.verified = false;\n\t\t}""",
-        "recognizes the observed settle-then-manual-compaction order",
-    ),
+		"marker never set",
+		"""\t\tif (event.type === "compaction_start") {\n\t\t\tthis.compactionTimes.push(observedAt);\n\t\t\tthis.recompute();\n\t\t}""",
+		"""\t\tif (event.type === "compaction_start") {\n\t\t\tthis.recompute();\n\t\t}""",
+		"recognizes the observed settle-then-manual-compaction order",
+	),
+	(
+		"nearest compaction replaced by latest",
+		"""\t\tconst nearestDistance = this.compactionTimes.reduce(\n\t\t\t(nearest, at) => Math.min(nearest, Math.abs(settlementAt - at)),\n\t\t\tNumber.POSITIVE_INFINITY,\n\t\t);""",
+		"""\t\tconst nearestDistance = this.compactionTimes.length > 0\n\t\t\t? Math.abs(settlementAt - this.compactionTimes[this.compactionTimes.length - 1])\n\t\t\t: Number.POSITIVE_INFINITY;""",
+		"uses the nearest compaction to the last settlement",
+	),
     (
         "marker not reset on agent_start",
         """\t\tif (event.type === "agent_start" || event.type === "auto_retry_start") {\n\t\t\tthis.reset();\n\t\t\treturn;\n\t\t}""",
