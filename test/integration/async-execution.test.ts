@@ -544,6 +544,8 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 	});
 
 	it("background refuses abort recovery when required structured output is missing", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		const sessionFile = path.join(tempDir, "background-missing-structured-session.jsonl");
+		fs.writeFileSync(sessionFile, "", "utf-8");
 		const aborted = {
 			type: "message_end",
 			message: {
@@ -570,6 +572,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
 			shareEnabled: false,
 			sessionRoot: path.join(tempDir, "sessions"),
+			sessionFilesByFlatIndex: [sessionFile],
 			maxSubagentDepth: 2,
 		});
 		const payload = await readAsyncPayload(id);
