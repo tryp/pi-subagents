@@ -447,6 +447,7 @@ interface RunPiStreamingResult {
 	timedOut?: boolean;
 	stopped?: boolean;
 	processSignal?: string | null;
+	structuredOutputFailed?: boolean;
 	afterCompactionSettlement?: boolean;
 	turnBudget?: TurnBudgetState;
 	turnBudgetExceeded?: boolean;
@@ -1270,7 +1271,7 @@ async function runSingleStep(
 			});
 			if (built.tempDir) attemptTempDirs.push(built.tempDir);
 			toolDiagnosticPath = built.toolDiagnosticPath;
-			return runPiStreaming(
+			const result = await runPiStreaming(
 				built.args,
 				step.cwd ?? ctx.cwd,
 				ctx.outputFile,
@@ -1289,6 +1290,11 @@ async function runSingleStep(
 				ctx.registerTurnBudgetAbort,
 				ctx.onWriterProcess,
 			);
+			if (effectiveStructuredOutput) {
+				const structured = await readStructuredOutput(effectiveStructuredOutput);
+				result.structuredOutputFailed = Boolean(structured.error);
+			}
+			return result;
 		};
 		let run = await runAttempt(task);
 		const recovery = await recoverAbortOnce({
@@ -1303,7 +1309,10 @@ async function runSingleStep(
 				interrupted: attempt.interrupted,
 				timedOut: attempt.timedOut || ctx.timeoutSignal?.aborted || ctx.skipAcceptance?.(),
 				toolBudgetExhausted: attempt.toolBudgetBlocked || attempt.turnBudgetExceeded,
-				structuredOutputFailed: false,
+				structuredOutputFailed: attempt.structuredOutputFailed === true,
+				// Acceptance is evaluated after this attempt loop on the final output,
+				// so there is no verdict to thread through this recovery gate. The
+				// bounded one-resume policy cannot launder a later acceptance failure.
 				acceptanceFailed: false,
 				afterCompactionSettlement: attempt.afterCompactionSettlement,
 			}),
@@ -1511,6 +1520,7 @@ async function runSingleStep(
 		stopped: stoppedAfterAcceptance,
 		timedOut: timedOutAfterAcceptance,
 		interrupted: finalResult?.interrupted === true,
+		recoveryAttempted: abortRecoveryAttempted,
 	});
 
 	if (artifactPaths && ctx.artifactConfig?.enabled !== false) {

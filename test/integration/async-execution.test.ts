@@ -495,6 +495,130 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.ok(Date.now() - startedAt < 4000, "agent_settled should trigger bounded child cleanup");
 	});
 
+	it("background resumes a compaction-aborted child once in the same retained session", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		const sessionFile = path.join(tempDir, "background-recovery-session.jsonl");
+		fs.writeFileSync(sessionFile, "", "utf-8");
+		const outputPath = path.join(tempDir, "background-recovery-output.txt");
+		const aborted = {
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [],
+				stopReason: "aborted",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+			},
+		};
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [...events.completedWrite(outputPath, "before"), aborted, { type: "agent_settled" }] },
+				{ delay: 12, jsonl: [{ type: "compaction_start", reason: "manual" }] },
+			],
+			writeFiles: [{ path: outputPath, content: "before" }],
+			exitCode: 1,
+		});
+		mockPi.onCall({ jsonl: [events.assistantMessage("continued and finished")] });
+		const id = `async-compaction-recovery-${Date.now().toString(36)}`;
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Continue the retained work",
+			agentConfig: makeAgent("worker", { completionGuard: false }),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			sessionFile,
+			maxSubagentDepth: 2,
+			acceptance: false,
+		});
+		const payload = await readAsyncPayload(id);
+		assert.equal(payload.success, true, JSON.stringify(payload.results[0]));
+		assert.equal(mockPi.callCount(), 2, "one failed child plus exactly one continuation");
+		const firstArgs = readMockPiArgs(mockPi, 0);
+		const secondArgs = readMockPiArgs(mockPi, 1);
+		for (const args of [firstArgs, secondArgs]) {
+			const sessionIndex = args.indexOf("--session");
+			assert.notEqual(sessionIndex, -1);
+			assert.equal(args[sessionIndex + 1], sessionFile);
+		}
+		assert.ok(secondArgs.some((arg) => arg.includes("The prior run ended from a provider/transport abort after useful progress")));
+	});
+
+	it("background refuses abort recovery when required structured output is missing", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		const aborted = {
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [],
+				stopReason: "aborted",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+			},
+		};
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.assistantMessage("made progress"), aborted, { type: "agent_settled" }] },
+				{ delay: 12, jsonl: [{ type: "compaction_start", reason: "manual" }] },
+			],
+			exitCode: 1,
+		});
+		mockPi.onCall({ jsonl: [events.assistantMessage("must not run")] });
+		const id = `async-compaction-recovery-missing-structured-${Date.now().toString(36)}`;
+		const schema = { type: "object", required: ["value"], properties: { value: { type: "string" } } };
+		executeAsyncChain(id, {
+			chain: [{ agent: "worker", task: "Produce structured output", outputSchema: schema }],
+			agents: [makeAgent("worker", { completionGuard: false })],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+		});
+		const payload = await readAsyncPayload(id);
+		assert.equal(payload.success, false);
+		assert.equal(mockPi.callCount(), 1, "missing required structured output must refuse the continuation");
+	});
+
+	it("does not let resumed background output launder a failed acceptance check", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		const sessionFile = path.join(tempDir, "background-acceptance-recovery-session.jsonl");
+		fs.writeFileSync(sessionFile, "", "utf-8");
+		const aborted = {
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [],
+				stopReason: "aborted",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+			},
+		};
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.assistantMessage("made progress"), aborted, { type: "agent_settled" }] },
+				{ delay: 12, jsonl: [{ type: "compaction_start", reason: "manual" }] },
+			],
+			exitCode: 1,
+		});
+		mockPi.onCall({ jsonl: [events.assistantMessage("continued but rejected")] });
+		const id = `async-compaction-recovery-acceptance-${Date.now().toString(36)}`;
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Continue, then run acceptance",
+			agentConfig: makeAgent("worker", { completionGuard: false }),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			sessionFile,
+			maxSubagentDepth: 2,
+			acceptance: {
+				level: "verified",
+				verify: [{ id: "reject", command: `${process.execPath} -e "process.exit(1)"` }],
+			},
+		});
+		const payload = await readAsyncPayload(id);
+		assert.equal(payload.success, false);
+		assert.equal(payload.results[0]?.acceptance?.status, "rejected");
+		assert.equal(mockPi.callCount(), 2, "recovery is once-only, and final acceptance still rejects the run");
+	});
+
 	it("keeps named output references literal in async single tasks", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		const task = "Reply with OK. You may reference {outputs.name} if it helps.";
 		mockPi.onCall({ output: "OK" });
