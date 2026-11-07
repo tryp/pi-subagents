@@ -1006,8 +1006,8 @@ export interface AsyncStatus {
 		watchdog?: ChildWatchdogProgress;
 		/**
 		 * Why the child failed, when the plain exit code hides it. `compacted_then_aborted`
-		 * means the child completed a context compaction and then died on the abort that
-		 * compaction caused, which is a harness-visible end rather than a crash.
+		 * means the child completed a context compaction and died on its abort before
+		 * recovery; `compacted_abort_after_resume` means the one continuation also aborted.
 		 */
 		failureKind?: AsyncStepFailureKind;
 		/** True when the failure kind is safe to retry without redoing the task blindly. */
@@ -1023,7 +1023,7 @@ export interface AsyncStatus {
 	outputs?: ChainOutputMap;
 }
 
-export type AsyncStepFailureKind = "compacted_then_aborted";
+export type AsyncStepFailureKind = "compacted_then_aborted" | "compacted_abort_after_resume";
 
 /**
  * What the end of a child transcript says about compaction.

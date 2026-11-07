@@ -138,6 +138,7 @@ export interface CompactedThenAbortedInput {
 	interrupted?: boolean;
 	tailEntryBudget?: number;
 	maxTailEntriesAfter?: number;
+	recoveryAttempted?: boolean;
 }
 
 export interface CompactionFailureDiagnosis {
@@ -161,7 +162,10 @@ export function classifyCompactedThenAborted(input: CompactedThenAbortedInput): 
 	const maxTailEntriesAfter = input.maxTailEntriesAfter ?? DEFAULT_MAX_TAIL_ENTRIES_AFTER_COMPACTION;
 	const failureKind =
 		compaction.occurred && compaction.completed && compaction.tailEntriesAfter <= maxTailEntriesAfter
-			? "compacted_then_aborted"
+			? input.recoveryAttempted ? "compacted_abort_after_resume" : "compacted_then_aborted"
 			: undefined;
-	return { compaction, ...(failureKind ? { failureKind, retryable: true } : {}) };
+	return {
+		compaction,
+		...(failureKind ? { failureKind, retryable: failureKind === "compacted_then_aborted" } : {}),
+	};
 }

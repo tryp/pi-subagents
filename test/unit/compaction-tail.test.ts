@@ -155,6 +155,28 @@ describe("classifyCompactedThenAborted", () => {
 		assert.equal(diagnosis.compaction?.tailEntriesAfter, 1);
 	});
 
+	it("classifies a second abort after the one recovery as non-retryable", () => {
+		const diagnosis = classifyCompactedThenAborted({
+			sessionFile: compactedSession(1),
+			error: "This operation was aborted\nCompaction-induced child abort could not be resumed safely: resume already attempted.",
+			exitCode: 1,
+			recoveryAttempted: true,
+		});
+		assert.equal(diagnosis.failureKind, "compacted_abort_after_resume");
+		assert.equal(diagnosis.retryable, false);
+	});
+
+	it("keeps a refused recovery as diagnosed retryable compacted_then_aborted", () => {
+		const diagnosis = classifyCompactedThenAborted({
+			sessionFile: compactedSession(1),
+			error: "This operation was aborted\\nCompaction-induced child abort could not be resumed safely: no useful prior progress.",
+			exitCode: 1,
+			recoveryAttempted: false,
+		});
+		assert.equal(diagnosis.failureKind, "compacted_then_aborted");
+		assert.equal(diagnosis.retryable, true);
+	});
+
 	it("does not classify an abort whose compaction is far from the end", () => {
 		const diagnosis = classifyCompactedThenAborted({
 			sessionFile: compactedSession(10),
