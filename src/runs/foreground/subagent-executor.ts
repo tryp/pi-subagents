@@ -2565,6 +2565,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 		return runSync(input.ctx.cwd, input.agents, task.agent, taskText, {
 			parentSessionId: input.ctx.sessionManager.getSessionId() ?? undefined,
 			cwd: taskCwd,
+			...(input.worktreeSetup ? { expectedWorktreeCwd: input.worktreeSetup.worktrees[index]!.agentCwd } : {}),
 			signal: input.signal,
 			interruptSignal: interruptController.signal,
 			allowIntercomDetach: agentConfig?.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,

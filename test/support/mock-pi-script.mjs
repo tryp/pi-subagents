@@ -168,6 +168,11 @@ function defaultResponse() {
 }
 
 function writeDeclaredFiles(response) {
+	if (typeof response.writeCwdTo === "string") {
+		const cwdTarget = path.resolve(process.cwd(), response.writeCwdTo);
+		fs.mkdirSync(path.dirname(cwdTarget), { recursive: true });
+		fs.writeFileSync(cwdTarget, process.cwd(), "utf-8");
+	}
 	if (!Array.isArray(response.writeFiles)) return;
 	for (const file of response.writeFiles) {
 		if (!file || typeof file.path !== "string" || typeof file.content !== "string") continue;

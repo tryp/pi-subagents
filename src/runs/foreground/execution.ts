@@ -1246,6 +1246,13 @@ export async function runSync(
 			error: `Unknown agent: ${agentName}`,
 		};
 	}
+	if (options.expectedWorktreeCwd) {
+		const resolvedCwd = path.resolve(options.cwd ?? runtimeCwd);
+		const expectedCwd = path.resolve(options.expectedWorktreeCwd);
+		if (resolvedCwd !== expectedCwd) {
+			return { agent: agentName, task, exitCode: 1, messages: [], usage: emptyUsage(), error: `Refusing to run child in unexpected cwd: expected worktree cwd ${expectedCwd}, resolved child cwd ${resolvedCwd}` };
+		}
+	}
 	const outputModeValidationError = validateFileOnlyOutputMode(options.outputMode, options.outputPath, `Single run (${agentName})`);
 	if (outputModeValidationError) {
 		return {

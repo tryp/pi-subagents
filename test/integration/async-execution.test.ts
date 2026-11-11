@@ -2216,7 +2216,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 	it("top-level async worktree parallel resolves reads against the worktree and output under project artifacts", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : process.platform === "win32" ? "worktree path separators unreliable on Windows CI" : undefined }, async () => {
 		const repoDir = createRepo("pi-subagent-async-worktree-");
 		try {
-			mockPi.onCall({ output: "Worktree report" });
+			mockPi.onCall({ output: "Worktree report", writeCwdTo: "observed-cwd.txt" });
 			const executor = createSubagentExecutor!({
 				pi: { events: createEventBus(), getSessionName: () => undefined },
 				state: { baseCwd: repoDir, currentSessionId: null, asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
@@ -2249,6 +2249,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			const taskArg = args.at(-1) ?? "";
 			assert.ok(taskArg.includes(`[Read from: ${path.join(worktreeCwd, "input.md")}]`));
 			assert.ok(taskArg.includes(`Write your findings to exactly this path: ${path.join(repoDir, ".pi-subagents", "artifacts", "outputs", asyncId, "report.md")}`));
+			assert.equal(fs.readFileSync(path.join(worktreeCwd, "observed-cwd.txt"), "utf-8"), worktreeCwd);
 			await waitForAsyncResultFile(asyncId, 90_000);
 		} finally {
 			removeTempDir(repoDir);

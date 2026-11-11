@@ -54,6 +54,20 @@ test("runSync rejects required context and deleted cwd before child startup", as
 	assert.match(result.error ?? "", /working directory .* is unavailable/);
 });
 
+test("runSync refuses a resolved execution cwd outside its allocated worktree", async () => {
+	await withTempDir(async (resolvedCwd) => {
+		await withTempDir(async (expectedCwd) => {
+			const result = await runSync(resolvedCwd, [{ name: "worker" } as AgentConfig], "worker", "task", {
+				runId: "worktree-cwd-mismatch-test",
+				cwd: resolvedCwd,
+				expectedWorktreeCwd: expectedCwd,
+			});
+			assert.equal(result.exitCode, 1);
+			assert.match(result.error ?? "", new RegExp(`expected worktree cwd ${expectedCwd}, resolved child cwd ${resolvedCwd}`));
+		});
+	});
+});
+
 test("async single preflights cwd and required context before creating recovery artifacts", async () => {
 	await withTempDir((cwd) => {
 		const runId = `context-preflight-${process.pid}-${Date.now()}`;

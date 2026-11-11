@@ -1004,6 +1004,7 @@ interface SingleStepContext {
 	outputs?: ChainOutputMap;
 	placeholder: string;
 	cwd: string;
+	expectedWorktreeCwd?: string;
 	sessionEnabled: boolean;
 	sessionDir?: string;
 	artifactsDir?: string;
@@ -1069,6 +1070,13 @@ async function runSingleStep(
 	acceptance?: import("../../shared/types.ts").AcceptanceLedger;
 }> {
 	const effectiveTimeoutMessage = step.timeoutMs !== undefined ? `Subagent timed out after ${step.timeoutMs}ms.` : ctx.timeoutMessage;
+	if (ctx.expectedWorktreeCwd) {
+		const resolvedChildCwd = path.resolve(step.cwd ?? ctx.cwd);
+		const expectedWorktreeCwd = path.resolve(ctx.expectedWorktreeCwd);
+		if (resolvedChildCwd !== expectedWorktreeCwd) {
+			return { agent: step.agent, output: "", exitCode: 1, error: `Refusing to run child in unexpected cwd: expected worktree cwd ${expectedWorktreeCwd}, resolved child cwd ${resolvedChildCwd}` };
+		}
+	}
 	if (step.importAsyncRoot) {
 		let importTimedOut = false;
 		let importStopped = false;
@@ -3436,7 +3444,9 @@ async function runSubagent(
 						flushPendingStepSteers(fi);
 
 						const singleResult = await runSingleStep(taskForRun, {
-							previousOutput, placeholder, cwd: taskCwd, sessionEnabled,
+							previousOutput, placeholder, cwd: taskCwd,
+							...(worktreeSetup ? { expectedWorktreeCwd: worktreeSetup.worktrees[taskIdx]!.agentCwd } : {}),
+							sessionEnabled,
 							outputs,
 							sessionDir: taskSessionDir,
 							artifactsDir, artifactConfig, id,

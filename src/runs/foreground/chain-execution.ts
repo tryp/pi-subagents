@@ -326,6 +326,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 			const result = await runSync(input.ctx.cwd, input.agents, task.agent, taskStr, {
 				parentSessionId: input.ctx.sessionManager.getSessionId() ?? undefined,
 				cwd: taskCwd,
+				...(input.worktreeSetup ? { expectedWorktreeCwd: input.worktreeSetup.worktrees[taskIndex]!.agentCwd } : {}),
 				signal: input.signal,
 				interruptSignal: interruptController.signal,
 				allowIntercomDetach: taskAgentConfig?.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
