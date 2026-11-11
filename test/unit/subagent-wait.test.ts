@@ -792,7 +792,8 @@ describe("subagent_wait tool", () => {
 				assert.equal(checkpoint?.suggestedActions.wait.runId, scenario.expectedRunId);
 				if (scenario.expectedRunId === undefined) {
 					assert.doesNotMatch(text, /action: "status", runId/, scenario.name);
-					assert.match(text, /Still active: run-a \(running\), run-b \(running\)/, scenario.name);
+					// Run names in the checkpoint text are not ordered; match either order.
+				assert.match(text, /Still active: run-a \(running\), run-b \(running\)|Still active: run-b \(running\), run-a \(running\)/, scenario.name);
 				} else {
 					assert.match(text, /action: "status", runId: "run-a"/, scenario.name);
 				}
