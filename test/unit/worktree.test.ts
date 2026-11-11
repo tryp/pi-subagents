@@ -5,11 +5,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import {
+	assertWorktreeChildCwd,
 	cleanupWorktrees,
 	createWorktrees,
 	findWorktreeTaskCwdConflict,
 	formatWorktreeSalvageNotice,
 	pruneExpiredSalvageRefs,
+	resolveParallelChildCwd,
 	resolveExpectedWorktreeAgentCwd,
 	type WorktreeSetup,
 } from "../../src/runs/shared/worktree.ts";
@@ -52,6 +54,22 @@ const hookScriptSkip = process.platform === "win32"
 	: undefined;
 
 describe("worktree", () => {
+	it("assigns parallel children to allocated worktree cwd", () => {
+		const worktreeCwd = path.join(os.tmpdir(), "allocated-child-worktree");
+		assert.equal(resolveParallelChildCwd("/parent", worktreeCwd), worktreeCwd);
+		assert.doesNotThrow(() => assertWorktreeChildCwd(resolveParallelChildCwd("/parent", worktreeCwd), worktreeCwd));
+	});
+
+	it("refuses a parallel child cwd that differs from its allocated worktree", () => {
+		assert.throws(
+			() => assertWorktreeChildCwd("/parent", "/allocated-worktree"),
+			/Refusing to run parallel child.*expected worktree cwd \/allocated-worktree, resolved child cwd \/parent/,
+		);
+	});
+
+	it("preserves parent cwd when a parallel child has no worktree allocation", () => {
+		assert.equal(resolveParallelChildCwd("/parent"), "/parent");
+	});
 	it("createWorktrees returns expected structure", () => {
 		const repoDir = createRepo("pi-worktree-structure-");
 		let setup: WorktreeSetup | undefined;

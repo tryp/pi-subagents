@@ -3,6 +3,19 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+export function assertWorktreeChildCwd(resolvedChildCwd: string, expectedWorktreeCwd: string): void {
+	const resolvedCwd = path.resolve(resolvedChildCwd);
+	const expectedCwd = path.resolve(expectedWorktreeCwd);
+	if (resolvedCwd !== expectedCwd) {
+		throw new Error(`Refusing to run parallel child in unexpected cwd: expected worktree cwd ${expectedCwd}, resolved child cwd ${resolvedCwd}`);
+	}
+}
+
+export function resolveParallelChildCwd(parentCwd: string, allocatedWorktreeCwd?: string): string {
+	if (!allocatedWorktreeCwd) return parentCwd;
+	return path.resolve(allocatedWorktreeCwd);
+}
+
 export interface WorktreeSetup {
 	cwd: string;
 	worktrees: WorktreeInfo[];

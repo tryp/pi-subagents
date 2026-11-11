@@ -97,6 +97,8 @@ import {
 	findWorktreeTaskCwdConflict,
 	formatWorktreeSalvageNotice,
 	formatWorktreeTaskCwdConflict,
+	assertWorktreeChildCwd,
+	resolveParallelChildCwd,
 	type WorktreeSalvageOutcome,
 	type WorktreeSetup,
 } from "../shared/worktree.ts";
@@ -1706,9 +1708,12 @@ function prepareParallelTaskRun(
 	taskIndex: number,
 ): { taskForRun: SubagentStep; taskCwd: string } {
 	if (!worktreeSetup) return { taskForRun: task, taskCwd: cwd };
+	const allocatedCwd = worktreeSetup.worktrees[taskIndex]!.agentCwd;
+	const taskCwd = resolveParallelChildCwd(cwd, allocatedCwd);
+	assertWorktreeChildCwd(taskCwd, allocatedCwd);
 	return {
 		taskForRun: { ...task, cwd: undefined },
-		taskCwd: worktreeSetup.worktrees[taskIndex]!.agentCwd,
+		taskCwd,
 	};
 }
 
