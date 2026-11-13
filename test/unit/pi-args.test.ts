@@ -22,6 +22,8 @@ import {
 	SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV,
 	SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV,
 	SUBAGENT_RUN_ID_ENV,
+	EXPECTED_WORKTREE_ROOT_ENV,
+	ALLOW_CROSS_PROJECT_WRITES_ENV,
 	applyThinkingSuffix,
 	buildPiArgs,
 } from "../../src/runs/shared/pi-args.ts";
@@ -41,6 +43,8 @@ const originalEnv = {
 	PI_SUBAGENT_PARENT_CAPABILITY_TOKEN: process.env.PI_SUBAGENT_PARENT_CAPABILITY_TOKEN,
 	PI_SUBAGENT_PARENT_SESSION: process.env.PI_SUBAGENT_PARENT_SESSION,
 	PI_SUBAGENT_RUN_ID: process.env.PI_SUBAGENT_RUN_ID,
+	PI_SUBAGENT_EXPECTED_WORKTREE_ROOT: process.env.PI_SUBAGENT_EXPECTED_WORKTREE_ROOT,
+	PI_SUBAGENT_ALLOW_CROSS_PROJECT_WRITES: process.env.PI_SUBAGENT_ALLOW_CROSS_PROJECT_WRITES,
 };
 const originalCwd = process.cwd();
 const tempRoots: string[] = [];
@@ -122,6 +126,27 @@ afterEach(() => {
 });
 
 describe("buildPiArgs session wiring", () => {
+	it("binds an assigned worktree into the child environment and installs its tool-call guard", () => {
+		const expectedCwd = path.resolve("tmp/assigned-lane");
+		const { args, env } = buildPiArgs({
+			baseArgs: ["-p"], task: "write only in assigned lane", sessionEnabled: false,
+			inheritProjectContext: true, inheritSkills: true,
+			expectedWorktreeRoot: expectedCwd,
+			allowCrossProjectWrites: true,
+			extensions: [],
+		});
+		assert.equal(env[EXPECTED_WORKTREE_ROOT_ENV], expectedCwd);
+		assert.equal(env[ALLOW_CROSS_PROJECT_WRITES_ENV], "1");
+		assert.ok(args.some((arg) => arg.endsWith("expected-worktree-guard.ts")), "the actual child Pi process must load the tool-call guard");
+	});
+
+	it("rejects an explicitly empty expected worktree root before child launch", () => {
+		assert.throws(() => buildPiArgs({
+			baseArgs: ["-p"], task: "must fail closed", sessionEnabled: false,
+			inheritProjectContext: true, inheritSkills: true, expectedWorktreeRoot: "",
+		}), /expectedWorktreeRoot must be a non-empty absolute Git worktree root/);
+	});
+
 	it("reuses the existing --session file when building a continuation attempt", () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-args-session-"));
 		try {

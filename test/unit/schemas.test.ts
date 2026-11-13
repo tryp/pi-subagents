@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 type JsonSchemaNode = Record<string, unknown>;
 
 interface SubagentParamsSchema {
-	properties?: {
+	properties?: Record<string, any> & {
 		context?: {
 			type?: string;
 			enum?: string[];
@@ -12,14 +12,18 @@ interface SubagentParamsSchema {
 		};
 		tasks?: {
 			items?: {
-				properties?: {
+				properties?: Record<string, any> & {
 					count?: {
 						minimum?: number;
 						description?: string;
 					};
+					expectedWorktreeRoot?: { type?: string; minLength?: number };
+					allowCrossProjectWrites?: { type?: string };
 				};
 			};
 		};
+		expectedWorktreeRoot?: { type?: string; minLength?: number };
+		allowCrossProjectWrites?: { type?: string };
 		concurrency?: {
 			minimum?: number;
 			description?: string;
@@ -121,7 +125,7 @@ let schemas: Record<string, JsonSchemaNode> = {};
 let SubagentParams: SubagentParamsSchema | undefined;
 let schemasAvailable = true;
 try {
-	schemas = await import("../../src/extension/schemas.ts") as Record<string, JsonSchemaNode>;
+	schemas = await import("../../src/extension/schemas.ts") as unknown as Record<string, JsonSchemaNode>;
 	SubagentParams = schemas.SubagentParams as SubagentParamsSchema;
 } catch (error) {
 	if (missingPackageName(error) !== "typebox") throw error;
@@ -199,6 +203,11 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 	});
 
 	it("includes subagent control fields", () => {
+		assert.equal(SubagentParams?.properties?.expectedWorktreeRoot?.type, "string");
+		assert.equal(SubagentParams?.properties?.expectedWorktreeRoot?.minLength, 1);
+		assert.equal(SubagentParams?.properties?.allowCrossProjectWrites?.type, "boolean");
+		assert.equal(SubagentParams?.properties?.tasks?.items?.properties?.expectedWorktreeRoot?.type, "string");
+		assert.equal(SubagentParams?.properties?.chain?.items?.properties?.expectedWorktreeRoot?.type, "string");
 		const idSchema = SubagentParams?.properties?.id;
 		assert.ok(idSchema, "id schema should exist");
 		assert.equal(idSchema.type, "string");
@@ -310,7 +319,9 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.ok(SubagentParams, "SubagentParams schema should exist");
 		const schema = SubagentParams as unknown as JsonSchemaNode;
 		const serialized = JSON.stringify(schema);
-		assert.ok(serialized.length < 16_000, `expected compact schema under 16k chars, got ${serialized.length}`);
+		// The expected-worktree binding is carried through five caller shapes;
+		// retain a hard 16 KiB payload ceiling while exposing that safety contract.
+		assert.ok(serialized.length < 16_384, `expected compact schema under 16 KiB, got ${serialized.length}`);
 		assert.equal(serialized.includes('"$ref"'), false);
 		assert.equal(serialized.includes('"$defs"'), false);
 		assert.equal(serialized.split("Optional acceptance policy.").length - 1, 1);
@@ -517,6 +528,8 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 			{ tasks: [{ agent: "worker", task: "Fix", toolBudget: { hard: 3 } }] },
 			{ chain: [{ agent: "worker", toolBudget: { hard: 3 } }] },
 			{ chain: [{ parallel: [{ agent: "worker", toolBudget: { hard: 3 } }] }] },
+			{ tasks: [{ agent: "worker", task: "Fix", expectedWorktreeRoot: "/work/lane", allowCrossProjectWrites: true }] },
+			{ chain: [{ expand: { from: { output: "targets", path: "/items" }, maxItems: 4 }, parallel: { agent: "worker", expectedWorktreeRoot: "/work/lane", allowCrossProjectWrites: true }, collect: { as: "reviews" } }] },
 		];
 		const invalidValues = [
 			{ skill: 123 },
@@ -524,6 +537,9 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 			{ skill: [123] },
 			{ output: 123 },
 			{ timeoutMs: 0 },
+			{ agent: "worker", task: "Fix", expectedWorktreeRoot: "" },
+			{ tasks: [{ agent: "worker", task: "Fix", expectedWorktreeRoot: "" }] },
+			{ chain: [{ expand: { from: { output: "targets", path: "/items" }, maxItems: 4 }, parallel: { agent: "worker", expectedWorktreeRoot: "" }, collect: { as: "reviews" } }] },
 			{ tasks: [{ agent: "reviewer", task: "check this", reads: "input.md" }] },
 			{ chain: [{ parallel: [{ agent: "reviewer", output: 123 }] }] },
 			{ chain: [{ parallel: [{ agent: "reviewer", reads: "input.md" }] }] },

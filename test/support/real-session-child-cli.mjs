@@ -97,6 +97,7 @@ async function main() {
 	const parsed = parseArgs(process.argv.slice(2));
 	const responseText = process.env.PI_SUBAGENTS_E2E_CHILD_TEXT ?? "CHILD_REAL_SESSION_OK";
 	const reportChildTools = process.env.PI_SUBAGENTS_E2E_REPORT_CHILD_TOOLS === "1";
+	const writePath = process.env.PI_SUBAGENTS_E2E_CHILD_WRITE_PATH;
 	const cwd = process.cwd();
 	const ownedAgentDir = process.env.PI_CODING_AGENT_DIR
 		? undefined
@@ -125,7 +126,13 @@ async function main() {
 	faux.setResponses([
 		() => process.env.PI_SUBAGENT_STRUCTURED_OUTPUT_CAPTURE
 			? fauxAssistantMessage(fauxToolCall("structured_output", { value: { marker: "STRUCTURED_OUTPUT_OK" } }), { stopReason: "toolUse" })
-			: fauxAssistantMessage(fauxText(reportChildTools ? `ACTIVE_TOOLS:${session?.getActiveToolNames().sort().join(",") ?? ""}` : responseText), { stopReason: "stop" }),
+			: writePath
+				? fauxAssistantMessage(fauxToolCall("write", { path: writePath, content: "EXPECTED_WORKTREE_WRITE_MARKER" }), { stopReason: "toolUse" })
+				: fauxAssistantMessage(fauxText(reportChildTools ? `ACTIVE_TOOLS:${session?.getActiveToolNames().sort().join(",") ?? ""}` : responseText), { stopReason: "stop" }),
+		(context) => {
+			const result = [...context.messages].reverse().find((message) => message.role === "toolResult");
+			return fauxAssistantMessage(fauxText(`WRITE_TOOL_RESULT:${JSON.stringify(result?.content ?? [])}`), { stopReason: "stop" });
+		},
 	]);
 
 	const settingsManager = SettingsManager.inMemory({

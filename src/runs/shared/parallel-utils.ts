@@ -17,6 +17,8 @@ export interface RunnerSubagentStep {
 	/** Exact invocation-level preamble shared by every child/step. */
 	sharedContext?: string;
 	cwd?: string;
+	/** Independent assigned worktree root for the child tool-boundary guard. */
+	expectedWorktreeRoot?: string;
 	/** Isolate this single step in a dedicated git worktree, created and cleaned up by the runner. */
 	worktree?: boolean;
 	model?: string;
@@ -54,6 +56,7 @@ export interface RunnerSubagentStep {
 	acceptanceRole?: import("../../shared/types.ts").AcceptanceRole;
 	toolBudget?: import("../../shared/types.ts").ResolvedToolBudget;
 	rlimits?: import("../../shared/types.ts").ResolvedRlimits;
+	allowCrossProjectWrites?: boolean;
 }
 
 export interface ParallelStepGroup {

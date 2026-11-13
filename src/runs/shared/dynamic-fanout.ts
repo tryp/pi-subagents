@@ -52,6 +52,7 @@ const RUNNER_DYNAMIC_PARALLEL_KEYS = new Set([
 	"outputName", "structured", "inheritProjectContext", "inheritSkills", "skills", "outputPath", "namespaceOutputPath", "maxSubagentDepth", "waitToolEnabled",
 	"structuredOutput", "structuredOutputSchema", "tools", "extensions", "subagentOnlyExtensions", "mcpDirectTools", "completionGuard", "systemPrompt",
 	"systemPromptMode", "thinking", "modelCandidates", "sessionFile", "effectiveAcceptance", "acceptanceInput", "acceptanceRole", "parentSessionId",
+	"expectedWorktreeRoot", "allowCrossProjectWrites",
 	// Recorded by the runner at launch, never supplied by a chain author: the internal
 	// step shape carries it through from resolution to status.json.
 	"modelResolution",

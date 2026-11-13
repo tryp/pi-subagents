@@ -16,6 +16,7 @@ import { WAIT_TOOL_ENABLED_ENV } from "../background/wait-config.ts";
 const TASK_ARG_LIMIT = 8000;
 const PROMPT_RUNTIME_EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "subagent-prompt-runtime.ts");
 const FANOUT_CHILD_EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "extension", "fanout-child.ts");
+const EXPECTED_WORKTREE_GUARD_EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "extensions", "expected-worktree-guard.ts");
 export const SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD";
 export const SUBAGENT_ORCHESTRATOR_TARGET_ENV = "PI_SUBAGENT_ORCHESTRATOR_TARGET";
 export const SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV = "PI_SUBAGENT_ORCHESTRATOR_SESSION_ID";
@@ -33,6 +34,8 @@ export const SUBAGENT_PARENT_DEPTH_ENV = "PI_SUBAGENT_PARENT_DEPTH";
 export const SUBAGENT_PARENT_PATH_ENV = "PI_SUBAGENT_PARENT_PATH";
 export const SUBAGENT_PARENT_CAPABILITY_TOKEN_ENV = "PI_SUBAGENT_PARENT_CAPABILITY_TOKEN";
 export const SUBAGENT_PARENT_SESSION_ENV = "PI_SUBAGENT_PARENT_SESSION";
+export const EXPECTED_WORKTREE_ROOT_ENV = "PI_SUBAGENT_EXPECTED_WORKTREE_ROOT";
+export const ALLOW_CROSS_PROJECT_WRITES_ENV = "PI_SUBAGENT_ALLOW_CROSS_PROJECT_WRITES";
 export const SUBAGENT_STEER_INBOX_ENV = "PI_SUBAGENT_STEER_INBOX";
 export const SUBAGENT_STEER_CAPABILITY_ENV = "PI_SUBAGENT_STEER_CAPABILITY";
 export const SUBAGENT_STEER_ACK_DIR_ENV = "PI_SUBAGENT_STEER_ACK_DIR";
@@ -82,6 +85,8 @@ interface BuildPiArgsInput {
 	rlimits?: ResolvedRlimits;
 	childWatchdog?: ChildWatchdogConfig;
 	waitToolEnabled?: boolean;
+	expectedWorktreeRoot?: string;
+	allowCrossProjectWrites?: boolean;
 }
 
 interface BuildPiArgsResult {
@@ -110,6 +115,9 @@ export function applyThinkingSuffix(model: string | undefined, thinking: string 
 
 export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 	const args = [...input.baseArgs];
+	if (input.expectedWorktreeRoot !== undefined && !input.expectedWorktreeRoot.trim()) {
+		throw new Error("expectedWorktreeRoot must be a non-empty absolute Git worktree root");
+	}
 
 	if (input.sessionFile) {
 		fs.mkdirSync(path.dirname(input.sessionFile), { recursive: true });
@@ -156,6 +164,7 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 	const runtimeExtensions = fanoutAuthorized
 		? [PROMPT_RUNTIME_EXTENSION_PATH, FANOUT_CHILD_EXTENSION_PATH]
 		: [PROMPT_RUNTIME_EXTENSION_PATH];
+	if (input.expectedWorktreeRoot !== undefined) runtimeExtensions.push(EXPECTED_WORKTREE_GUARD_EXTENSION_PATH);
 	if (input.extensions !== undefined) {
 		args.push("--no-extensions");
 		for (const extPath of [...new Set([...runtimeExtensions, ...toolExtensionPaths, ...input.extensions, ...(input.subagentOnlyExtensions ?? [])])]) {
@@ -192,6 +201,11 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 	}
 
 	const env: Record<string, string | undefined> = {};
+	if (input.expectedWorktreeRoot !== undefined) {
+		if (!path.isAbsolute(input.expectedWorktreeRoot)) throw new Error("expectedWorktreeRoot must be a non-empty absolute Git worktree root");
+		env[EXPECTED_WORKTREE_ROOT_ENV] = path.resolve(input.expectedWorktreeRoot);
+		env[ALLOW_CROSS_PROJECT_WRITES_ENV] = input.allowCrossProjectWrites ? "1" : "0";
+	}
 	let toolDiagnosticPath: string | undefined;
 	if (requiredChildTools.length > 0) {
 		if (!tempDir) tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-"));

@@ -175,6 +175,8 @@ interface AsyncSingleParams {
 	agentConfig: AgentConfig;
 	ctx: AsyncExecutionContext;
 	cwd?: string;
+	expectedWorktreeRoot?: string;
+	allowCrossProjectWrites?: boolean;
 	maxOutput?: MaxOutputConfig;
 	artifactsDir?: string;
 	artifactConfig: ArtifactConfig;
@@ -709,6 +711,8 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			contextFiles: s.contextFiles,
 			...(params.sharedContext ? { sharedContext: params.sharedContext } : {}),
 			cwd: stepCwd,
+			...(s.expectedWorktreeRoot ? { expectedWorktreeRoot: s.expectedWorktreeRoot } : {}),
+			...("allowCrossProjectWrites" in s && s.allowCrossProjectWrites === true ? { allowCrossProjectWrites: true } : {}),
 			model,
 			thinking: resolveEffectiveThinking(model, effectiveThinking),
 			modelResolution: {
@@ -1299,7 +1303,9 @@ export function executeAsyncSingle(
 						task: taskWithOutputInstruction,
 						contextFiles: params.contextFiles,
 						cwd: runnerCwd,
-		 						model,
+						expectedWorktreeRoot: params.expectedWorktreeRoot,
+						allowCrossProjectWrites: params.allowCrossProjectWrites,
+						model,
 						thinking: resolveEffectiveThinking(model, effectiveThinking),
 						modelResolution,
 						modelCandidates: (params.modelCandidatesOverride

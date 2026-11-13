@@ -143,6 +143,8 @@ interface TaskParam {
 	toolBudget?: ToolBudgetConfig;
 	rlimits?: RlimitsConfig;
 	timeoutMs?: number;
+	expectedWorktreeRoot?: string;
+	allowCrossProjectWrites?: boolean;
 }
 
 export interface SubagentParamsLike {
@@ -164,6 +166,8 @@ export interface SubagentParamsLike {
 	concurrency?: number;
 	worktree?: boolean;
 	strictCwd?: boolean;
+	expectedWorktreeRoot?: string;
+	allowCrossProjectWrites?: boolean;
 	context?: "fresh" | "fork";
 	async?: boolean;
 	foregroundOnly?: boolean;
@@ -2071,6 +2075,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			...(task.toolBudget !== undefined ? { toolBudget: task.toolBudget } : {}),
 			...(task.rlimits !== undefined ? { rlimits: task.rlimits } : {}),
 			...(task.acceptance !== undefined ? { acceptance: task.acceptance } : {}),
+			...(task.expectedWorktreeRoot ? { expectedWorktreeRoot: task.expectedWorktreeRoot } : {}),
+			...(task.allowCrossProjectWrites ? { allowCrossProjectWrites: true } : {}),
 		}));
 		const result = executeAsyncChain(id, {
 			chain: [{
@@ -2195,6 +2201,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			ctx: asyncCtx,
 			availableModels,
 			cwd: effectiveCwd,
+			expectedWorktreeRoot: params.expectedWorktreeRoot,
+			allowCrossProjectWrites: params.allowCrossProjectWrites,
 			forked: shouldForkAgent(contextPolicy, params.agent!),
 			maxOutput: params.maxOutput,
 			artifactsDir: artifactConfig.enabled ? artifactsDir : undefined,
@@ -2613,6 +2621,8 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			parentSessionId: input.ctx.sessionManager.getSessionId() ?? undefined,
 			cwd: taskCwd,
 			...(input.worktreeSetup ? { expectedWorktreeCwd: input.worktreeSetup.worktrees[index]!.agentCwd } : {}),
+			...(task.expectedWorktreeRoot ? { expectedWorktreeRoot: task.expectedWorktreeRoot } : {}),
+			...(task.allowCrossProjectWrites ? { allowCrossProjectWrites: true } : {}),
 			signal: input.signal,
 			interruptSignal: interruptController.signal,
 			allowIntercomDetach: agentConfig?.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
@@ -3399,6 +3409,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 	const r = await runSync(ctx.cwd, agents, params.agent!, task, {
 		parentSessionId: ctx.sessionManager.getSessionId() ?? undefined,
 		cwd: effectiveCwd,
+		expectedWorktreeRoot: params.expectedWorktreeRoot,
+		allowCrossProjectWrites: params.allowCrossProjectWrites,
 		signal,
 		interruptSignal: interruptController.signal,
 		allowIntercomDetach: agentConfig.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,

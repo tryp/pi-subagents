@@ -1251,6 +1251,8 @@ export interface RunSyncOptions {
 	parentSessionId?: string;
 	cwd?: string;
 	expectedWorktreeCwd?: string;
+	expectedWorktreeRoot?: string;
+	allowCrossProjectWrites?: boolean;
 	signal?: AbortSignal;
 	interruptSignal?: AbortSignal;
 	timeoutMs?: number;

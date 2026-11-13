@@ -327,6 +327,8 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				parentSessionId: input.ctx.sessionManager.getSessionId() ?? undefined,
 				cwd: taskCwd,
 				...(input.worktreeSetup ? { expectedWorktreeCwd: input.worktreeSetup.worktrees[taskIndex]!.agentCwd } : {}),
+				...(task.expectedWorktreeRoot ? { expectedWorktreeRoot: task.expectedWorktreeRoot } : {}),
+				...(task.allowCrossProjectWrites ? { allowCrossProjectWrites: true } : {}),
 				signal: input.signal,
 				interruptSignal: interruptController.signal,
 				allowIntercomDetach: taskAgentConfig?.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
@@ -1241,6 +1243,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 			const r = await runSync(ctx.cwd, agents, seqStep.agent, stepTask, {
 				parentSessionId: ctx.sessionManager.getSessionId() ?? undefined,
 				cwd: resolveChildCwd(cwd ?? ctx.cwd, seqStep.cwd),
+				expectedWorktreeRoot: seqStep.expectedWorktreeRoot,
+				allowCrossProjectWrites: seqStep.allowCrossProjectWrites,
 				signal,
 				interruptSignal: interruptController.signal,
 				allowIntercomDetach: agentConfig.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
