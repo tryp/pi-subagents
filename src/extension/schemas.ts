@@ -290,11 +290,12 @@ const SubagentParamsSchema = Type.Object({
 		],
 		description: "Agent/chain config for create/update. Object or JSON string; presence of steps creates a chain."
 	})),
-	tasks: Type.Optional(Type.Array(TaskItem, { description: "PARALLEL mode: [{agent, task, count?, output?, outputMode?, reads?, progress?}, ...]" })),
+	tasks: Type.Optional(Type.Array(TaskItem, { description: "Parallel tasks: [{agent, task, cwd?, output?, reads?, progress?}, ...]" })),
 	concurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Top-level PARALLEL mode only: max concurrent tasks. Defaults to config.parallel.concurrency or 4." })),
 	worktree: Type.Optional(Type.Boolean({
-		description: "Create isolated git worktrees for parallel tasks; requires clean git state."
+		description: "Isolate parallel tasks in git worktrees; requires a clean tree."
 	})),
+	strictCwd: Type.Optional(Type.Boolean()),
 	chain: Type.Optional(Type.Array(ChainItem, { description: "CHAIN mode: sequential steps; each result becomes {previous}. append-step takes one tail step and may use {chain_dir}/{outputs.name}." })),
 	batchStability: Type.Optional(BatchStabilitySchema),
 	context: Type.Optional(Type.String({

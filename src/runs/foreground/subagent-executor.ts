@@ -46,6 +46,8 @@ import { resolveCurrentSessionId } from "../../shared/session-identity.ts";
 import { applyIntercomBridgeToAgent, INTERCOM_BRIDGE_MARKER, resolveIntercomBridge, resolveIntercomSessionTarget, resolveSubagentIntercomTarget, type IntercomBridgeState } from "../../intercom/intercom-bridge.ts";
 import { formatControlIntercomMessage, formatControlNoticeMessage, resolveControlConfig, shouldNotifyControlEvent } from "../shared/subagent-control.ts";
 import { resolveTurnBudgetConfig } from "../shared/turn-budget.ts";
+import { CwdClaimRegistry, type CwdClaimRequest } from "../shared/cwd-claims.ts";
+import { resolveExpectedWorktreeAgentCwd } from "../shared/worktree.ts";
 import { formatSpawnBudget, getSpawnBudgetSnapshot, grantSpawnBudget, preflightSpawnBudget, preflightSpawnBudgetGrant, reserveSpawnBudget } from "../shared/spawn-budget.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
 import { validateRlimitsConfig, rlimitsEnforceabilityError } from "../shared/rlimits.ts";
@@ -161,6 +163,7 @@ export interface SubagentParamsLike {
 	tasks?: TaskParam[];
 	concurrency?: number;
 	worktree?: boolean;
+	strictCwd?: boolean;
 	context?: "fresh" | "fork";
 	async?: boolean;
 	foregroundOnly?: boolean;
@@ -2052,6 +2055,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 	const childIntercomTarget = intercomBridge.active ? (agent: string, index: number) => resolveSubagentIntercomTarget(id, agent, index) : undefined;
 
 	if (hasTasks && params.tasks) {
+		const claimError = registerAsyncCwdClaims(deps, { runId: id, params, cwd: effectiveCwd, parentCwd: ctx.cwd });
+		if (claimError) return buildParallelModeError(claimError);
 		const skillOverrides = params.tasks.map((task) => normalizeSkillInput(task.skill));
 		const parallelTasks = params.tasks.map((task, index) => ({
 			agent: task.agent,
@@ -2067,7 +2072,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			...(task.rlimits !== undefined ? { rlimits: task.rlimits } : {}),
 			...(task.acceptance !== undefined ? { acceptance: task.acceptance } : {}),
 		}));
-		return executeAsyncChain(id, {
+		const result = executeAsyncChain(id, {
 			chain: [{
 				parallel: parallelTasks,
 				concurrency: resolveTopLevelParallelConcurrency(params.concurrency, deps.config.parallel?.concurrency),
@@ -2107,6 +2112,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			configToolBudget: data.configToolBudget,
 			globalConcurrencyLimit: deps.config.globalConcurrencyLimit,
 		});
+		return finishAsyncCwdClaims(deps, id, result);
 	}
 
 	if (hasChain && params.chain) {
@@ -2114,7 +2120,9 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 		const chainSkills = normalized === false ? [] : (normalized ?? []);
 		const rawChain = params.chain as ChainStep[];
 		const chain = wrapChainTasksForFork(rawChain, contextPolicy);
-		return executeAsyncChain(id, {
+		const claimError = registerAsyncCwdClaims(deps, { runId: id, params, cwd: effectiveCwd, parentCwd: ctx.cwd });
+		if (claimError) return formatAsyncStartError("chain", claimError);
+		const result = executeAsyncChain(id, {
 			chain,
 			forked: contextPolicy.usesFork,
 			forkedAgents,
@@ -2151,6 +2159,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			configToolBudget: data.configToolBudget,
 			globalConcurrencyLimit: deps.config.globalConcurrencyLimit,
 		});
+		return finishAsyncCwdClaims(deps, id, result);
 	}
 
 	if (hasSingle) {
@@ -2168,6 +2177,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 		const normalizedSkills = normalizeSkillInput(params.skill);
 		const skills = normalizedSkills === false ? [] : normalizedSkills;
 		const maxSubagentDepth = resolveChildMaxSubagentDepth(currentMaxSubagentDepth, a.maxSubagentDepth);
+		const claimError = registerAsyncCwdClaims(deps, { runId: id, params, cwd: effectiveCwd, parentCwd: ctx.cwd });
+		if (claimError) return formatAsyncStartError("single", claimError);
 		const modelOverride = resolveEffectiveSubagentModel(
 			params.model as string | undefined,
 			a.model,
@@ -2176,7 +2187,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			currentProvider,
 			{ scope: data.modelScope, forked: shouldForkAgent(contextPolicy, params.agent!), agentModelFromDefault: isDefaultedAgentModel(a.modelSource) },
 		);
-		return executeAsyncSingle(id, {
+		const result = executeAsyncSingle(id, {
 			agent: params.agent!,
 			task: shouldForkAgent(contextPolicy, params.agent!) ? wrapForkTask(params.task ?? "") : (params.task ?? ""),
 			goal: params.task ?? "",
@@ -2214,6 +2225,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			configRlimits: data.configRlimits,
 			configToolBudget: data.configToolBudget,
 		});
+		return finishAsyncCwdClaims(deps, id, result);
 	}
 
 	return null;
@@ -2247,6 +2259,37 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 	const chain = wrapChainTasksForFork(params.chain as ChainStep[], contextPolicy);
 	const forkedAgents = agents.filter((candidate) => shouldForkAgent(contextPolicy, candidate.name)).map((candidate) => candidate.name);
 	const currentMaxSubagentDepth = resolveCurrentMaxSubagentDepth(deps.config.maxSubagentDepth);
+	const chainClaimRequests: CwdClaimRequest[] = [];
+	let chainChildIndex = 0;
+	let chainHasWorktree = false;
+	for (let stepIndex = 0; stepIndex < (params.chain?.length ?? 0); stepIndex++) {
+		const step = params.chain![stepIndex]!;
+		const stepCwd = "cwd" in step && typeof step.cwd === "string" ? resolveChildCwd(effectiveCwd, step.cwd) : effectiveCwd;
+		const stepWorktree = "worktree" in step && step.worktree === true;
+		chainHasWorktree ||= stepWorktree;
+		if ("parallel" in step && Array.isArray(step.parallel)) {
+			step.parallel.forEach((task, taskIndex) => {
+				const cwd = stepWorktree
+					? resolveExpectedWorktreeAgentCwd(stepCwd, `${runId}-s${stepIndex}`, taskIndex, deps.config.worktreeBaseDir)
+					: resolveChildCwd(stepCwd, "cwd" in task && typeof task.cwd === "string" ? task.cwd : undefined);
+				chainClaimRequests.push({ runId, childIndex: chainChildIndex++, cwd, claimsFile: path.join(sessionRoot, "claims.jsonl") });
+			});
+		} else if (isDynamicParallelStep(step)) {
+			const maxItems = step.expand.maxItems ?? deps.config.chain?.dynamicFanout?.maxItems ?? 0;
+			for (let index = 0; index < maxItems; index++) chainClaimRequests.push({ runId, childIndex: chainChildIndex++, cwd: resolveChildCwd(stepCwd, step.parallel.cwd), claimsFile: path.join(sessionRoot, "claims.jsonl") });
+		} else if ("agent" in step && step.agent) {
+			chainClaimRequests.push({ runId, childIndex: chainChildIndex++, cwd: stepCwd, claimsFile: path.join(sessionRoot, "claims.jsonl") });
+		}
+	}
+	const chainClaimResult = claimCwds(deps, {
+		runId,
+		requests: chainClaimRequests,
+		parentCwd: ctx.cwd,
+		parentRunId: deps.state.currentSessionId ? `parent:${deps.state.currentSessionId}` : "parent session",
+		strict: chainHasWorktree || params.strictCwd === true,
+	});
+	for (const warning of chainClaimResult.warnings) console.warn(`pi-subagents: ${warning}`);
+	if (chainClaimResult.error) return formatAsyncStartError("chain", chainClaimResult.error);
 	const chainResult = await executeChain({
 		chain,
 		task: params.task,
@@ -2292,6 +2335,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		configToolBudget: data.configToolBudget,
 		globalConcurrencyLimit: deps.config.globalConcurrencyLimit,
 	});
+	deps.state.cwdClaims?.releaseRun(runId, signal.aborted ? "stopped" : "completed");
 
 	if (chainResult.requestedAsync) {
 		if (!isAsyncAvailable()) {
@@ -2315,7 +2359,9 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		const rawAsyncChain = chainResult.requestedAsync.chain;
 		const asyncChain = wrapChainTasksForFork(rawAsyncChain, contextPolicy);
 		const firstAgent = firstChainAgent(rawAsyncChain);
-		return executeAsyncChain(id, {
+		const claimError = registerAsyncCwdClaims(deps, { runId: id, params: { ...params, chain: rawAsyncChain }, cwd: effectiveCwd, parentCwd: ctx.cwd });
+		if (claimError) return formatAsyncStartError("chain", claimError);
+		const asyncResult = executeAsyncChain(id, {
 			chain: asyncChain,
 			forked: contextPolicy.usesFork,
 			forkedAgents,
@@ -2352,6 +2398,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 			configToolBudget: data.configToolBudget,
 			globalConcurrencyLimit: deps.config.globalConcurrencyLimit,
 		});
+		return finishAsyncCwdClaims(deps, id, asyncResult);
 	}
 
 	const rawChainDetails = chainResult.details ? { ...chainResult.details, runId } : undefined;
@@ -2645,6 +2692,81 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 	}, input.globalSemaphore);
 }
 
+function formatAsyncStartError(mode: SubagentRunMode, message: string): AgentToolResult<Details> {
+	return { content: [{ type: "text", text: message }], isError: true, details: { mode, results: [] } } as AgentToolResult<Details>;
+}
+
+function liveCwdClaimRunIds(state: SubagentState): Set<string> {
+	const activeAsync = [...(state.asyncJobs?.entries() ?? [])].filter(([, job]) => job.status === "queued" || job.status === "running").map(([id]) => id);
+	const activeFleet = [...(state.fleetJobs?.entries() ?? [])].filter(([, job]) => job.status === "queued" || job.status === "running").map(([id]) => id);
+	return new Set([...activeAsync, ...activeFleet, ...(state.foregroundControls?.keys() ?? [])]);
+}
+
+function claimCwds(
+	deps: ExecutorDeps,
+	input: { runId: string; requests: CwdClaimRequest[]; parentCwd: string; parentRunId?: string; strict: boolean },
+) {
+	const registry = deps.state.cwdClaims ??= new CwdClaimRegistry();
+	const liveRunIds = liveCwdClaimRunIds(deps.state);
+	liveRunIds.add(input.runId);
+	return registry.claim({
+		requests: input.requests,
+		liveRunIds,
+		strict: input.strict,
+		parentCwd: input.parentCwd,
+		parentRunId: input.parentRunId,
+	});
+}
+
+function registerAsyncCwdClaims(
+	deps: ExecutorDeps,
+	input: { runId: string; params: SubagentParamsLike; cwd: string; parentCwd: string },
+): string | undefined {
+	const requests: CwdClaimRequest[] = [];
+	let strict = input.params.worktree === true || input.params.strictCwd === true;
+	const add = (childIndex: number, cwd: string, worktree: boolean, stepId = input.runId, worktreeIndex = childIndex) => {
+		if (worktree) strict = true;
+		const childBaseCwd = resolveChildCwd(input.cwd, cwd);
+		const resolved = worktree ? resolveExpectedWorktreeAgentCwd(childBaseCwd, stepId, worktreeIndex, deps.config.worktreeBaseDir) : childBaseCwd;
+		requests.push({ runId: input.runId, childIndex, cwd: resolved, claimsFile: path.join(ASYNC_DIR, input.runId, "claims.jsonl") });
+	};
+	if (input.params.tasks?.length) {
+		input.params.tasks.forEach((task, index) => add(index, task.cwd ?? input.cwd, input.params.worktree === true, input.params.worktree ? `${input.runId}-s0` : input.runId));
+	} else if (input.params.chain?.length) {
+		let childIndex = 0;
+		input.params.chain.forEach((step, stepIndex) => {
+			const stepCwd = "cwd" in step && typeof step.cwd === "string" ? step.cwd : input.cwd;
+			const stepWorktree = "worktree" in step && step.worktree === true;
+			if ("parallel" in step && Array.isArray(step.parallel)) step.parallel.forEach((task, taskIndex) => add(childIndex++, "cwd" in task && typeof task.cwd === "string" ? task.cwd : stepCwd, stepWorktree, `${input.runId}-s${stepIndex}`, taskIndex));
+			else if (isDynamicParallelStep(step)) {
+				const maxItems = step.expand.maxItems ?? deps.config.chain?.dynamicFanout?.maxItems ?? 0;
+				for (let index = 0; index < maxItems; index++) add(childIndex++, step.parallel.cwd ?? stepCwd, false, `${input.runId}-s${stepIndex}`, index);
+			} else if ("agent" in step && step.agent) add(childIndex++, stepCwd, stepWorktree, `${input.runId}-s${stepIndex}`, 0);
+		});
+	} else if (input.params.agent) add(0, input.cwd, input.params.worktree === true);
+	if (!requests.length) return undefined;
+	const result = claimCwds(deps, {
+		runId: input.runId,
+		requests,
+		parentCwd: input.parentCwd,
+		parentRunId: deps.state.currentSessionId ? `parent:${deps.state.currentSessionId}` : "parent session",
+		strict,
+	});
+	for (const warning of result.warnings) console.warn(`pi-subagents: ${warning}`);
+	if (result.error) return result.error;
+	const asyncDir = path.join(ASYNC_DIR, input.runId);
+	deps.state.asyncJobs.set(input.runId, { asyncId: input.runId, asyncDir, status: "running", startedAt: Date.now(), updatedAt: Date.now() });
+	return undefined;
+}
+
+function finishAsyncCwdClaims(deps: ExecutorDeps, runId: string, result: AgentToolResult<Details>): AgentToolResult<Details> {
+	if ((result as AgentToolResult<Details> & { isError?: boolean }).isError) {
+		deps.state.cwdClaims?.releaseRun(runId, "failed-to-start");
+		deps.state.asyncJobs.delete(runId);
+	}
+	return result;
+}
+
 async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): Promise<AgentToolResult<Details>> {
 	const {
 		params,
@@ -2794,6 +2916,8 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 				};
 			}
 			const id = randomUUID();
+			const claimError = registerAsyncCwdClaims(deps, { runId: id, params, cwd: effectiveCwd, parentCwd: ctx.cwd });
+			if (claimError) return buildParallelModeError(claimError);
 			const asyncCtx = {
 				pi: deps.pi,
 				cwd: ctx.cwd,
@@ -2823,7 +2947,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 					...(t.timeoutMs !== undefined ? { timeoutMs: t.timeoutMs } : {}),
 				};
 			});
-			return executeAsyncChain(id, {
+			const result = executeAsyncChain(id, {
 				chain: [{ parallel: parallelTasks, concurrency: parallelConcurrency, worktree: params.worktree }],
 				forked: contextPolicy.usesFork,
 				forkedAgents,
@@ -2853,6 +2977,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 				turnBudget: data.turnBudget,
 				globalConcurrencyLimit: deps.config.globalConcurrencyLimit,
 			});
+			return finishAsyncCwdClaims(deps, id, result);
 		}
 	}
 
@@ -2872,6 +2997,25 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		path.join(artifactsDir, "worktree-salvage", "parallel"),
 	);
 	if (errorResult) return errorResult;
+
+	const claimsFile = path.join(sessionRoot, "claims.jsonl");
+	const claimResult = claimCwds(deps, {
+		runId,
+		parentCwd: ctx.cwd,
+		parentRunId: deps.state.currentSessionId ? `parent:${deps.state.currentSessionId}` : "parent session",
+		strict: params.worktree === true || params.strictCwd === true,
+		requests: tasks.map((task, childIndex) => ({
+			runId,
+			childIndex,
+			cwd: resolveParallelTaskCwd(task, effectiveCwd, worktreeSetup, childIndex),
+			claimsFile,
+		})),
+	});
+	for (const warning of claimResult.warnings) console.warn(`pi-subagents: ${warning}`);
+	if (claimResult.error) {
+		if (worktreeSetup) cleanupWorktrees(worktreeSetup);
+		return buildParallelModeError(claimResult.error);
+	}
 
 	let cleanupCompleted = false;
 	let cleanupSummary: WorktreeCleanupSummary | undefined;
@@ -3037,6 +3181,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		});
 	} finally {
 		if (worktreeSetup && !cleanupCompleted) cleanupParallelWorktrees();
+		deps.state.cwdClaims?.releaseRun(runId, signal.aborted ? "stopped" : "completed");
 	}
 }
 
@@ -3135,6 +3280,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 				};
 			}
 			const id = randomUUID();
+			const claimError = registerAsyncCwdClaims(deps, { runId: id, params, cwd: effectiveCwd, parentCwd: ctx.cwd });
+			if (claimError) return formatAsyncStartError("single", claimError);
 			const asyncCtx = {
 				pi: deps.pi,
 				cwd: ctx.cwd,
@@ -3145,7 +3292,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 				modelScope: data.modelScope,
 				interactive: ctx.hasUI,
 			};
-			return executeAsyncSingle(id, {
+			const asyncResult = executeAsyncSingle(id, {
 				agent: params.agent!,
 				task: shouldForkAgent(contextPolicy, params.agent!) ? wrapForkTask(task) : task,
 				goal: task,
@@ -3180,6 +3327,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 				toolBudget: effectiveToolBudget.toolBudget,
 				rlimits: effectiveRlimits.rlimits,
 			});
+			return finishAsyncCwdClaims(deps, id, asyncResult);
 		}
 	}
 
@@ -3234,6 +3382,15 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		}
 		: undefined;
 
+	const claimResult = claimCwds(deps, {
+		runId,
+		parentCwd: ctx.cwd,
+		parentRunId: deps.state.currentSessionId ? `parent:${deps.state.currentSessionId}` : "parent session",
+		strict: params.strictCwd === true,
+		requests: [{ runId, childIndex: 0, cwd: effectiveCwd, claimsFile: path.join(sessionRoot, "claims.jsonl") }],
+	});
+	for (const warning of claimResult.warnings) console.warn(`pi-subagents: ${warning}`);
+	if (claimResult.error) return toExecutionErrorResult(params, new Error(claimResult.error));
 	const deadlineAt = data.deadlineAt ?? (data.timeoutMs !== undefined ? Date.now() + data.timeoutMs : undefined);
 	const resolvedSyncWakeMs = resolveSyncWakeMs(deps.config, data.timeoutMs);
 	const r = await runSync(ctx.cwd, agents, params.agent!, task, {
@@ -3278,6 +3435,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		toolBudget: effectiveToolBudget.toolBudget,
 		rlimits: effectiveRlimits.rlimits,
 	});
+	deps.state.cwdClaims?.releaseRun(runId, signal.aborted || r.interrupted ? "stopped" : r.exitCode === 0 ? "completed" : "failed");
 	if (foregroundControl?.currentIndex === 0) {
 		foregroundControl.interrupt = undefined;
 		foregroundControl.currentActivityState = r.progress?.activityState;
@@ -3559,12 +3717,16 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			}
 			if (action === "status") {
 				deps.state.currentSessionId = resolveCurrentSessionId(ctx.sessionManager);
-				const withBudget = (result: AgentToolResult<Details>) => withSpawnBudgetStatus(
-					result,
-					deps.state,
-					deps.config,
-					deps.state.currentSessionId,
-				);
+				const withBudget = (result: AgentToolResult<Details>) => {
+					const budgeted = withSpawnBudgetStatus(result, deps.state, deps.config, deps.state.currentSessionId);
+					const claims = deps.state.cwdClaims?.format(liveCwdClaimRunIds(deps.state));
+					if (!claims) return budgeted;
+					const content = [...budgeted.content];
+					const firstText = content.find((item) => item.type === "text");
+					if (firstText?.type === "text") firstText.text = `${firstText.text ?? ""}\n\n${claims}`;
+					else content.push({ type: "text", text: claims });
+					return { ...budgeted, content };
+				};
 				const targetRunId = paramsWithResolvedCwd.id ?? paramsWithResolvedCwd.runId;
 				const nestedScope = nestedResolutionScopeForExecutor(deps);
 				const sessionRoots = trustedSessionRootsForStatus(ctx, deps);

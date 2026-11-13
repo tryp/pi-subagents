@@ -9,6 +9,7 @@ import type { FSWatcher } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ModelScopeConfig } from "../runs/shared/model-scope.ts";
 import type { CheckpointDeltaStore } from "../runs/background/checkpoint-deltas.ts";
+import type { CwdClaimRegistry } from "../runs/shared/cwd-claims.ts";
 
 // ============================================================================
 // Basic Types
@@ -1143,6 +1144,8 @@ export interface SubagentState {
 	asyncJobs: Map<string, AsyncJobState>;
 	/** Current-session active and recent async runs for the native fleet inspector. */
 	fleetJobs?: Map<string, AsyncJobState>;
+	/** Process-local cwd-writer claims; transitions are also persisted per run. */
+	cwdClaims?: CwdClaimRegistry;
 	foregroundRuns?: Map<string, ForegroundResumeRun>;
 	/** Per-session log/progress baselines retained across subagent_wait calls. */
 	checkpointDeltas?: CheckpointDeltaStore;

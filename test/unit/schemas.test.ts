@@ -168,6 +168,8 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.ok(concurrencySchema, "concurrency schema should exist");
 		assert.equal(concurrencySchema.minimum, 1);
 		assert.match(String(concurrencySchema.description ?? ""), /parallel/i);
+		const properties = SubagentParams?.properties as Record<string, JsonSchemaNode> | undefined;
+		assert.equal(properties?.strictCwd?.type, "boolean");
 	});
 
 	it("allows runtime validation of management and control action strings", () => {

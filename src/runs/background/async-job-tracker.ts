@@ -318,6 +318,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events" | "appendE
 					if (status) {
 						const previousStatus = job.status;
 						job.status = status.state;
+						if (job.status === "complete" || job.status === "failed" || job.status === "stopped") state.cwdClaims?.releaseRun(job.asyncId, job.status);
 						if (job.status !== "complete" && job.status !== "failed" && job.status !== "paused" && job.status !== "stopped") cancelCleanup(job.asyncId);
 						job.sessionId = status.sessionId ?? job.sessionId;
 						job.activityState = status.activityState;
@@ -381,6 +382,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events" | "appendE
 						console.error(`Failed to read async status for '${job.asyncDir}':`, error);
 						job.status = "failed";
 						job.updatedAt = Date.now();
+						state.cwdClaims?.releaseRun(job.asyncId, "failed");
 					}
 					rememberFleetJob(state, job);
 					if (!hasLiveNestedDescendants(job.nestedChildren) && !state.cleanupTimers.has(job.asyncId)) {
