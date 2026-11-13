@@ -1278,6 +1278,8 @@ async function runSingleStep(
 				rlimits: step.rlimits,
 				childWatchdog,
 				waitToolEnabled: step.waitToolEnabled,
+				expectedWorktreeRoot: step.expectedWorktreeRoot ?? ctx.expectedWorktreeCwd,
+				allowCrossProjectWrites: step.allowCrossProjectWrites,
 			});
 			if (built.tempDir) attemptTempDirs.push(built.tempDir);
 			toolDiagnosticPath = built.toolDiagnosticPath;

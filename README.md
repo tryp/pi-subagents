@@ -1355,6 +1355,8 @@ Requirements:
 - task-level `cwd` overrides must be omitted or match the shared cwd
 - configured `worktreeSetupHook` must return valid JSON before timeout
 
+Each child may opt into an independent `expectedWorktreeRoot` (an absolute Git worktree root). Children launched with managed `worktree: true` are bound automatically to their allocated worktree root. The runner passes the assigned root in `PI_SUBAGENT_EXPECTED_WORKTREE_ROOT` and loads a Pi `tool_call` guard in that child. The guard checks Pi's actual child `ctx.cwd` against the assigned root before every Pi tool call, including custom tools. It also blocks built-in `write`/`edit` targets outside that root. A task may set `allowCrossProjectWrites: true` to deliberately permit built-in `write`/`edit` targets outside its assigned worktree; the actual cwd check still applies. This hook is not an OS sandbox: an arbitrary shell command can itself `cd` or invoke external write tools, and a custom tool may mutate paths outside the root, so use OS sandboxing when that stronger guarantee is required. Unbound tasks remain unchanged.
+
 By default, worktrees are created under the system temp directory. Set `worktreeBaseDir` in config, or `PI_SUBAGENTS_WORKTREE_DIR` when config is unset, to put them under a stable trusted directory. Missing base directories are created automatically.
 
 After a worktree parallel step completes, worktrees and temp branches are cleaned up in `finally` blocks. Before reclaiming a worktree, cleanup preserves any unlanded work:

@@ -32,12 +32,14 @@ export interface RealSessionRunOptions {
 	childText: string;
 	respond: FauxResponder;
 	timeoutMs?: number;
+	cwd?: string;
 	projectFiles?: Record<string, string>;
 	reportChildTools?: boolean;
 }
 
 export interface RealSessionRun {
 	responseText: string;
+	cwd: string;
 	parentSession: AgentSession;
 	modelCalls: number;
 	dispose: () => Promise<void>;
@@ -165,7 +167,8 @@ function restoreEnv(snapshot: Map<string, string | undefined>): void {
 }
 
 export async function runRealSubagentSession(options: RealSessionRunOptions): Promise<RealSessionRun> {
-	const cwd = mkdtempSync(path.join(os.tmpdir(), "pi-real-session-cwd-"));
+	const ownsCwd = options.cwd === undefined;
+	const cwd = options.cwd ? path.resolve(options.cwd) : mkdtempSync(path.join(os.tmpdir(), "pi-real-session-cwd-"));
 	const home = mkdtempSync(path.join(os.tmpdir(), "pi-real-session-home-"));
 	const previousCwd = process.cwd();
 	const envSnapshot = new Map([
@@ -199,7 +202,7 @@ export async function runRealSubagentSession(options: RealSessionRunOptions): Pr
 		try {
 			process.chdir(previousCwd);
 		} catch {}
-		rmSync(cwd, { recursive: true, force: true });
+		if (ownsCwd) rmSync(cwd, { recursive: true, force: true });
 		rmSync(home, { recursive: true, force: true });
 	};
 
@@ -298,6 +301,7 @@ export async function runRealSubagentSession(options: RealSessionRunOptions): Pr
 
 		return {
 			responseText: responseText.trim() || session.getLastAssistantText()?.trim() || "",
+			cwd,
 			parentSession: session,
 			modelCalls: faux.state.callCount,
 			dispose,

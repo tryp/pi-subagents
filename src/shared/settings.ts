@@ -61,6 +61,10 @@ export interface SequentialStep {
 	rlimits?: RlimitsConfig;
 	acceptance?: AcceptanceInput;
 	timeoutMs?: number;
+	/** Independent expected Git root checked at this child's built-in mutation tool boundary. */
+	expectedWorktreeRoot?: string;
+	/** Explicitly permit Pi write/edit targets outside an assigned managed worktree. */
+	allowCrossProjectWrites?: boolean;
 }
 
 /** Parallel task item within a parallel step */
@@ -84,6 +88,10 @@ export interface ParallelTaskItem {
 	rlimits?: RlimitsConfig;
 	acceptance?: AcceptanceInput;
 	timeoutMs?: number;
+	/** Independent expected Git root checked at this child's built-in mutation tool boundary. */
+	expectedWorktreeRoot?: string;
+	/** Explicitly allow write/edit tool targets outside this task's assigned worktree. Does not bypass the actual child-cwd check. */
+	allowCrossProjectWrites?: boolean;
 }
 
 export interface DynamicExpandSpec {

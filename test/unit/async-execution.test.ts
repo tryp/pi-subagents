@@ -18,6 +18,7 @@ const agent = (name: string, toolBudget?: AgentConfig["toolBudget"]): AgentConfi
 });
 
 const ctx = {
+	pi: {} as never,
 	cwd: process.cwd(),
 	currentSessionId: "session-1",
 	currentModel: undefined,
@@ -26,6 +27,28 @@ const ctx = {
 };
 
 describe("async runner execution", () => {
+	it("preserves each chain child's independent expected worktree binding and explicit exception", () => {
+		const result = buildAsyncRunnerSteps("run-worktree-bindings", {
+			chain: [
+				{ agent: "worker", task: "lane one", expectedWorktreeRoot: "/work/lane-one" },
+				{ agent: "worker", task: "lane two", expectedWorktreeRoot: "/work/lane-two", allowCrossProjectWrites: true },
+			],
+			agents: [agent("worker")],
+			ctx,
+			asyncDir: path.join(process.cwd(), ".tmp-async-test"),
+			maxSubagentDepth: 2,
+		});
+		assert.ok("steps" in result, "expected successful step build");
+		const first = result.steps[0];
+		const second = result.steps[1];
+		assert.ok(first && "agent" in first);
+		assert.ok(second && "agent" in second);
+		assert.equal(first.expectedWorktreeRoot, "/work/lane-one");
+		assert.equal(first.allowCrossProjectWrites, undefined);
+		assert.equal(second.expectedWorktreeRoot, "/work/lane-two");
+		assert.equal(second.allowCrossProjectWrites, true);
+	});
+
 	it("formats interactive yield and headless auto-drain guidance separately", () => {
 		const interactive = formatAsyncStartedMessage("Async: worker [interactive]", true);
 		assert.match(interactive, /interactive session[\s\S]*return control/i);
@@ -72,9 +95,13 @@ describe("async runner execution", () => {
 		});
 
 		assert.ok("steps" in result, "expected successful step build");
-		assert.deepEqual(result.steps[0]?.toolBudget, { hard: 3, block: ["find"] });
-		assert.equal(result.steps[0]?.waitToolEnabled, false);
-		assert.deepEqual(result.steps[1]?.toolBudget, { hard: 2, block: ["grep"] });
+		const first = result.steps[0];
+		const second = result.steps[1];
+		assert.ok(first && "agent" in first);
+		assert.ok(second && "agent" in second);
+		assert.deepEqual(first.toolBudget, { hard: 3, block: ["find"] });
+		assert.equal(first.waitToolEnabled, false);
+		assert.deepEqual(second.toolBudget, { hard: 2, block: ["grep"] });
 	});
 
 	it("uses agent tool budget before config default when no run override exists", () => {
@@ -88,7 +115,9 @@ describe("async runner execution", () => {
 		});
 
 		assert.ok("steps" in result, "expected successful step build");
-		assert.deepEqual(result.steps[0]?.toolBudget, { hard: 4, block: ["read"] });
+		const step = result.steps[0];
+		assert.ok(step && "agent" in step);
+		assert.deepEqual(step.toolBudget, { hard: 4, block: ["read"] });
 	});
 
 	it("validates timeout consistently", () => {
@@ -132,6 +161,8 @@ describe("async runner execution", () => {
 		});
 
 		assert.ok("steps" in result, "expected successful step build");
-		assert.deepEqual(result.steps[0]?.toolBudget, { hard: 5, block: ["ls"] });
+		const step = result.steps[0];
+		assert.ok(step && "agent" in step);
+		assert.deepEqual(step.toolBudget, { hard: 5, block: ["ls"] });
 	});
 });

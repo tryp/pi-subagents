@@ -252,6 +252,8 @@ async function runSingleAttempt(
 		rlimits: options.rlimits,
 		childWatchdog,
 		waitToolEnabled: options.waitToolEnabled,
+		expectedWorktreeRoot: options.expectedWorktreeRoot ?? options.expectedWorktreeCwd,
+		allowCrossProjectWrites: options.allowCrossProjectWrites,
 	});
 
 	const result: SingleResult = {

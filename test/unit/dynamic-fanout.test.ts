@@ -35,6 +35,17 @@ describe("dynamic fanout helpers", () => {
 		assert.deepEqual(materialized.parallel.map((task) => task.label), ["Review src/a.ts", "Review src/b.ts"]);
 	});
 
+	it("preserves runner worktree-binding fields through dynamic materialization", () => {
+		const step: ChainStep = {
+			expand: { from: { output: "targets", path: "/items" }, key: "/path", maxItems: 4 },
+			parallel: { agent: "worker", task: "Inspect {item.path}", expectedWorktreeRoot: "/work/lane-a", allowCrossProjectWrites: true },
+			collect: { as: "results" },
+		};
+		const materialized = materializeDynamicParallelStep(step, outputs, 1, { allowRunnerFields: true });
+		assert.equal(materialized.parallel[0]?.expectedWorktreeRoot, "/work/lane-a");
+		assert.equal(materialized.parallel[0]?.allowCrossProjectWrites, true);
+	});
+
 	it("rejects missing structured sources, over-limit arrays, duplicate keys, colliding ids, and bad templates", () => {
 		const base: ChainStep = {
 			expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 4 },

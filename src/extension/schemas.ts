@@ -117,12 +117,15 @@ const TaskItem = Type.Object({
 	outputMode: Type.Optional(OutputModeOverride),
 	reads: Type.Optional(ReadsOverride),
 	progress: Type.Optional(Type.Boolean({ description: "Enable progress.md tracking for this task" })),
+
 	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'openai-codex/gpt-5.6-luna'). Bare names auto-resolve across providers. Omit to use the invocation model, then agent/parent defaults; 'inherit' explicitly requests the parent model." })),
 	skill: Type.Optional(SkillOverride),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	rlimits: Type.Optional(RlimitsOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-task timeout in ms applied to this child run only. Falls back to the run-level timeout when omitted." })),
+	expectedWorktreeRoot: Type.Optional(Type.String({ minLength: 1 })),
+	allowCrossProjectWrites: Type.Optional(Type.Boolean()),
 });
 
 // Parallel task item (within a parallel step)
@@ -146,6 +149,8 @@ export const ParallelTaskSchema = Type.Object({
 	rlimits: Type.Optional(RlimitsOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-task timeout in ms applied to this child run only. Falls back to the run-level timeout when omitted." })),
+	expectedWorktreeRoot: Type.Optional(Type.String({ minLength: 1 })),
+	allowCrossProjectWrites: Type.Optional(Type.Boolean()),
 });
 
 export const DynamicExpandSchema = Type.Object({
@@ -177,6 +182,8 @@ export const DynamicParallelTemplateSchema = Type.Object({
 	rlimits: Type.Optional(RlimitsOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-task timeout in ms applied to each materialized child run. Falls back to the run-level timeout when omitted." })),
+	expectedWorktreeRoot: Type.Optional(Type.String({ minLength: 1 })),
+	allowCrossProjectWrites: Type.Optional(Type.Boolean())
 }, { additionalProperties: false });
 
 export const DynamicCollectSchema = Type.Object({
@@ -206,6 +213,8 @@ export const ChainItem = Type.Object({
 	rlimits: Type.Optional(RlimitsOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional per-step timeout in ms applied to this child run only. Falls back to the run-level timeout when omitted." })),
+	expectedWorktreeRoot: Type.Optional(Type.String({ minLength: 1 })),
+	allowCrossProjectWrites: Type.Optional(Type.Boolean()),
 	parallel: Type.Optional(Type.Unsafe({
 		anyOf: [
 			Type.Array(ParallelTaskSchema, { minItems: 1, description: "Tasks to run in parallel" }),
@@ -290,7 +299,7 @@ const SubagentParamsSchema = Type.Object({
 		],
 		description: "Agent/chain config for create/update. Object or JSON string; presence of steps creates a chain."
 	})),
-	tasks: Type.Optional(Type.Array(TaskItem, { description: "Parallel tasks: [{agent, task, cwd?, output?, reads?, progress?}, ...]" })),
+	tasks: Type.Optional(Type.Array(TaskItem)),
 	concurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Top-level PARALLEL mode only: max concurrent tasks. Defaults to config.parallel.concurrency or 4." })),
 	worktree: Type.Optional(Type.Boolean({
 		description: "Isolate parallel tasks in git worktrees; requires a clean tree."
@@ -303,13 +312,15 @@ const SubagentParamsSchema = Type.Object({
 		description: "'fresh' or 'fork' to branch from parent session. Explicit context overrides every child in the invocation. If omitted, each requested agent uses its own defaultContext; agents without defaultContext: 'fork' run fresh.",
 	})),
 	chainDir: Type.Optional(Type.String({ description: "Persistent chain artifact directory; defaults to user-scoped temp storage." })),
-	async: Type.Optional(Type.Boolean({ description: "Run in background. Default true: the call returns as soon as the run is detached, and child results arrive on their own. Pass false only when you need the result inline before the next step (a blocking launch cannot overlap anything)." })),
+	async: Type.Optional(Type.Boolean({ description: "Run in background (default true); child results arrive asynchronously. Set false only to wait for inline results; blocking launches cannot overlap." })),
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional run-level timeout in ms for foreground and async/background runs." })),
 	turnBudget: Type.Optional(TurnBudgetOverride),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	rlimits: Type.Optional(RlimitsOverride),
 	agentScope: Type.Optional(Type.String({ description: "Agent discovery scope: 'user', 'project', or 'both' (default: 'both'; project wins on name collisions)" })),
 	cwd: Type.Optional(Type.String()),
+	expectedWorktreeRoot: Type.Optional(Type.String({ minLength: 1 })),
+	allowCrossProjectWrites: Type.Optional(Type.Boolean()),
 	artifacts: Type.Optional(Type.Boolean({ description: "Write debug artifacts (default: true)" })),
 	includeProgress: Type.Optional(Type.Boolean({ description: "Include full progress in result (default: false)" })),
 	share: Type.Optional(Type.Boolean({ description: "Upload session to GitHub Gist for sharing (default: false)" })),
