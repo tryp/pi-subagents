@@ -20,6 +20,7 @@ import { normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
 import { hasLiveNestedDescendants, updateAsyncJobNestedProjection } from "../shared/nested-events.ts";
 import { listAsyncRuns, type AsyncRunSummary } from "./async-status.ts";
+import { releaseTerminalCwdClaims } from "../shared/cwd-claims.ts";
 import {
 	CONTROL_EVENT_READ_CHUNK_BYTES,
 	CONTROL_EVENT_SCAN_WINDOW_BYTES,
@@ -318,7 +319,8 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events" | "appendE
 					if (status) {
 						const previousStatus = job.status;
 						job.status = status.state;
-						if (job.status === "complete" || job.status === "failed" || job.status === "stopped") state.cwdClaims?.releaseRun(job.asyncId, job.status);
+						// Stop/kill requests become `stopped` in subagent-runner; there is no separate `killed` status.
+						releaseTerminalCwdClaims(state.cwdClaims, job.asyncId, job.status);
 						if (job.status !== "complete" && job.status !== "failed" && job.status !== "paused" && job.status !== "stopped") cancelCleanup(job.asyncId);
 						job.sessionId = status.sessionId ?? job.sessionId;
 						job.activityState = status.activityState;
@@ -382,7 +384,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events" | "appendE
 						console.error(`Failed to read async status for '${job.asyncDir}':`, error);
 						job.status = "failed";
 						job.updatedAt = Date.now();
-						state.cwdClaims?.releaseRun(job.asyncId, "failed");
+						releaseTerminalCwdClaims(state.cwdClaims, job.asyncId, "failed");
 					}
 					rememberFleetJob(state, job);
 					if (!hasLiveNestedDescendants(job.nestedChildren) && !state.cleanupTimers.has(job.asyncId)) {

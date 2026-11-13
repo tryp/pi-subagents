@@ -22,6 +22,16 @@ export interface CwdClaimResult {
 	error?: string;
 }
 
+/** Kill/stop requests do not write a `killed` state: async reconciliation records them as `stopped`. */
+export function releaseTerminalCwdClaims(
+	registry: CwdClaimRegistry | undefined,
+	runId: string,
+	status: string,
+): CwdClaim[] {
+	if (!registry || !["complete", "completed", "failed", "stopped"].includes(status)) return [];
+	return registry.releaseRun(runId, status);
+}
+
 /** Process-local index for live cwd writers; each transition is also append-only on disk. */
 export class CwdClaimRegistry {
 	private readonly claims = new Map<string, CwdClaim>();

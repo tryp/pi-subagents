@@ -2718,9 +2718,10 @@ function claimCwds(
 	});
 }
 
-function registerAsyncCwdClaims(
+export function registerAsyncCwdClaims(
 	deps: ExecutorDeps,
 	input: { runId: string; params: SubagentParamsLike; cwd: string; parentCwd: string },
+	onPrepared?: () => void,
 ): string | undefined {
 	const requests: CwdClaimRequest[] = [];
 	let strict = input.params.worktree === true || input.params.strictCwd === true;
@@ -2756,6 +2757,8 @@ function registerAsyncCwdClaims(
 	if (result.error) return result.error;
 	const asyncDir = path.join(ASYNC_DIR, input.runId);
 	deps.state.asyncJobs.set(input.runId, { asyncId: input.runId, asyncDir, status: "running", startedAt: Date.now(), updatedAt: Date.now() });
+	// Callers may use this boundary immediately before invoking the actual child spawn.
+	onPrepared?.();
 	return undefined;
 }
 

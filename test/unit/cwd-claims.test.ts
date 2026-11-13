@@ -3,7 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { CwdClaimRegistry } from "../../src/runs/shared/cwd-claims.ts";
+import { CwdClaimRegistry, releaseTerminalCwdClaims } from "../../src/runs/shared/cwd-claims.ts";
+import { registerAsyncCwdClaims } from "../../src/runs/foreground/subagent-executor.ts";
+import { ASYNC_DIR } from "../../src/shared/types.ts";
 
 function fixture(t: test.TestContext) {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cwd-claims-"));
@@ -76,6 +78,58 @@ test("a refused launch leaves no stale claim on the next lookup", () => {
 	const refused = registry.claim({ requests: [{ runId: "run-b", childIndex: 0, cwd: "/repo" }], liveRunIds: new Set(["run-a", "run-b"]), strict: true });
 	assert.ok(refused.error);
 	assert.equal(registry.list(new Set(["run-a"])).some((claim) => claim.runId === "run-b"), false);
+});
+
+test("spawn preparation persists the claim before the child task starts", (t) => {
+	const runId = `cwd-claim-before-spawn-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+	const asyncDir = path.join(ASYNC_DIR, runId);
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cwd-spawn-"));
+	t.after(() => {
+		fs.rmSync(asyncDir, { recursive: true, force: true });
+		fs.rmSync(root, { recursive: true, force: true });
+	});
+	const state = { cwdClaims: new CwdClaimRegistry(), asyncJobs: new Map() };
+	const deps = { state, config: { worktreeBaseDir: path.join(root, "worktrees") } } as any;
+	let taskStarted = false;
+	const error = registerAsyncCwdClaims(deps, {
+		runId,
+		params: { agent: "worker" },
+		cwd: root,
+		parentCwd: os.tmpdir(),
+	}, () => {
+		taskStarted = true;
+		const records = fs.readFileSync(path.join(asyncDir, "claims.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.equal(records[0]?.event, "claim");
+		assert.equal(records[0]?.runId, runId);
+		assert.equal(records[0]?.cwd, root);
+	});
+	assert.equal(error, undefined);
+	assert.equal(taskStarted, true);
+});
+
+test("terminal status releases cwd claims for completed, failed, and stopped runs", (t) => {
+	for (const status of ["complete", "completed", "failed", "stopped"] as const) {
+		const { file } = fixture(t);
+		const registry = new CwdClaimRegistry();
+		registry.claim({ requests: [{ runId: `run-${status}`, childIndex: 0, cwd: "/repo", claimsFile: file }], liveRunIds: new Set([`run-${status}`]) });
+		assert.equal(releaseTerminalCwdClaims(registry, `run-${status}`, status).length, 1, `${status} should release claim`);
+		assert.equal(registry.list(new Set([`run-${status}`])).length, 0, `${status} should leave no active claim`);
+		const records = fs.readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.equal(records[1]?.event, "release");
+		assert.equal(records[1]?.reason, status);
+	}
+});
+
+test("kill path status is stopped and releases its cwd claim", (t) => {
+	const { file } = fixture(t);
+	const registry = new CwdClaimRegistry();
+	registry.claim({ requests: [{ runId: "killed-by-stop", childIndex: 0, cwd: "/repo", claimsFile: file }], liveRunIds: new Set(["killed-by-stop"]) });
+	// stopAsyncRun delivers a stop request; subagent-runner persists state="stopped" (not "killed").
+	assert.equal(releaseTerminalCwdClaims(registry, "killed-by-stop", "stopped").length, 1);
+	assert.equal(registry.list(new Set(["killed-by-stop"])).length, 0);
+	const records = fs.readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+	assert.equal(records[1]?.reason, "stopped");
+	assert.equal(releaseTerminalCwdClaims(registry, "killed-by-stop", "killed").length, 0, "no distinct killed status is supported");
 });
 
 test("parent cwd is treated as a live writer for conflict checks", () => {
