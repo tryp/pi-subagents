@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- The startup async-run sweep no longer lags the interactive TUI. It now runs on a worker thread, and its two quadratic steps were replaced: the `/proc` scan resolved every candidate path again for every open descriptor (1.8s of a 2.5s sweep on a 4,059-run corpus) and the open-fd check compared every candidate against every open path. Measured on 2026-11-14 with `node scripts/bench-async-gc.ts --scan-fds`: 2,905ms of main-thread block before, 813ms inline after, 0ms through the worker. A worker that cannot start, exits early, or errors appends a `failed:` entry to the session instead of disabling housekeeping silently; an injected `scanOpenFds`/`isPidAlive` is refused rather than dropped, because a sweep that quietly runs a different scan than the caller asked for is worse than no sweep. `scripts/mutcheck_async_run_gc.py` reverts each of those guarantees and requires the named unit test to fail.
 - Detached async runners no longer fail to boot when `typebox` is absent from the runner's production node_modules: `structured-output.ts` now resolves `typebox/compile` against the pi host package root injected by the runner spawn, instead of relying on a static bare import that only the in-process extension loader aliases could satisfy.
 
 ### Added

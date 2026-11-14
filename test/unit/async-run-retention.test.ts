@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
+import { threadId } from "node:worker_threads";
 import {
 	ASYNC_RUN_GC_BUDGET_BYTES,
+	type AsyncRunGcWorkerFactory,
 	pruneAsyncRunDirs,
+	runAsyncRunGc,
 	scanProcOpenFds,
 	type AsyncRunGcOptions,
 } from "../../src/runs/background/async-run-retention.ts";
@@ -406,5 +410,167 @@ describe("async run retention", () => {
 		assert.equal(lines.length, 1);
 		assert.match(lines[0], /sweep examined=1 collectable=0 .*deleted=0/);
 		assert.match(lines[0], /younger-than-min-age/);
+	});
+
+	it("keeps a candidate whose path is nested inside an open path, and prunes a sibling", () => {
+		const root = fixture();
+		const nested = addRun(root, "nested-run", "complete", 1, { nested: true });
+		const sibling = addRun(root, "sibling-run", "complete", 1, { nested: true });
+		// The open descriptor is on the shared `results/nested` directory, so only the
+		// candidate path beneath it is inside an open path; the sibling result tree is not.
+		const summary = gc(root, {
+			scanOpenFds: () => ({ complete: true, unreadable: 0, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, procStatusErrors: {}, fdTableErrors: {}, fdEntryErrors: {}, sameUidFdErrorCodes: {}, foreignFdErrorCodes: {}, scanTruncated: false, unreadableForeignUids: [], openPaths: [path.join(root.resultsDir, "nested")] }),
+		});
+		assert.equal(summary.kept["open-fd"], 2);
+		assert.equal(fs.existsSync(nested), true);
+		assert.equal(fs.existsSync(sibling), true);
+		assert.equal(summary.examined, 2);
+	});
+
+	it("prunes when no open path shares a directory with the candidate", () => {
+		const root = fixture();
+		const plain = addRun(root, "plain", "complete", 1);
+		const summary = gc(root, {
+			// A sibling directory name that shares the candidate's prefix must not match.
+			scanOpenFds: () => ({ complete: true, unreadable: 0, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, procStatusErrors: {}, fdTableErrors: {}, fdEntryErrors: {}, sameUidFdErrorCodes: {}, foreignFdErrorCodes: {}, scanTruncated: false, unreadableForeignUids: [], openPaths: [`${plain}-suffix/output.log`, `${path.dirname(plain)}-elsewhere`] }),
+		});
+		assert.equal(fs.existsSync(plain), false);
+		assert.equal(summary.pruned, 1);
+		assert.equal(summary.kept["open-fd"], undefined);
+	});
+
+	it("keeps a candidate that holds an open descriptor on a path below it", () => {
+		const root = fixture();
+		const held = addRun(root, "held", "complete", 1);
+		const other = addRun(root, "other", "complete", 1);
+		const summary = gc(root, {
+			scanOpenFds: () => ({ complete: true, unreadable: 0, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, procStatusErrors: {}, fdTableErrors: {}, fdEntryErrors: {}, sameUidFdErrorCodes: {}, foreignFdErrorCodes: {}, scanTruncated: false, unreadableForeignUids: [], openPaths: [path.join(held, "output.log")] }),
+		});
+		assert.equal(fs.existsSync(held), true);
+		assert.equal(fs.existsSync(other), false);
+		assert.equal(summary.kept["open-fd"], 1);
+	});
+
+	it("does not match a sibling directory that shares a path prefix", () => {
+		const root = fixture();
+		const target = addRun(root, "abc", "complete", 1);
+		addRun(root, "abcd", "complete", 1);
+		const uid = process.getuid?.() ?? 1000;
+		const procRoot = fakeProc(root, "77", `Uid:\t${uid}\t${uid}\t${uid}\t${uid}`, "directory", path.join(root.asyncDir, "abcd"));
+		const scan = scanProcOpenFds([target, path.join(root.asyncDir, "abcd")], procRoot);
+		assert.deepEqual(scan.openPaths, [path.join(root.asyncDir, "abcd")]);
+	});
+
+	it("keeps a candidate whose open descriptor names a deleted file", () => {
+		const root = fixture();
+		const runDir = addRun(root, "deleted-fd", "complete", 1);
+		// /proc renders a descriptor on an unlinked inode with this suffix, including a
+		// descriptor on the run directory itself. Dropping the suffix would make the exact
+		// match fail and delete a run that a live process still holds.
+		const uid = process.getuid?.() ?? 1000;
+		const procRoot = fakeProc(root, "78", `Uid:\t${uid}\t${uid}\t${uid}\t${uid}`, "directory", `${runDir} (deleted)`);
+		const summary = gc(root, {
+			procRoot,
+			scanOpenFds: (paths, root) => scanProcOpenFds(paths, root),
+		});
+		assert.equal(fs.existsSync(runDir), true);
+		assert.equal(summary.kept["open-fd"], 1);
+	});
+
+	it("runs the startup sweep on a worker thread instead of blocking the main thread", async () => {
+		const root = fixture();
+		// The fixture is sized the way the real corpus costs: 4,059 run directories whose
+		// per-run readdir/stat/parse overhead, not the bytes, dominate the sweep. The
+		// control measurement below fails the test if this stops being expensive inline.
+		const runCount = 3_000;
+		for (let index = 0; index < runCount; index++) {
+			const runDir = path.join(root.asyncDir, `run-${index}`);
+			fs.mkdirSync(runDir);
+			fs.writeFileSync(path.join(runDir, "status.json"), JSON.stringify({
+				runId: `run-${index}`,
+				mode: "single",
+				state: "complete",
+				startedAt: 1,
+				endedAt: 1,
+				lastUpdate: 1,
+				steps: Array.from({ length: 12 }, (_, step) => ({ index: step, state: "complete", label: `step-${step}` })),
+			}));
+			fs.writeFileSync(path.join(runDir, "output.log"), "output\n");
+		}
+		const sweepOptions = {
+			asyncDir: root.asyncDir,
+			resultsDir: root.resultsDir,
+			nestedEventsDir: root.nestedEventsDir,
+			budgetBytes: 0,
+			keepRecentTerminal: 0,
+			minAgeMs: 0,
+		};
+		// How late a 10ms timer fires is how long the main thread was blocked.
+		const timerLatenessMs = async (run: () => Promise<unknown> | unknown): Promise<number> => {
+			const scheduled = performance.now();
+			const fired = new Promise<number>((resolve) => setTimeout(() => resolve(performance.now() - scheduled), 10));
+			await run();
+			return (await fired) - 10;
+		};
+		const controlMs = await timerLatenessMs(() => pruneAsyncRunDirs({ ...sweepOptions, dryRun: true }));
+		const lines: string[] = [];
+		// A worker is unref'd so it cannot keep pi's process alive; hold the loop open for
+		// the duration of this test only.
+		const keepalive = setInterval(() => {}, 100);
+		let summary: Awaited<ReturnType<typeof runAsyncRunGc>>;
+		let workerMs: number;
+		try {
+			workerMs = await timerLatenessMs(async () => {
+				summary = await runAsyncRunGc({ ...sweepOptions, log: (line) => lines.push(line) });
+			});
+		} finally {
+			clearInterval(keepalive);
+		}
+		assert.ok(summary!, "worker returned a summary");
+		assert.ok(Number.isInteger(summary!.workerThreadId) && summary!.workerThreadId! > 0, "sweep reported a worker thread id");
+		assert.notEqual(summary!.workerThreadId, threadId, "sweep ran on a worker thread, not the main thread");
+		assert.equal(summary!.examined, runCount);
+		assert.equal(lines.length, 1);
+		assert.match(lines[0]!, /sweep examined=3000 /);
+		// The control keeps this from passing vacuously on a fast machine: if the fixture is
+		// no longer expensive inline, there is nothing left to prove.
+		assert.ok(controlMs >= 60, `inline control swept in ${controlMs.toFixed(0)}ms; the fixture no longer blocks a sweep`);
+		assert.ok(
+			workerMs < Math.max(25, controlMs / 3),
+			`main thread blocked ${workerMs.toFixed(0)}ms on the worker sweep versus ${controlMs.toFixed(0)}ms inline`,
+		);
+	});
+
+	it("reports a worker that exits or errors instead of failing silently", async () => {
+		class FakeWorker extends EventEmitter {
+			unref(): void {}
+			postMessage(): void {}
+		}
+		const lineFor = async (script: (worker: FakeWorker) => void): Promise<string[]> => {
+			const lines: string[] = [];
+			const worker = new FakeWorker();
+			setImmediate(() => script(worker));
+			const summary = await runAsyncRunGc({ log: (line) => lines.push(line) }, (() => worker) as unknown as AsyncRunGcWorkerFactory);
+			assert.equal(summary, null);
+			return lines;
+		};
+		const errorLines = await lineFor((worker) => worker.emit("error", new Error("boom")));
+		assert.match(errorLines[0]!, /\[subagent async-run GC\] failed: boom/);
+		const exitLines = await lineFor((worker) => worker.emit("exit", 7));
+		assert.match(exitLines[0]!, /failed: worker exited before reporting \(code 7\)/);
+		const errorResultLines = await lineFor((worker) => worker.emit("message", { type: "error", message: "scan exploded" }));
+		assert.match(errorResultLines[0]!, /failed: worker reported scan exploded/);
+	});
+
+	it("refuses an injected scanner instead of running a different sweep in the worker", async () => {
+		const lines: string[] = [];
+		// Cast past the host-options type on purpose: this is the call a benchmark or a test
+		// outgrowing pruneAsyncRunDirs would make, and it must not quietly use the real scan.
+		const summary = await runAsyncRunGc({
+			log: (line) => lines.push(line),
+			scanOpenFds: () => ({ complete: true, unreadable: 0, foreignUid: 0, scannedReadableForeign: 0, foreignUnreadable: 0, sameUidUnreadable: 0, uidUnverifiable: 0, procStatusErrors: {}, fdTableErrors: {}, fdEntryErrors: {}, sameUidFdErrorCodes: {}, foreignFdErrorCodes: {}, scanTruncated: false, unreadableForeignUids: [], openPaths: [] }),
+		} as unknown as Parameters<typeof runAsyncRunGc>[0]);
+		assert.equal(summary, null);
+		assert.deepEqual(lines, ["[subagent async-run GC] failed: scanOpenFds cannot cross a worker thread; call pruneAsyncRunDirs directly"]);
 	});
 });

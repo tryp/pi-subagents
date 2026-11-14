@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
 import * as path from "node:path";
+import { Worker } from "node:worker_threads";
 import { ASYNC_RUN_GC_BUDGET_BYTES } from "../../shared/settings.ts";
 import { ASYNC_DIR, RESULTS_DIR, TEMP_ROOT_DIR } from "../../shared/types.ts";
 
@@ -61,6 +62,8 @@ export interface AsyncRunGcSummary {
 	keptUnreadableStatusForeign: number;
 	statusErrors: Record<string, number>;
 	outcomes: Record<string, number>;
+	/** Set when the sweep ran on a worker thread rather than inline; see runAsyncRunGc. */
+	workerThreadId?: number;
 }
 
 export interface AsyncRunGcOptions {
@@ -76,6 +79,18 @@ export interface AsyncRunGcOptions {
 	isPidAlive?: (pid: number) => boolean;
 	scanOpenFds?: (paths: string[], procRoot: string) => FdScanResult;
 	log?: (line: string) => void;
+}
+
+/**
+ * Options the worker host can carry across the thread boundary. Functions cannot cross, so
+ * the injectable scanner and liveness helpers are refused rather than dropped: a caller that
+ * injects a scanner expects the sweep to use it, and silently running the real /proc scan
+ * instead would make a test or a benchmark measure something else than it asked for.
+ */
+export type AsyncRunGcHostOptions = Omit<AsyncRunGcOptions, "log" | "isPidAlive" | "scanOpenFds">;
+
+export interface AsyncRunGcWorkerRequest {
+	options: AsyncRunGcHostOptions;
 }
 
 type ForeignReachabilityReason = "mode-blocked" | "acl" | "foreign-owner" | "stat-error" | "reachable";
@@ -150,10 +165,82 @@ function collectPids(value: unknown, output = new Set<number>()): number[] {
 	return [...output];
 }
 
-function containedPath(root: string, target: string): boolean {
-	const resolvedRoot = path.resolve(root);
-	const resolvedTarget = path.resolve(target.replace(/ \(deleted\)$/, ""));
-	return resolvedTarget === resolvedRoot || resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`);
+const DELETED_SUFFIX = / \(deleted\)$/;
+
+function resolveForContainment(item: string): string {
+	return path.resolve(item.replace(DELETED_SUFFIX, ""));
+}
+
+/**
+ * Resolved-root membership test.
+ *
+ * Containment used to be `containedPath(root, target)` with a fresh `path.resolve` for
+ * both sides on every call. scanProcOpenFds asks the question for every open descriptor
+ * on the machine against every candidate path, so that made a startup sweep quadratic in
+ * the number of retained runs: 2026-11-14 measured 1.8s of a 2.5s sweep on a machine with
+ * 4,059 runs, and it all ran between two renders of the interactive TUI. Resolving each
+ * root once and walking the target's ancestors is O(depth) per query instead.
+ *
+ * A root of `/` contains every absolute path, which is the only sensible reading of
+ * containment; run directories never produce it.
+ */
+class ContainmentIndex {
+	private readonly rootByPath = new Map<string, string>();
+
+	constructor(items: Iterable<string> = []) {
+		for (const item of items) {
+			const resolved = resolveForContainment(item);
+			if (!this.rootByPath.has(resolved)) this.rootByPath.set(resolved, item);
+		}
+	}
+
+	get size(): number {
+		return this.rootByPath.size;
+	}
+
+	/** The caller's original string for the root that contains target, or undefined. */
+	findRoot(target: string): string | undefined {
+		if (this.rootByPath.size === 0) return undefined;
+		let current = resolveForContainment(target);
+		for (;;) {
+			const match = this.rootByPath.get(current);
+			if (match !== undefined) return match;
+			const parent = path.dirname(current);
+			if (parent === current) return undefined;
+			current = parent;
+		}
+	}
+
+	contains(target: string): boolean {
+		return this.findRoot(target) !== undefined;
+	}
+}
+
+/** Sorted resolved paths, answering "does anything lie strictly beneath this path?". */
+class DescendantIndex {
+	private readonly sorted: string[];
+
+	constructor(items: Iterable<string> = []) {
+		this.sorted = [...new Set([...items].map(resolveForContainment))].sort();
+	}
+
+	get size(): number {
+		return this.sorted.length;
+	}
+
+	hasDescendantOf(item: string): boolean {
+		if (this.sorted.length === 0) return false;
+		const resolved = resolveForContainment(item);
+		const prefix = resolved.endsWith(path.sep) ? resolved : `${resolved}${path.sep}`;
+		let low = 0;
+		let high = this.sorted.length;
+		while (low < high) {
+			const mid = (low + high) >>> 1;
+			if (this.sorted[mid]! < prefix) low = mid + 1;
+			else high = mid;
+		}
+		return low < this.sorted.length && this.sorted[low]!.startsWith(prefix);
+	}
 }
 
 /**
@@ -185,6 +272,7 @@ export function scanProcOpenFds(paths: string[], procRoot = "/proc"): FdScanResu
 	const processEntries = procEntries.filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name));
 	if (processEntries.length > MAX_PROC_ENTRIES) { complete = false; scanTruncated = true; }
 	const openPaths = new Set<string>();
+	const candidateIndex = new ContainmentIndex(paths);
 	let scannedFds = 0;
 	const ourUid = typeof process.getuid === "function" ? process.getuid() : null;
 	for (const procEntry of processEntries.slice(0, MAX_PROC_ENTRIES)) {
@@ -249,12 +337,12 @@ export function scanProcOpenFds(paths: string[], procRoot = "/proc"): FdScanResu
 				} else sameUidUnreadable++;
 				continue;
 			}
-			for (const candidatePath of paths) {
-				if (containedPath(candidatePath, target)) {
-					openPaths.add(candidatePath);
-					break;
-				}
-			}
+			// Resolution happens once per root in the index, not once per (root, target)
+			// pair. Nested candidate paths report the deepest matching root rather than
+			// the first one in `paths`; the two are interchangeable for the only use of
+			// the result (was any candidate path held open).
+			const holding = candidateIndex.findRoot(target);
+			if (holding !== undefined) openPaths.add(holding);
 		}
 	}
 	return { complete, unreadable, foreignUid, scannedReadableForeign, foreignUnreadable, sameUidUnreadable, uidUnverifiable, procStatusErrors, fdTableErrors, fdEntryErrors, sameUidFdErrorCodes, foreignFdErrorCodes, scanTruncated, unreadableForeignUids: [...unreadableForeignUids], openPaths: [...openPaths] };
@@ -560,6 +648,10 @@ export function pruneAsyncRunDirs(options: AsyncRunGcOptions = {}): AsyncRunGcSu
 		summary.kept[reason] = (summary.kept[reason] ?? 0) + 1;
 		summary.outcomes[`kept:${reason}`] = (summary.outcomes[`kept:${reason}`] ?? 0) + 1;
 	};
+	const openPathIndex = new ContainmentIndex(fdScan.openPaths);
+	const openPathDescendants = new DescendantIndex(fdScan.openPaths);
+	const holdsOpenPath = (item: string): boolean =>
+		openPathIndex.contains(item) || openPathDescendants.hasDescendantOf(item);
 	const terminal = candidates.filter((candidate) => candidate.state !== null && TERMINAL_STATES.has(candidate.state));
 	const protectedRecent = new Set(terminal.slice().sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id)).slice(0, keepRecentTerminal).map((candidate) => candidate.id));
 	const eligible: RunCandidate[] = [];
@@ -588,7 +680,10 @@ export function pruneAsyncRunDirs(options: AsyncRunGcOptions = {}): AsyncRunGcSu
 			continue;
 		}
 		if (fdScan.scanTruncated || (!fdScan.complete && fdScan.foreignUnreadable === 0)) { keep("incomplete-fd-scan"); continue; }
-		if (candidate.paths.some((item) => fdScan.openPaths.some((openPath) => containedPath(item, openPath) || containedPath(openPath, item)))) { keep("open-fd"); continue; }
+		// Both directions of the original containment pair, without the candidate x
+		// openPath cross product: `openPath inside item` is a sorted lookup and
+		// `item inside openPath` is an ancestor walk.
+		if (openPathIndex.size > 0 && candidate.paths.some(holdsOpenPath)) { keep("open-fd"); continue; }
 		if (fdScan.foreignUnreadable > 0) {
 			const reachability = candidate.foreignReachability ?? { foreignReachable: true, reason: "stat-error" as const };
 			if (reachability.foreignReachable) {
@@ -640,17 +735,84 @@ export function pruneAsyncRunDirs(options: AsyncRunGcOptions = {}): AsyncRunGcSu
 }
 
 let cleanupInFlight = false;
-export async function runAsyncRunGc(options: AsyncRunGcOptions = {}): Promise<AsyncRunGcSummary | null> {
+
+export type AsyncRunGcWorkerFactory = (request: AsyncRunGcWorkerRequest) => Worker;
+
+function createAsyncRunGcWorker(request: AsyncRunGcWorkerRequest): Worker {
+	return new Worker(new URL("./async-run-retention-worker.ts", import.meta.url), {
+		workerData: request,
+	});
+}
+
+/**
+ * Startup entry point: run the sweep on a worker thread.
+ *
+ * The sweep reads 4k run directories and their status files and walks /proc, which took
+ * ~2.5s inline and was visible as TUI input lag. Inline execution left no option for the
+ * caller, so the work moves to a worker and the main thread only relays the summary line.
+ *
+ * An unfinished sweep does not keep the process alive: quitting pi mid-sweep truncates it.
+ * That is safe because the sweep is idempotent and a partially removed directory reads as
+ * an unreadable status, which is kept rather than pruned.
+ *
+ * Failures are reported through `log` (which the extension appends to the session) instead
+ * of being swallowed: a worker that never starts would otherwise disable housekeeping
+ * silently.
+ */
+export async function runAsyncRunGc(
+	options: AsyncRunGcHostOptions & { log?: (line: string) => void } = {},
+	workerFactory: AsyncRunGcWorkerFactory = createAsyncRunGcWorker,
+): Promise<AsyncRunGcSummary | null> {
+	const { log, ...hostOptions } = options;
 	if (process.env.PI_SUBAGENTS_GC?.toLowerCase() === "off") {
-		options.log?.("[subagent async-run GC] disabled=env");
+		log?.("[subagent async-run GC] disabled=env");
 		return null;
+	}
+	for (const injectable of ["scanOpenFds", "isPidAlive"] as const) {
+		if ((options as AsyncRunGcOptions)[injectable] !== undefined) {
+			log?.(`[subagent async-run GC] failed: ${injectable} cannot cross a worker thread; call pruneAsyncRunDirs directly`);
+			return null;
+		}
 	}
 	if (cleanupInFlight) return null;
 	cleanupInFlight = true;
 	try {
-		// Let startup timers, I/O, and signal callbacks run before filesystem work begins.
-		await new Promise<void>((resolve) => setImmediate(resolve));
-		return pruneAsyncRunDirs(options);
+		let worker: Worker;
+		try {
+			worker = workerFactory({ options: hostOptions });
+		} catch (error) {
+			log?.(`[subagent async-run GC] failed: ${error instanceof Error ? error.message : String(error)}`);
+			return null;
+		}
+		// Let startup timers, I/O, and signal callbacks run while the worker sweeps, and do
+		// not hold the process open once the session is done.
+		worker.unref();
+		return await new Promise<AsyncRunGcSummary | null>((resolve) => {
+			let settled = false;
+			const finish = (summary: AsyncRunGcSummary | null): void => {
+				if (settled) return;
+				settled = true;
+				worker.removeAllListeners();
+				resolve(summary);
+			};
+			worker.on("message", (message: { type?: string; line?: string; summary?: AsyncRunGcSummary; message?: string }) => {
+				if (message?.type === "log" && typeof message.line === "string") log?.(message.line);
+				else if (message?.type === "result" && message.summary) finish(message.summary);
+				else {
+					log?.(`[subagent async-run GC] failed: worker reported ${String(message?.message ?? "an unknown message")}`);
+					finish(null);
+				}
+			});
+			worker.on("error", (error: Error) => {
+				log?.(`[subagent async-run GC] failed: ${error.message}`);
+				finish(null);
+			});
+			worker.on("exit", (code: number) => {
+				if (settled) return;
+				log?.(`[subagent async-run GC] failed: worker exited before reporting (code ${code})`);
+				finish(null);
+			});
+		});
 	} finally {
 		cleanupInFlight = false;
 	}
