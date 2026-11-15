@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { compareAsyncRuns, formatAsyncRunList, listAsyncRuns, listAsyncRunsYielding, summarizeAsyncStatus } from "../../src/runs/background/async-status.ts";
+import { compareAsyncRuns, formatAsyncRunList, listAsyncRuns, listAsyncRunsOnWorker, listAsyncRunsYielding, summarizeAsyncStatus } from "../../src/runs/background/async-status.ts";
 import { inspectSubagentFleet } from "../../src/runs/background/fleet-view.ts";
 
 function createAsyncDir(root: string, id: string, status: Record<string, unknown>): string {
@@ -91,6 +91,23 @@ describe("async status helpers", () => {
 			const yielding = await pending;
 			assert.deepEqual(yielding.map((run) => run.id), sync.map((run) => run.id));
 			assert.equal(eventLoopRan, true, "scan yields to the event loop between run entries");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("lists runs on a worker while the main event loop remains responsive to large status files", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-status-worker-"));
+		try {
+			createAsyncDir(root, "large-run", {
+				runId: "large-run", sessionId: "session-1", mode: "single", state: "running", startedAt: 100, lastUpdate: 200,
+				steps: [], unusedPayload: "x".repeat(16 * 1024 * 1024),
+			});
+			let eventLoopRan = false;
+			setImmediate(() => { eventLoopRan = true; });
+			const runs = await listAsyncRunsOnWorker(root, { states: ["running"], sessionId: "session-1" });
+			assert.equal(runs[0]?.id, "large-run");
+			assert.equal(eventLoopRan, true, "main event loop must run while the status file is parsed off-thread");
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

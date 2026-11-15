@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { Worker } from "node:worker_threads";
 import { formatDuration, formatModelThinking, formatTokens, shortenPath } from "../../shared/formatters.ts";
 import { formatActivityLabel, formatParallelOutcome } from "../../shared/status-format.ts";
 import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type CostSummary, type NestedRunSummary, type SteeringStatus, type SubagentRunMode, type TokenUsage, type TurnBudgetState } from "../../shared/types.ts";
@@ -380,6 +381,48 @@ export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions
 
 	const sorted = sortRuns(runs);
 	return options.limit !== undefined ? sorted.slice(0, options.limit) : sorted;
+}
+
+/**
+ * Restore runs off-thread. A time slice around the directory loop cannot bound a single
+ * status.json read/parse, which can itself take hundreds of milliseconds on retained data.
+ */
+export async function listAsyncRunsOnWorker(
+	asyncDirRoot: string,
+	options: Pick<AsyncRunListOptions, "states" | "sessionId" | "resultsDir"> = {},
+	shouldContinue: () => boolean = () => true,
+): Promise<AsyncRunSummary[]> {
+	if (!shouldContinue()) return [];
+	const worker = new Worker(new URL("./async-status-worker.ts", import.meta.url), {
+		workerData: { asyncDirRoot, options },
+	});
+	worker.unref();
+
+	return await new Promise<AsyncRunSummary[]>((resolve, reject) => {
+		let settled = false;
+		const finish = (error?: Error, runs: AsyncRunSummary[] = []): void => {
+			if (settled) return;
+			settled = true;
+			clearInterval(cancellationPoll);
+			worker.removeAllListeners();
+			if (error) reject(error);
+			else resolve(runs);
+		};
+		const cancellationPoll = setInterval(() => {
+			if (!shouldContinue()) {
+				void worker.terminate();
+				finish();
+			}
+		}, 25);
+		worker.on("message", (message: { type?: string; runs?: AsyncRunSummary[]; error?: string }) => {
+			if (message?.type === "result" && Array.isArray(message.runs)) finish(undefined, message.runs);
+			else finish(new Error(message?.error ?? "Async run listing worker returned an invalid response"));
+		});
+		worker.on("error", (error: Error) => finish(error));
+		worker.on("exit", (code: number) => {
+			if (!settled) finish(new Error(`Async run listing worker exited before reporting (code ${code})`));
+		});
+	});
 }
 
 /** Enumerate active runs asynchronously, yielding after each run so restoration cannot monopolize input. */

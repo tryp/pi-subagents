@@ -19,7 +19,7 @@ import { readStatus } from "../../shared/utils.ts";
 import { normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
 import { hasLiveNestedDescendants, updateAsyncJobNestedProjection } from "../shared/nested-events.ts";
-import { listAsyncRuns, type AsyncRunSummary } from "./async-status.ts";
+import { listAsyncRuns, listAsyncRunsOnWorker, type AsyncRunSummary } from "./async-status.ts";
 import { releaseTerminalCwdClaims } from "../shared/cwd-claims.ts";
 import {
 	CONTROL_EVENT_READ_CHUNK_BYTES,
@@ -509,12 +509,17 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events" | "appendE
 	const restoreActiveJobsYielding = async (ctx: ExtensionContext | undefined, shouldContinue: () => boolean) => {
 		if (ctx?.hasUI) state.lastUiContext = ctx;
 		if (!state.currentSessionId || !shouldContinue()) return;
-		// This is the deferred reconcile phase: each entry is reconciled by the
-		// yielding scanner, which returns to the event loop before the next entry.
-		const runs = await listAsyncRuns(asyncDirRoot, {
-			states: ["queued", "running"], sessionId: state.currentSessionId, resultsDir, kill: options.kill, now: options.now,
-			reconcile: "yielding", shouldContinue,
-		});
+		// A per-entry yield cannot bound one large status.json read/parse. Keep the
+		// entire synchronous reconciliation scan off the TUI thread; injected time
+		// and liveness functions remain on the in-process test path.
+		const runs = options.kill || options.now
+			? await listAsyncRuns(asyncDirRoot, {
+				states: ["queued", "running"], sessionId: state.currentSessionId, resultsDir, kill: options.kill, now: options.now,
+				reconcile: "yielding", shouldContinue,
+			})
+			: await listAsyncRunsOnWorker(asyncDirRoot, {
+				states: ["queued", "running"], sessionId: state.currentSessionId, resultsDir,
+			}, shouldContinue);
 		if (shouldContinue()) applyRestoredRuns(runs);
 	};
 

@@ -29,8 +29,8 @@ describe("deferred startup reconciliation wiring", () => {
 
 		assert.doesNotMatch(restore, /\bconsole\s*\./);
 		assert.doesNotMatch(scan, /\bconsole\s*\./);
-		assert.match(restore, /reconcile:\s*"yielding"/, "deferred timer path must own bounded stale-run reconciliation");
-		assert.match(status, /await yieldToEventLoop\(\)/, "reconciliation scan yields before the next entry");
+		assert.match(restore, /listAsyncRunsOnWorker\(/, "deferred restoration must offload unbounded single-file status parsing");
+		assert.match(status, /await yieldToEventLoop\(\)/, "non-startup yielding scans still return to the event loop between entries");
 		assert.match(schedule, /pi\.appendEntry\("subagent_startup_maintenance"/);
 		assert.doesNotMatch(schedule, /\bconsole\s*\./);
 	});
