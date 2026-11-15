@@ -13,6 +13,7 @@ import {
 	pruneExpiredSalvageRefs,
 	resolveParallelChildCwd,
 	resolveExpectedWorktreeAgentCwd,
+	worktreeRootMismatchReason,
 	type WorktreeSetup,
 } from "../../src/runs/shared/worktree.ts";
 
@@ -69,6 +70,23 @@ describe("worktree", () => {
 
 	it("preserves parent cwd when a parallel child has no worktree allocation", () => {
 		assert.equal(resolveParallelChildCwd("/parent"), "/parent");
+	});
+
+	it("rejects a tool policy rooted in a different worktree before launch and permits the assigned repo", () => {
+		const assignedRepo = createRepo("pi-worktree-policy-assigned-");
+		const otherRepo = createRepo("pi-worktree-policy-other-");
+		try {
+			const nestedPolicyRoot = path.join(assignedRepo, "nested");
+			fs.mkdirSync(nestedPolicyRoot);
+			assert.equal(worktreeRootMismatchReason({ assignedCwd: assignedRepo, childCwd: assignedRepo, policyRoot: nestedPolicyRoot }), undefined);
+			const mismatch = worktreeRootMismatchReason({ assignedCwd: assignedRepo, childCwd: assignedRepo, policyRoot: otherRepo });
+			assert.match(mismatch ?? "", /Blocked before implementation: root mismatch/);
+			assert.match(mismatch ?? "", /Retry without worktree/);
+			assert.match(worktreeRootMismatchReason({ assignedCwd: assignedRepo, childCwd: otherRepo }) ?? "", /child cwd .* differs from assigned worktree cwd/);
+		} finally {
+			cleanupRepo(assignedRepo);
+			cleanupRepo(otherRepo);
+		}
 	});
 	it("createWorktrees returns expected structure", () => {
 		const repoDir = createRepo("pi-worktree-structure-");

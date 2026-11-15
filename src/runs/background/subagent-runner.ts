@@ -99,6 +99,7 @@ import {
 	formatWorktreeTaskCwdConflict,
 	assertWorktreeChildCwd,
 	resolveParallelChildCwd,
+	worktreeRootMismatchReason,
 	type WorktreeSalvageOutcome,
 	type WorktreeSetup,
 } from "../shared/worktree.ts";
@@ -1068,13 +1069,25 @@ async function runSingleStep(
 	structuredOutputPath?: string;
 	structuredOutputSchemaPath?: string;
 	acceptance?: import("../../shared/types.ts").AcceptanceLedger;
+	failureKind?: AsyncStepFailureKind;
+	retryable?: boolean;
 }> {
 	const effectiveTimeoutMessage = step.timeoutMs !== undefined ? `Subagent timed out after ${step.timeoutMs}ms.` : ctx.timeoutMessage;
 	if (ctx.expectedWorktreeCwd) {
-		const resolvedChildCwd = path.resolve(step.cwd ?? ctx.cwd);
-		const expectedWorktreeCwd = path.resolve(ctx.expectedWorktreeCwd);
-		if (resolvedChildCwd !== expectedWorktreeCwd) {
-			return { agent: step.agent, output: "", exitCode: 1, error: `Refusing to run child in unexpected cwd: expected worktree cwd ${expectedWorktreeCwd}, resolved child cwd ${resolvedChildCwd}` };
+		const worktreeMismatch = worktreeRootMismatchReason({
+			assignedCwd: ctx.expectedWorktreeCwd,
+			childCwd: step.cwd ?? ctx.cwd,
+			policyRoot: step.expectedWorktreeRoot,
+		});
+		if (worktreeMismatch) {
+			return {
+				agent: step.agent,
+				output: worktreeMismatch,
+				exitCode: 1,
+				error: worktreeMismatch,
+				failureKind: "worktree_root_mismatch",
+				retryable: true,
+			};
 		}
 	}
 	if (step.importAsyncRoot) {
@@ -1652,6 +1665,7 @@ function markParallelGroupSetupFailure(input: {
 	runId: string;
 	stepIndex: number;
 }): void {
+	const worktreeRootMismatch = input.setupError.includes("Blocked before implementation: root mismatch");
 	for (let taskIndex = 0; taskIndex < input.group.parallel.length; taskIndex++) {
 		const flatTaskIndex = input.groupStartFlatIndex + taskIndex;
 		input.statusPayload.steps[flatTaskIndex].status = "failed";
@@ -1659,7 +1673,23 @@ function markParallelGroupSetupFailure(input: {
 		input.statusPayload.steps[flatTaskIndex].endedAt = input.failedAt;
 		input.statusPayload.steps[flatTaskIndex].durationMs = 0;
 		input.statusPayload.steps[flatTaskIndex].exitCode = 1;
-		input.results.push({ agent: input.group.parallel[taskIndex].agent, output: input.setupError, success: false, exitCode: 1, sessionFile: input.group.parallel[taskIndex].sessionFile });
+		if (worktreeRootMismatch) {
+			input.statusPayload.steps[flatTaskIndex].failureKind = "worktree_root_mismatch";
+			input.statusPayload.steps[flatTaskIndex].retryable = true;
+		}
+		input.results.push({
+			agent: input.group.parallel[taskIndex].agent,
+			output: input.setupError,
+			error: input.setupError,
+			success: false,
+			exitCode: 1,
+			sessionFile: input.group.parallel[taskIndex].sessionFile,
+			...(worktreeRootMismatch ? { failureKind: "worktree_root_mismatch", retryable: true } : {}),
+		});
+	}
+	if (worktreeRootMismatch) {
+		input.statusPayload.failureKind = "worktree_root_mismatch";
+		input.statusPayload.retryable = true;
 	}
 	input.statusPayload.currentStep = input.groupStartFlatIndex;
 	input.statusPayload.lastUpdate = input.failedAt;
@@ -3715,7 +3745,9 @@ async function runSubagent(
 			} else {
 			try {
 				singleResult = await runSingleStep(seqStep, {
-					previousOutput, placeholder, cwd: seqTaskCwd, sessionEnabled,
+					previousOutput, placeholder, cwd: seqTaskCwd,
+					...(seqWorktreeSetup ? { expectedWorktreeCwd: seqWorktreeSetup.worktrees[0]!.agentCwd } : {}),
+					sessionEnabled,
 				outputs: statusPayload.mode === "single" ? undefined : outputs,
 				sessionDir: config.sessionDir,
 				artifactsDir, artifactConfig, id,
@@ -3789,6 +3821,8 @@ async function runSubagent(
 				structuredOutputSchemaPath: singleResult.structuredOutputSchemaPath,
 				acceptance: singleResult.acceptance,
 				watchdog: singleResult.watchdog,
+				failureKind: singleResult.failureKind,
+				retryable: singleResult.retryable,
 				interrupted: singleResult.interrupted,
 				timedOut: timedOut || singleResult.timedOut ? true : undefined,
 				stopped: stopped || childStopped ? true : undefined,

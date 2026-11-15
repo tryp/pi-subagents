@@ -11,6 +11,35 @@ export function assertWorktreeChildCwd(resolvedChildCwd: string, expectedWorktre
 	}
 }
 
+/** Return a retriable launch error when a child's cwd or tool policy disagrees with its assigned worktree. */
+export function worktreeRootMismatchReason(input: {
+	assignedCwd?: string;
+	childCwd?: string;
+	policyRoot?: string;
+}): string | undefined {
+	const { assignedCwd, childCwd, policyRoot } = input;
+	if (!assignedCwd) return undefined;
+	const assigned = path.resolve(assignedCwd);
+	if (childCwd && path.resolve(childCwd) !== assigned) {
+		return `Blocked before implementation: root mismatch: child cwd ${path.resolve(childCwd)} differs from assigned worktree cwd ${assigned}. Retry without worktree or remove the conflicting cwd override.`;
+	}
+	if (policyRoot === undefined) return undefined;
+	if (!path.isAbsolute(policyRoot)) {
+		return `Blocked before implementation: root mismatch: tool-access policy root must be absolute (received ${policyRoot}). Retry without worktree or remove the conflicting expectedWorktreeRoot override.`;
+	}
+	try {
+		const assignedRoot = normalizeComparableCwd(runGitChecked(assigned, ["rev-parse", "--show-toplevel"]).trim());
+		const policyGitRoot = normalizeComparableCwd(runGitChecked(policyRoot, ["rev-parse", "--show-toplevel"]).trim());
+		if (assignedRoot !== policyGitRoot) {
+			return `Blocked before implementation: root mismatch: assigned worktree ${assignedRoot} differs from tool-access policy root ${policyGitRoot}. Retry without worktree or remove the conflicting expectedWorktreeRoot override.`;
+		}
+		return undefined;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return `Blocked before implementation: root mismatch: cannot verify assigned worktree ${assigned} against tool-access policy root ${policyRoot}: ${message}. Retry without worktree or remove the conflicting expectedWorktreeRoot override.`;
+	}
+}
+
 export function resolveParallelChildCwd(parentCwd: string, allocatedWorktreeCwd?: string): string {
 	if (!allocatedWorktreeCwd) return parentCwd;
 	return path.resolve(allocatedWorktreeCwd);
@@ -158,7 +187,7 @@ export function formatWorktreeTaskCwdConflict(
 	conflict: WorktreeTaskCwdConflict,
 	sharedCwd: string,
 ): string {
-	return `worktree isolation uses the shared cwd (${sharedCwd}); task ${conflict.index + 1} (${conflict.agent}) sets cwd to ${conflict.cwd}. Remove task-level cwd overrides or disable worktree.`;
+	return `Blocked before implementation: root mismatch: worktree isolation uses the shared cwd (${sharedCwd}); task ${conflict.index + 1} (${conflict.agent}) sets cwd to ${conflict.cwd}. Retry without worktree or remove the conflicting task-level cwd override.`;
 }
 
 function safeArtifactName(value: string): string {

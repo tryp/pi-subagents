@@ -95,7 +95,9 @@ function createSessionManager(parsed, cwd) {
 
 async function main() {
 	const parsed = parseArgs(process.argv.slice(2));
-	const responseText = process.env.PI_SUBAGENTS_E2E_CHILD_TEXT ?? "CHILD_REAL_SESSION_OK";
+	const responseText = process.env.PI_SUBAGENTS_E2E_REPORT_CHILD_CWD === "1"
+		? `CHILD_PROCESS_CWD:${process.cwd()}`
+		: process.env.PI_SUBAGENTS_E2E_CHILD_TEXT ?? "CHILD_REAL_SESSION_OK";
 	const reportChildTools = process.env.PI_SUBAGENTS_E2E_REPORT_CHILD_TOOLS === "1";
 	const writePath = process.env.PI_SUBAGENTS_E2E_CHILD_WRITE_PATH;
 	const cwd = process.cwd();
@@ -131,7 +133,8 @@ async function main() {
 				: fauxAssistantMessage(fauxText(reportChildTools ? `ACTIVE_TOOLS:${session?.getActiveToolNames().sort().join(",") ?? ""}` : responseText), { stopReason: "stop" }),
 		(context) => {
 			const result = [...context.messages].reverse().find((message) => message.role === "toolResult");
-			return fauxAssistantMessage(fauxText(`WRITE_TOOL_RESULT:${JSON.stringify(result?.content ?? [])}`), { stopReason: "stop" });
+			const cwdReport = process.env.PI_SUBAGENTS_E2E_REPORT_CHILD_CWD === "1" ? `\nCHILD_PROCESS_CWD:${process.cwd()}` : "";
+			return fauxAssistantMessage(fauxText(`WRITE_TOOL_RESULT:${JSON.stringify(result?.content ?? [])}${cwdReport}`), { stopReason: "stop" });
 		},
 	]);
 

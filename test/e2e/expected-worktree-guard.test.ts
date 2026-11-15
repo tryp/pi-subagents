@@ -1,7 +1,7 @@
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { tryImport } from "../support/helpers.ts";
@@ -10,6 +10,24 @@ const piCodingAgent = await tryImport<unknown>("@earendil-works/pi-coding-agent"
 const piAi = await tryImport<unknown>("@earendil-works/pi-ai");
 const available = Boolean(piCodingAgent && piAi);
 const scratch = mkdtempSync(path.join(os.tmpdir(), "expected-worktree-guard-e2e-"));
+
+function createCommittedProject(repo: string): void {
+	mkdirSync(path.join(repo, ".pi", "agents"), { recursive: true });
+	execFileSync("git", ["init", "--quiet", repo]);
+	execFileSync("git", ["-C", repo, "config", "user.email", "e2e@example.com"]);
+	execFileSync("git", ["-C", repo, "config", "user.name", "Subagent E2E"]);
+	writeFileSync(path.join(repo, ".pi", "agents", "writer.md"), `---
+name: writer
+description: Reports child cwd
+completionGuard: false
+tools: write
+---
+Report your exact process cwd.
+`, "utf-8");
+	writeFileSync(path.join(repo, "tracked.txt"), "fixture\n", "utf-8");
+	execFileSync("git", ["-C", repo, "add", "-A"]);
+	execFileSync("git", ["-C", repo, "commit", "--quiet", "-m", "E2E fixture"]);
+}
 
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
@@ -68,6 +86,67 @@ Write the requested marker file using the write tool.`;
 				await allowed.dispose();
 			}
 		} finally {
+			if (originalWritePath === undefined) delete process.env.PI_SUBAGENTS_E2E_CHILD_WRITE_PATH;
+			else process.env.PI_SUBAGENTS_E2E_CHILD_WRITE_PATH = originalWritePath;
+		}
+	});
+
+	it("uses the assigned cwd for a real worktree child and rejects a mismatched policy before spawning", async () => {
+		const { runRealSubagentSession, subagentCall, subagentToolResults } = await import("../support/real-session-runner.ts");
+		const projectRepo = path.join(scratch, "child-cwd-project");
+		const wrongPolicyRepo = path.join(scratch, "child-cwd-wrong-policy");
+		mkdirSync(projectRepo, { recursive: true });
+		mkdirSync(wrongPolicyRepo, { recursive: true });
+		createCommittedProject(projectRepo);
+		execFileSync("git", ["init", "--quiet", wrongPolicyRepo]);
+		const originalReportCwd = process.env.PI_SUBAGENTS_E2E_REPORT_CHILD_CWD;
+		const originalWritePath = process.env.PI_SUBAGENTS_E2E_CHILD_WRITE_PATH;
+		process.env.PI_SUBAGENTS_E2E_REPORT_CHILD_CWD = "1";
+		process.env.PI_SUBAGENTS_E2E_CHILD_WRITE_PATH = path.join(projectRepo, "outside-worktree-marker.txt");
+		const runWorktreeTask = (expectedWorktreeRoot?: string) => runRealSubagentSession({
+			cwd: projectRepo,
+			prompt: "Run the assigned worktree task and report its result.",
+			childText: "unused",
+			respond(context) {
+				const called = (context.messages as Array<{ role?: string; toolName?: string }>).some((message) => message.role === "toolResult" && message.toolName === "subagent");
+				if (called) return "Child finished.";
+				return subagentCall({
+					tasks: [{ agent: "writer", task: "Report your exact process.cwd().", ...(expectedWorktreeRoot ? { expectedWorktreeRoot } : {}) }],
+					worktree: true,
+					async: false,
+					agentScope: "project",
+					context: "fresh",
+				}, expectedWorktreeRoot ? "call-mismatched-worktree" : "call-matched-worktree");
+			},
+			timeoutMs: 90_000,
+		});
+
+		try {
+			const launched = await runWorktreeTask();
+			try {
+				const launchedResult = subagentToolResults(launched.parentSession).join("\n");
+				const cwdMatch = launchedResult.match(/CHILD_PROCESS_CWD:([^\s\]]+)/);
+				assert.ok(cwdMatch, `real child should report process.cwd(): ${launchedResult}`);
+				assert.notEqual(path.resolve(cwdMatch![1]!), projectRepo);
+				assert.match(cwdMatch![1]!, /pi-worktree-/);
+				assert.match(launchedResult, /resolves outside assigned worktree/);
+				assert.equal(existsSync(path.join(projectRepo, "outside-worktree-marker.txt")), false);
+			} finally {
+				await launched.dispose();
+			}
+
+			const rejected = await runWorktreeTask(wrongPolicyRepo);
+			try {
+				const rejectedResult = subagentToolResults(rejected.parentSession).join("\n");
+				assert.match(rejectedResult, /Blocked before implementation: root mismatch/);
+				assert.match(rejectedResult, /Retry without worktree/);
+				assert.doesNotMatch(rejectedResult, /CHILD_PROCESS_CWD:/, "mismatched policy must fail before a child process starts");
+			} finally {
+				await rejected.dispose();
+			}
+		} finally {
+			if (originalReportCwd === undefined) delete process.env.PI_SUBAGENTS_E2E_REPORT_CHILD_CWD;
+			else process.env.PI_SUBAGENTS_E2E_REPORT_CHILD_CWD = originalReportCwd;
 			if (originalWritePath === undefined) delete process.env.PI_SUBAGENTS_E2E_CHILD_WRITE_PATH;
 			else process.env.PI_SUBAGENTS_E2E_CHILD_WRITE_PATH = originalWritePath;
 		}

@@ -688,6 +688,10 @@ export interface SingleResult {
 	structuredOutputPath?: string;
 	structuredOutputSchemaPath?: string;
 	acceptance?: AcceptanceLedger;
+	/** Structured launch failure classification for failures detected before a child starts. */
+	failureKind?: AsyncStepFailureKind;
+	/** True when the parent may safely retry the launch after correcting its inputs. */
+	retryable?: boolean;
 	transcriptPath?: string;
 	transcriptError?: string;
 	children?: NestedRunSummary[];
@@ -714,6 +718,10 @@ export interface SpawnBudgetSnapshot {
 
 export interface Details {
 	mode: SubagentRunMode | "management";
+	/** Classified launch failure for a run rejected before children start. */
+	failureKind?: AsyncStepFailureKind;
+	/** True when correcting the launch inputs permits a safe retry. */
+	retryable?: boolean;
 	runId?: string;
 	context?: "fresh" | "fork";
 	results: SingleResult[];
@@ -1024,7 +1032,7 @@ export interface AsyncStatus {
 	outputs?: ChainOutputMap;
 }
 
-export type AsyncStepFailureKind = "compacted_then_aborted" | "compacted_abort_after_resume";
+export type AsyncStepFailureKind = "compacted_then_aborted" | "compacted_abort_after_resume" | "worktree_root_mismatch";
 
 /**
  * What the end of a child transcript says about compaction.
