@@ -11,6 +11,16 @@ export function assertWorktreeChildCwd(resolvedChildCwd: string, expectedWorktre
 	}
 }
 
+function normalizeFilesystemPath(value: string): string {
+	const resolved = path.resolve(value);
+	try {
+		return fs.realpathSync.native(resolved);
+	} catch {
+		// The child cwd may not exist yet; retain the existing lexical comparison in that case.
+		return resolved;
+	}
+}
+
 /** Return a retriable launch error when a child's cwd or tool policy disagrees with its assigned worktree. */
 export function worktreeRootMismatchReason(input: {
 	assignedCwd?: string;
@@ -20,8 +30,12 @@ export function worktreeRootMismatchReason(input: {
 	const { assignedCwd, childCwd, policyRoot } = input;
 	if (!assignedCwd) return undefined;
 	const assigned = path.resolve(assignedCwd);
-	if (childCwd && path.resolve(childCwd) !== assigned) {
-		return `Blocked before implementation: root mismatch: child cwd ${path.resolve(childCwd)} differs from assigned worktree cwd ${assigned}. Retry without worktree or remove the conflicting cwd override.`;
+	if (childCwd) {
+		const normalizedAssigned = normalizeFilesystemPath(assigned);
+		const normalizedChild = normalizeFilesystemPath(childCwd);
+		if (normalizedChild !== normalizedAssigned) {
+			return `Blocked before implementation: root mismatch: child cwd ${normalizedChild} differs from assigned worktree cwd ${normalizedAssigned}. Retry without worktree or remove the conflicting cwd override.`;
+		}
 	}
 	if (policyRoot === undefined) return undefined;
 	if (!path.isAbsolute(policyRoot)) {
