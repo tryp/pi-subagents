@@ -59,6 +59,8 @@ function writePackageAgent(name: string): void {
 describe("agent eject/disable/enable/reset management actions", () => {
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-eject-"));
+		// A test project under $HOME/tmp would otherwise inherit the real ~/.pi as an ancestor.
+		fs.mkdirSync(path.join(tempDir, ".pi"), { recursive: true });
 		oldAgentDir = process.env.PI_CODING_AGENT_DIR;
 		process.env.PI_CODING_AGENT_DIR = path.join(tempDir, "agent-home");
 		clearSkillCache();
