@@ -13,6 +13,7 @@ import {
 	pruneExpiredSalvageRefs,
 	resolveParallelChildCwd,
 	resolveExpectedWorktreeAgentCwd,
+	worktreeRootMismatchReason,
 	type WorktreeSetup,
 } from "../../src/runs/shared/worktree.ts";
 
@@ -70,6 +71,46 @@ describe("worktree", () => {
 	it("preserves parent cwd when a parallel child has no worktree allocation", () => {
 		assert.equal(resolveParallelChildCwd("/parent"), "/parent");
 	});
+
+	it("rejects a tool policy rooted in a different worktree before launch and permits the assigned repo", () => {
+		const assignedRepo = createRepo("pi-worktree-policy-assigned-");
+		const otherRepo = createRepo("pi-worktree-policy-other-");
+		try {
+			const nestedPolicyRoot = path.join(assignedRepo, "nested");
+			fs.mkdirSync(nestedPolicyRoot);
+			assert.equal(worktreeRootMismatchReason({ assignedCwd: assignedRepo, childCwd: assignedRepo, policyRoot: nestedPolicyRoot }), undefined);
+			const mismatch = worktreeRootMismatchReason({ assignedCwd: assignedRepo, childCwd: assignedRepo, policyRoot: otherRepo });
+			assert.match(mismatch ?? "", /Blocked before implementation: root mismatch/);
+			assert.match(mismatch ?? "", /Retry without worktree/);
+			assert.match(worktreeRootMismatchReason({ assignedCwd: assignedRepo, childCwd: otherRepo }) ?? "", /child cwd .* differs from assigned worktree cwd/);
+		} finally {
+			cleanupRepo(assignedRepo);
+			cleanupRepo(otherRepo);
+		}
+	});
+
+	it("accepts a symlink alias for the assigned child cwd", (t) => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-worktree-cwd-alias-"));
+		const assignedCwd = path.join(root, "assigned");
+		const childAlias = path.join(root, "child-alias");
+		fs.mkdirSync(assignedCwd);
+		try {
+			fs.symlinkSync(assignedCwd, childAlias, "dir");
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (!code || !["EACCES", "EPERM", "ENOTSUP", "EOPNOTSUPP"].includes(code)) throw error;
+			cleanupRepo(root);
+			t.skip(`Cannot create directory symlink on this filesystem (${code}): ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+		try {
+			assert.equal(worktreeRootMismatchReason({ assignedCwd, childCwd: childAlias }), undefined);
+			assert.match(worktreeRootMismatchReason({ assignedCwd, childCwd: path.join(root, "different") }) ?? "", /child cwd .* differs from assigned worktree cwd/);
+		} finally {
+			cleanupRepo(root);
+		}
+	});
+
 	it("createWorktrees returns expected structure", () => {
 		const repoDir = createRepo("pi-worktree-structure-");
 		let setup: WorktreeSetup | undefined;

@@ -63,7 +63,10 @@ test("runSync refuses a resolved execution cwd outside its allocated worktree", 
 				expectedWorktreeCwd: expectedCwd,
 			});
 			assert.equal(result.exitCode, 1);
-			assert.match(result.error ?? "", new RegExp(`expected worktree cwd ${expectedCwd}, resolved child cwd ${resolvedCwd}`));
+			assert.match(result.error ?? "", /Blocked before implementation: root mismatch/);
+			assert.match(result.error ?? "", new RegExp(`assigned worktree cwd ${expectedCwd}`));
+			assert.equal(result.failureKind, "worktree_root_mismatch");
+			assert.equal(result.retryable, true);
 		});
 	});
 });

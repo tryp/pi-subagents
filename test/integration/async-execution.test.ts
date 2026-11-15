@@ -2256,6 +2256,47 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		}
 	});
 
+	it("fails async worktree policy-root mismatches as retriable before spawning children", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
+		const repoDir = createRepo("pi-subagent-async-worktree-policy-");
+		const wrongPolicyRepo = createRepo("pi-subagent-async-worktree-wrong-policy-");
+		try {
+			const executor = createSubagentExecutor!({
+				pi: { events: createEventBus(), getSessionName: () => undefined },
+				state: { baseCwd: repoDir, currentSessionId: null, asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
+				config: {},
+				asyncByDefault: false,
+				tempArtifactsDir: repoDir,
+				getSubagentSessionRoot: () => repoDir,
+				expandTilde: (p: string) => p,
+				discoverAgents: () => ({ agents: [makeAgent("worker")] }),
+			});
+
+			const result = await executor.execute(
+				"async-worktree-policy-mismatch",
+				{
+					tasks: [{ agent: "worker", task: "Must not start", expectedWorktreeRoot: wrongPolicyRepo }],
+					async: true,
+					clarify: false,
+					worktree: true,
+				},
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(repoDir),
+			);
+			const asyncId = result.details?.asyncId;
+			assert.ok(asyncId, "expected asyncId");
+			await waitForAsyncResultFile(asyncId, 90_000);
+			const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, asyncId, "status.json"), "utf-8")) as AsyncStatusPayload;
+			assert.equal(status.steps?.[0]?.failureKind, "worktree_root_mismatch");
+			assert.equal(status.steps?.[0]?.retryable, true);
+			assert.match(status.steps?.[0]?.error ?? "", /Retry without worktree/);
+			assert.equal(mockPi.callCount(), 0, "mismatched policy must fail before the child process starts");
+		} finally {
+			removeTempDir(repoDir);
+			removeTempDir(wrongPolicyRepo);
+		}
+	});
+
 	it("readStatus caches unchanged files and invalidates same-mtime replacements", () => {
 		const dir = createTempDir();
 		try {

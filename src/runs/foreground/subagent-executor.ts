@@ -2486,10 +2486,15 @@ interface ForegroundParallelRunInput {
 }
 
 function buildParallelModeError(message: string): AgentToolResult<Details> {
+	const worktreeRootMismatch = message.includes("Blocked before implementation: root mismatch");
 	return {
 		content: [{ type: "text", text: message }],
 		isError: true,
-		details: { mode: "parallel" as const, results: [] },
+		details: {
+			mode: "parallel" as const,
+			results: [],
+			...(worktreeRootMismatch ? { failureKind: "worktree_root_mismatch" as const, retryable: true } : {}),
+		},
 	};
 }
 

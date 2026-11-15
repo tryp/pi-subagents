@@ -32,6 +32,7 @@ import {
 	getSubagentDepthEnv,
 } from "../../shared/types.ts";
 import { formatSharedContextPreamble } from "../shared/shared-context.ts";
+import { worktreeRootMismatchReason } from "../shared/worktree.ts";
 import { CompactionSettlementTracker, recoverAbortOnce } from "../shared/abort-recovery.ts";
 import {
 	DEFAULT_CONTROL_CONFIG,
@@ -1249,10 +1250,22 @@ export async function runSync(
 		};
 	}
 	if (options.expectedWorktreeCwd) {
-		const resolvedCwd = path.resolve(options.cwd ?? runtimeCwd);
-		const expectedCwd = path.resolve(options.expectedWorktreeCwd);
-		if (resolvedCwd !== expectedCwd) {
-			return { agent: agentName, task, exitCode: 1, messages: [], usage: emptyUsage(), error: `Refusing to run child in unexpected cwd: expected worktree cwd ${expectedCwd}, resolved child cwd ${resolvedCwd}` };
+		const worktreeMismatch = worktreeRootMismatchReason({
+			assignedCwd: options.expectedWorktreeCwd,
+			childCwd: options.cwd ?? runtimeCwd,
+			policyRoot: options.expectedWorktreeRoot,
+		});
+		if (worktreeMismatch) {
+			return {
+				agent: agentName,
+				task,
+				exitCode: 1,
+				messages: [],
+				usage: emptyUsage(),
+				error: worktreeMismatch,
+				failureKind: "worktree_root_mismatch",
+				retryable: true,
+			};
 		}
 	}
 	const outputModeValidationError = validateFileOnlyOutputMode(options.outputMode, options.outputPath, `Single run (${agentName})`);
