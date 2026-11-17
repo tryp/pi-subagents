@@ -2,7 +2,8 @@ import { isDynamicParallelStep, isParallelStep, type ChainStep } from "../../sha
 
 interface InvocationModelParams {
 	model?: string;
-	tasks?: Array<{ agent: string; model?: string }>;
+	modelSource?: "session-default";
+	tasks?: Array<{ agent: string; model?: string; modelSource?: "session-default" }>;
 	chain?: ChainStep[];
 }
 
@@ -13,8 +14,8 @@ interface InvocationModelParams {
 export function applyInvocationModelDefaults<T extends InvocationModelParams>(params: T): T {
 	const model = params.model;
 	if (model === undefined) return params;
-	const withDefault = <E extends { model?: string }>(entry: E): E =>
-		entry.model === undefined ? { ...entry, model } : entry;
+	const withDefault = <E extends { model?: string; modelSource?: "session-default" }>(entry: E): E =>
+		entry.model === undefined ? { ...entry, model, ...(params.modelSource ? { modelSource: params.modelSource } : {}) } : entry;
 	return {
 		...params,
 		...(params.tasks ? { tasks: params.tasks.map(withDefault) } : {}),

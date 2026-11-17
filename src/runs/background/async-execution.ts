@@ -190,6 +190,7 @@ interface AsyncSingleParams {
 	outputMode?: "inline" | "file-only";
 	outputBaseDir?: string;
 	modelOverride?: string;
+	modelOverrideSource?: "session-default";
 	/** True when this child forks the parent session; a defaulted agent model must then lose to the parent's. */
 	forked?: boolean;
 	/**
@@ -690,6 +691,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			ctx.currentModelProvider,
 			{
 				scope: ctx.modelScope,
+				modelSource: s.modelSource,
 				// `usesFork` means some agent forks, not all. Resolve each chain step
 				// by name; otherwise a fresh defaulted worker inherits the parent model.
 				forked: params.forked === true && (params.forkedAgents === undefined || params.forkedAgents.includes(s.agent)),
@@ -1214,6 +1216,7 @@ export function executeAsyncSingle(
 		ctx.currentModelProvider,
 		{
 			forked: params.forked === true,
+			modelSource: params.modelOverrideSource,
 			agentModelFromDefault: isDefaultedAgentModel(agentConfig.modelSource),
 		},
 	);

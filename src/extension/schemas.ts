@@ -340,7 +340,7 @@ const SubagentParamsSchema = Type.Object({
 	})),
 	outputMode: Type.Optional(OutputModeOverride),
 	skill: Type.Optional(SkillOverride),
-	model: Type.Optional(Type.String({ description: "Override model (e.g. 'openai-codex/gpt-5.6-luna'). In PARALLEL/CHAIN execution and append-step, supplies the default for tasks/steps without their own model; explicit entry models (including 'inherit') win. Bare names auto-resolve across providers. When omitted, existing agent/parent defaults apply. Use list/models actions to discover." })),
+	model: Type.Optional(Type.String({ description: "Model for execution or action='default-model': provider/model[:thinking], 'inherit', 'off', or 'clear'. The session default applies when later execution omits model and lasts until changed or the session ends. For execution, top-level model fills entries without their own model." })),
 	acceptance: Type.Optional(AcceptanceOverride),
 });
 

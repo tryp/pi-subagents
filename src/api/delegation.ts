@@ -80,6 +80,7 @@ export interface SubagentDelegationRequest {
 	task: string;
 	context: "fresh" | "fork";
 	cwd: string;
+	/** Programmatic delegation has no ExtensionContext; action='default-model' does not apply here. */
 	model?: string;
 	timeoutMs?: number;
 	turnBudget?: SubagentDelegationTurnBudget;

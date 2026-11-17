@@ -178,6 +178,8 @@ export interface ResolveSubagentModelOverrideOptions {
 export type SubagentModelSource =
 	/** Caller-supplied (`task.model` / `params.model`); always wins. */
 	| "explicit"
+	/** Session-scoped invocation default set through action='default-model'. */
+	| "session-default"
 	/** Declared on the agent itself (`model:` in frontmatter, or a settings override); always wins, fork or fresh. */
 	| "agent"
 	/** `subagents.defaultModel` filled the gap for a fresh child. */
@@ -255,6 +257,8 @@ export interface ResolveEffectiveSubagentModelOptions extends Omit<ResolveSubage
 	 * unaffected — naming a model is a decision about that agent, not a gap filler.
 	 */
 	forked?: boolean;
+	/** Provenance of a model materialized from the session default. */
+	modelSource?: "session-default";
 	/** True when `agentModel` came from `subagents.defaultModel` (see {@link isDefaultedAgentModel}). */
 	agentModelFromDefault?: boolean;
 }
@@ -320,7 +324,9 @@ export function resolveEffectiveSubagentModelWithSource(
 	return {
 		requested: requestedExplicit ?? requestedAgent,
 		model: resolved,
-		source: requestedExplicit !== undefined ? "explicit" : agentSourceOf(requestedAgent, options),
+		source: options?.modelSource && explicitModel !== undefined
+			? options.modelSource
+			: requestedExplicit !== undefined ? "explicit" : agentSourceOf(requestedAgent, options),
 	};
 }
 
@@ -360,6 +366,7 @@ export function resolveEffectiveSubagentModel(
 /** Human-readable provenance, as it appears in a launch receipt. */
 const MODEL_SOURCE_LABELS: Record<SubagentModelSource, string> = {
 	"explicit": "caller request",
+	"session-default": "session default",
 	"agent": "agent frontmatter",
 	"user-default": "user defaultModel",
 	"fork-parent": "fork: parent session",

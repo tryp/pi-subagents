@@ -47,6 +47,7 @@ import { registerStepResultEvents } from "../runs/background/step-result-events.
 import { resolveAsyncByDefault } from "../runs/background/async-default-config.ts";
 import { registerWaitTool } from "../runs/background/wait-tool.ts";
 import { resolveSupervisorCheckpointMs } from "../runs/shared/sync-wake.ts";
+import { SessionModelDefaultStore } from "../runs/shared/session-model-default.ts";
 import { recordToolStallTelemetry } from "../runs/shared/subagent-control.ts";
 import { drainOutstandingWork } from "../runs/background/auto-drain.ts";
 import { registerBackgroundWorkProvider } from "../api/background-work.ts";
@@ -285,6 +286,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	};
 
 	const supervisorChannel = createNativeSupervisorChannel(pi, state);
+	const sessionModelDefaults = new SessionModelDefaultStore();
 	const mainWatchdog = registerMainWatchdog(pi);
 	const backgroundWorkProvider = createSubagentBackgroundWorkProvider({
 		asyncDir: ASYNC_DIR,
@@ -349,6 +351,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		waitToolEnabled: waitToolConfig.enabled,
 		handleScheduledRunAction: (params, ctx) => scheduledRunManager.handleToolCall(params, ctx),
 		watchdog: mainWatchdog,
+		sessionModelDefaults,
 		tempArtifactsDir,
 		getSubagentSessionRoot,
 		expandTilde,
@@ -653,6 +656,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	};
 
 	pi.on("session_start", (_event, ctx) => {
+		sessionModelDefaults.clear();
 		resetSessionState(ctx);
 		rpcBridge.emitReady(ctx);
 		supervisorChannel.start();

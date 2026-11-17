@@ -76,6 +76,8 @@ import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
 import { inspectSubagentStatus } from "../background/run-status.ts";
 import { applyForceTopLevelAsyncOverride } from "../background/top-level-async.ts";
 import { applyInvocationModelDefaults } from "../shared/invocation-model.ts";
+import { SessionModelDefaultStore } from "../shared/session-model-default.ts";
+import { resolveWatchdogModelInput } from "../../watchdog/model-selection.ts";
 import {
 	cleanupWorktrees,
 	createWorktrees,
@@ -126,7 +128,7 @@ import {
 	wrapForkTask,
 } from "../../shared/types.ts";
 
-const MUTATING_MANAGEMENT_ACTIONS = new Set(["create", "update", "delete", "eject", "disable", "enable", "reset", "grant-spawn-budget", "watchdog.configure"]);
+const MUTATING_MANAGEMENT_ACTIONS = new Set(["create", "update", "delete", "eject", "disable", "enable", "reset", "grant-spawn-budget", "watchdog.configure", "default-model"]);
 interface TaskParam {
 	agent: string;
 	task: string;
@@ -138,6 +140,7 @@ interface TaskParam {
 	reads?: string[] | boolean;
 	progress?: boolean;
 	model?: string;
+	modelSource?: "session-default";
 	skill?: string | string[] | boolean;
 	acceptance?: AcceptanceInput;
 	toolBudget?: ToolBudgetConfig;
@@ -184,6 +187,7 @@ export interface SubagentParamsLike {
 	artifacts?: boolean;
 	includeProgress?: boolean;
 	model?: string;
+	modelSource?: "session-default";
 	thinking?: string | false;
 	scope?: string;
 	target?: string;
@@ -208,6 +212,7 @@ interface ExecutorDeps {
 	waitToolEnabled?: boolean;
 	handleScheduledRunAction?: (params: SubagentParamsLike, ctx: ExtensionContext) => Promise<AgentToolResult<Details>>;
 	watchdog?: MainWatchdogRuntime;
+	sessionModelDefaults?: SessionModelDefaultStore;
 	tempArtifactsDir: string;
 	getSubagentSessionRoot: (parentSessionFile: string | null) => string;
 	expandTilde: (p: string) => string;
@@ -1290,6 +1295,7 @@ async function resumeAsyncRun(input: {
 	const artifactConfig: ArtifactConfig = recoveryDescriptor?.artifactConfig ?? { ...DEFAULT_ARTIFACT_CONFIG, enabled: input.params.artifacts !== false };
 	const artifactsDir = recoveryDescriptor?.artifactsDir ?? getArtifactsDir(parentSessionFile, effectiveCwd);
 	const availableModels = input.ctx.modelRegistry.getAvailable().map(toModelInfo);
+	// Resume reuses the source run's persisted model choice; the sticky default only affects new launches.
 	const result = executeAsyncSingle(runId, {
 		agent: target.agent,
 		task: buildRevivedAsyncTask(target, followUp),
@@ -3330,6 +3336,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 				outputMode: effectiveOutputMode,
 				outputBaseDir: resolveSingleRunOutputBaseDir(deps, artifactsDir, id),
 				modelOverride,
+				modelOverrideSource: params.modelSource,
 				thinkingOverride: thinkingOverrideForTask(params.agent!, 0, modelOverride),
 				maxSubagentDepth,
 				waitToolEnabled: deps.waitToolEnabled,
@@ -3625,6 +3632,30 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		const paramsWithResolvedCwd = requestParams.cwd === undefined ? requestParams : { ...requestParams, cwd: requestCwd };
 		const action = paramsWithResolvedCwd.action;
 		if (action) {
+			if (action === "default-model") {
+				if (!deps.sessionModelDefaults) return { content: [{ type: "text", text: "Session model default runtime is unavailable." }], isError: true, details: { mode: "management", results: [] } };
+				if (deps.allowMutatingManagementActions === false) {
+					return { content: [{ type: "text", text: "Action 'default-model' is not available from child-safe subagent fanout mode." }], isError: true, details: { mode: "management", results: [] } };
+				}
+				const current = deps.sessionModelDefaults?.get(requestCwd);
+				const supplied = paramsWithResolvedCwd.model?.trim();
+				if (!supplied) {
+					const parent = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unavailable";
+					return { content: [{ type: "text", text: [
+						`Subagent session default model: ${current ?? "unset"}.`,
+						`Current parent session model: ${parent}.`,
+						`Persistence across sessions: configure subagents.defaultModel in settings.`,
+					].join("\n") }], details: { mode: "management", results: [] } };
+				}
+				if (supplied === "off" || supplied === "clear") {
+					deps.sessionModelDefaults?.set(requestCwd, undefined);
+					return { content: [{ type: "text", text: "Subagent session default cleared; existing agent/parent defaults apply." }], details: { mode: "management", results: [] } };
+				}
+				const resolvedModel = supplied === "inherit" ? undefined : resolveWatchdogModelInput(ctx, supplied);
+				const resolved = supplied === "inherit" ? "inherit" : `${resolvedModel!.model}${resolvedModel!.thinking ? `:${resolvedModel!.thinking}` : ""}`;
+				deps.sessionModelDefaults?.set(requestCwd, resolved);
+				return { content: [{ type: "text", text: `Subagent session default model set to ${resolved}; applies until changed or this session ends. No settings files were changed.` }], details: { mode: "management", results: [] } };
+			}
 			if ((WATCHDOG_TOOL_ACTIONS as readonly string[]).includes(action)) {
 				if (deps.allowMutatingManagementActions === false && MUTATING_MANAGEMENT_ACTIONS.has(action)) {
 					return {
@@ -3816,7 +3847,9 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				return steerAsyncRun({ state: deps.state, runId: resolved.id, message, index: paramsWithResolvedCwd.index, kill: deps.kill, location: resolved.location, signal, recover: ({ absoluteDeadlineAt, ...limits }) => resumeAsyncRun({ params: { ...limits, action: "resume", id: resolved!.id, message }, requestCwd, ctx, deps, absoluteDeadlineAt }) });
 			}
 			if (action === "append-step") {
-				return appendStepToAsyncChain({ params: applyInvocationModelDefaults(paramsWithResolvedCwd), requestCwd, ctx, deps });
+				const model = paramsWithResolvedCwd.model ?? deps.sessionModelDefaults?.get(requestCwd);
+				const params = model === undefined ? paramsWithResolvedCwd : { ...paramsWithResolvedCwd, model };
+				return appendStepToAsyncChain({ params: applyInvocationModelDefaults(params), requestCwd, ctx, deps });
 			}
 			if (action === "schedule" || action === "schedule-list" || action === "schedule-status" || action === "schedule-cancel") {
 				if (!deps.handleScheduledRunAction) {
@@ -3826,6 +3859,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 						details: { mode: "management", results: [] },
 					};
 				}
+				// Scheduled launches re-enter the executor when they fire, so the session default is read at launch time there.
 				return deps.handleScheduledRunAction(paramsWithResolvedCwd, ctx);
 			}
 			if (action === "stop") {
@@ -3946,7 +3980,13 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		if (normalized.error) return normalized.error;
 		const normalizedTimeouts = normalizeItemTimeouts(normalized.params!);
 		if (normalizedTimeouts.error) return normalizedTimeouts.error;
-		const normalizedParams = applyInvocationModelDefaults(normalizedTimeouts.params!);
+		const originalParams = normalizedTimeouts.params!;
+		const sessionDefaultModel = deps.sessionModelDefaults?.get(requestCwd);
+		const defaultedParams = originalParams.model === undefined && sessionDefaultModel !== undefined
+			? { ...originalParams, model: sessionDefaultModel, modelSource: "session-default" as const }
+			: originalParams;
+		const sessionDefaultApplied = originalParams.model === undefined && sessionDefaultModel !== undefined;
+		const normalizedParams = applyInvocationModelDefaults(defaultedParams);
 
 		const explicitAsyncRequest = normalizedParams.async === true;
 		let effectiveParams = applyForceTopLevelAsyncOverride(
@@ -4018,6 +4058,15 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			requestedSpawns,
 		);
 		if (spawnPreflight.error) return spawnBudgetErrorResult(spawnPreflight.error, foregroundMode);
+		if (sessionDefaultApplied) {
+			deps.pi.appendEntry("subagent_session_default_model", {
+				version: 1,
+				model: sessionDefaultModel,
+				cwd: path.resolve(requestCwd),
+				mode: foregroundMode,
+				count: requestedSpawns,
+			});
+		}
 
 		let forkSessionFileForIndex: (idx?: number) => string | undefined = () => undefined;
 		let forkThinkingOverrideForIndex: (idx?: number) => AgentConfig["thinking"] | undefined = () => undefined;

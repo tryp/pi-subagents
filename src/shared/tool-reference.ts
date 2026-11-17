@@ -14,7 +14,7 @@
 
 export const SUBAGENT_SAFETY_GUIDANCE = `SAFETY-CRITICAL SUBAGENT GUIDANCE:
 • Use { action: "list" } before execution and only run listed, enabled agents or chains.
-• Keep execution and management separate: omit action for SINGLE/PARALLEL/CHAIN execution; use action only for list/get/models/create/update/delete/status/grant-spawn-budget/interrupt/stop/resume/append-step/doctor.
+• Keep execution and management separate: omit action for SINGLE/PARALLEL/CHAIN execution; use action only for list/get/models/default-model/create/update/delete/status/grant-spawn-budget/interrupt/stop/resume/append-step/doctor.
 • Async is the default: an omitted async detaches the run and returns immediately, so omit it. (In a single-shot 'pi -p' run an omitted async stays inline instead, because a detached result would have no later turn to land in.) Prefer ONE parallel batch over a series of sequential launches when the tasks do not depend on each other, and pass async:false only when you must have the result inline before the next step (a blocking launch overlaps nothing). Do not sleep or poll status just to wait. In an interactive session, normally return control and let Pi wake you; a wait is only for when you need a result now, and until:"next-event" sleeps until anything changes. A wait returns the first finished child by default, so checking for an early result is cheap: call subagent_wait when any child's result would let you start the next step, and repeat it to drain the remaining children as they finish. Ask for until:"all-terminal" (or barrier:"integration") only when the whole batch must be finished before you proceed. Headless sessions auto-drain current-session work at agent_end, so detached children are never abandoned by returning early.
 • Child-safety boundary: ordinary child subagents are not orchestrators and must not run subagents. Only explicitly configured fanout children may use the child-safe subagent tool, still bounded by depth/session limits.
 • Writing/review safety: keep one writer for the same cwd/worktree. Use fresh-context read-only reviewers/validators for independent review, then have the parent synthesize and apply fixes as the sole writer unless an isolated worktree was intentionally requested.
@@ -51,6 +51,7 @@ MANAGEMENT (use action field, omit agent/task/chain/tasks):
 • { action: "list" } - discover available agents/chains
 • { action: "get", agent: "name" } - full detail; packaged agents use dotted runtime names like "package.agent"
 • { action: "models", agent?: "name" } - list the requestable model ids by provider with credential state; pass agent to show that agent's effective model and how a bare name resolved
+• { action: "default-model", model?: "provider/model[:thinking]" | "inherit" | "off" | "clear" } - set/report the session default for later launches; applies until changed or the session ends, without writing settings
 • { action: "watchdog.status" | "watchdog.check" | "watchdog.recommend-model" } - inspect the opt-in subagent watchdog and its strong complementary model recommendation
 • { action: "watchdog.configure", model: "recommended" | "inherit" | "provider/model[:thinking]", scope?: "session" | "user" | "project", target?: "main" | "children" | "child", agent?: "name", thinking?: "inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" } - configure watchdog model selection; default scope is session, use persistent scopes only when the user asks
 • { action: "create", config: { name: "custom-agent", package: "code-analysis", systemPrompt, systemPromptMode, inheritProjectContext, inheritSkills, defaultContext, acceptance, acceptanceRole: "read-only" | "writer", ... } }
@@ -94,7 +95,7 @@ EXECUTE (omit action):
 • context "fresh"|"fork" overrides the agent's defaultContext. model "provider/model[:thinking]" with thinking off|minimal|low|medium|high|xhigh|max.
 • Limits: timeoutMs; rlimits {cpuSeconds,fileSizeMb,openFiles,coreSizeMb} (Linux only, inherited, only lowerable, no memory/process cap); turnBudget {maxTurns,graceTurns?}; toolBudget {soft,hard,block?}: soft nudges, hard blocks the named tools ("*" = all).
 
-MANAGE {action}: list, get, models, create, update, delete, eject, disable, enable, reset, grant-spawn-budget, doctor, help.
+MANAGE {action}: list, get, models, default-model, create, update, delete, eject, disable, enable, reset, grant-spawn-budget, doctor, help.
 • create/update take config, update merges; acceptanceRole "read-only"|"writer" shapes inferred acceptance only, never tool access. Chain actions take chainName.
 • CONTROL: status (view "fleet"|"transcript", index?, lines?), interrupt, stop, resume, steer, append-step. resume and steer take message; stopped runs cannot resume; append-step takes chain.
 • SCHEDULE (requires scheduledRuns.enabled): schedule {agent,task?,schedule,scheduleName?} or tasks[]/chain[], plus schedule-list, schedule-status, schedule-cancel. Only for delays the user asked for.
