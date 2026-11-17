@@ -135,6 +135,10 @@ interface AsyncChainParams {
 	ctx: AsyncExecutionContext;
 	availableModels?: AvailableModelInfo[];
 	cwd?: string;
+	/** Invocation model materialized for this run, forwarded to the step builder for provenance. */
+	model?: string;
+	/** Set when `model` came from the session default rather than the caller. */
+	modelSource?: "session-default";
 	maxOutput?: MaxOutputConfig;
 	artifactsDir?: string;
 	artifactConfig: ArtifactConfig;
@@ -247,6 +251,10 @@ export interface AsyncRunnerStepBuildParams {
 	ctx: AsyncExecutionContext;
 	availableModels?: AvailableModelInfo[];
 	cwd?: string;
+	/** Invocation model materialized for this run, used to attribute per-step provenance. */
+	model?: string;
+	/** Set when `model` came from the session default rather than the caller. */
+	modelSource?: "session-default";
 	chainSkills?: string[];
 	sharedContext?: string;
 	sessionFilesByFlatIndex?: (string | undefined)[];
@@ -691,7 +699,12 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			ctx.currentModelProvider,
 			{
 				scope: ctx.modelScope,
-				modelSource: s.modelSource,
+				// Provenance is derived here instead of being carried on the step: the injected
+				// invocation model is the only model this builder can attribute to the session
+				// default, and a step that names its own model keeps its own provenance.
+				modelSource: params.modelSource === "session-default" && params.model !== undefined && (s.model ?? params.model) === params.model
+					? "session-default" as const
+					: undefined,
 				// `usesFork` means some agent forks, not all. Resolve each chain step
 				// by name; otherwise a fresh defaulted worker inherits the parent model.
 				forked: params.forked === true && (params.forkedAgents === undefined || params.forkedAgents.includes(s.agent)),
@@ -932,6 +945,8 @@ export function executeAsyncChain(
 		ctx,
 		availableModels: params.availableModels,
 		cwd,
+		model: params.model,
+		modelSource: params.modelSource,
 		chainSkills: params.chainSkills,
 		sharedContext: params.sharedContext,
 		sessionFilesByFlatIndex,

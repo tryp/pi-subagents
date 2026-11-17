@@ -19,12 +19,11 @@ describe("session model default", () => {
 		assert.equal(store.get("/tmp/work"), undefined);
 	});
 
-	it("leaves invocation untouched when unset and propagates session default without replacing explicit entries", () => {
+	it("leaves invocation untouched when unset and propagates the session model without replacing explicit entries", () => {
 		const omitted: SubagentParamsLike = { agent: "worker", task: "T" };
 		assert.equal(applyInvocationModelDefaults(omitted), omitted);
 		const params: SubagentParamsLike = {
 			model: "openai-codex/gpt-6-luna",
-			modelSource: "session-default" as const,
 			tasks: [{ agent: "worker", task: "default" }, { agent: "reviewer", task: "explicit", model: "inherit" }],
 			chain: [
 				{ agent: "worker", task: "sequential" },
@@ -34,12 +33,10 @@ describe("session model default", () => {
 		};
 		const result = applyInvocationModelDefaults(params);
 		assert.equal(result.tasks?.[0]?.model, "openai-codex/gpt-6-luna");
-		assert.equal(result.tasks?.[0]?.modelSource, "session-default");
 		assert.equal(result.tasks?.[1]?.model, "inherit");
 		const sequential = result.chain?.[0];
 		assert.ok(sequential && !isParallelStep(sequential) && !isDynamicParallelStep(sequential));
 		assert.equal(sequential.model, "openai-codex/gpt-6-luna");
-		assert.equal(sequential.modelSource, "session-default");
 		const parallel = result.chain?.[1];
 		assert.ok(parallel && isParallelStep(parallel));
 		assert.equal(parallel.parallel[0]?.model, "openai-codex/gpt-6-luna");

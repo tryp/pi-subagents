@@ -57,8 +57,6 @@ export interface SequentialStep {
 	progress?: boolean;
 	skill?: string | string[] | false;
 	model?: string;
-	/** Internal provenance attached by invocation model defaults. */
-	modelSource?: "session-default";
 	toolBudget?: ToolBudgetConfig;
 	rlimits?: RlimitsConfig;
 	acceptance?: AcceptanceInput;
@@ -86,8 +84,6 @@ export interface ParallelTaskItem {
 	progress?: boolean;
 	skill?: string | string[] | false;
 	model?: string;
-	/** Internal provenance attached by invocation model defaults. */
-	modelSource?: "session-default";
 	toolBudget?: ToolBudgetConfig;
 	rlimits?: RlimitsConfig;
 	acceptance?: AcceptanceInput;

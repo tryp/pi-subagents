@@ -128,6 +128,32 @@ describe("invocation model defaults reach spawned children", () => {
 	}
 
 	for (const shape of ["sequential", "parallel", "dynamic"] as const) {
+		it(`append-step ${shape} takes the session default when no model is given`, async () => {
+			const id = randomUUID();
+			runIds.push(id);
+			const asyncDir = path.join(ASYNC_DIR, id);
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId: id, mode: "chain", state: "running", startedAt: Date.now(), cwd: root,
+				steps: [{ agent: "probe", status: "running", outputName: "targets" }],
+			}));
+			const chain: NonNullable<SubagentParamsLike["chain"]> = shape === "sequential"
+				? [{ agent: "probe", task: "appended-sequential" }]
+				: shape === "parallel" ? [{ parallel: [{ agent: "probe", task: "appended-parallel" }] }]
+				: [{ expand: { from: { output: "targets", path: "/items" }, maxItems: 2 }, parallel: { agent: "probe", task: "appended-{item}" }, collect: { as: "answers" } }];
+			// No model on the call: the store must supply both the model and its provenance.
+			await launch({ action: "append-step", id, chain }, batchModel);
+			const requests = readPendingChainAppendRequests(asyncDir);
+			assert.equal(requests.length, 1);
+			const step = requests[0]!.steps[0]!;
+			const children = "parallel" in step ? (Array.isArray(step.parallel) ? step.parallel : [step.parallel]) : [step];
+			assert.deepEqual(children.map((child) => child.model), children.map(() => batchModel));
+			// Provenance travels in modelResolution, which is what status/receipts read back.
+			assert.deepEqual(children.map((child) => child.modelResolution?.source), children.map(() => "session-default"));
+		});
+	}
+
+	for (const shape of ["sequential", "parallel", "dynamic"] as const) {
 		it(`append-step ${shape} honors the invocation model and explicit entries`, async () => {
 			const id = randomUUID();
 			runIds.push(id);

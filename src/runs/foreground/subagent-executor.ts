@@ -140,7 +140,6 @@ interface TaskParam {
 	reads?: string[] | boolean;
 	progress?: boolean;
 	model?: string;
-	modelSource?: "session-default";
 	skill?: string | string[] | boolean;
 	acceptance?: AcceptanceInput;
 	toolBudget?: ToolBudgetConfig;
@@ -864,6 +863,8 @@ function appendStepToAsyncChain(input: {
 	};
 	const built = buildAsyncRunnerSteps(resolved.id, {
 		chain: wrapChainTasksForFork(input.params.chain, contextPolicy),
+		model: input.params.model,
+		modelSource: input.params.modelSource,
 		task: input.params.task,
 		resultMode: "chain",
 		forked: contextPolicy.usesFork,
@@ -1236,6 +1237,8 @@ async function resumeAsyncRun(input: {
 		const normalized = normalizeSkillInput(input.params.skill);
 		const result = executeAsyncChain(runId, {
 			chain,
+			model: input.params.model,
+			modelSource: input.params.modelSource,
 			forked: contextPolicy.usesFork,
 			forkedAgents,
 			task: workflowTask,
@@ -2090,6 +2093,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 				concurrency: resolveTopLevelParallelConcurrency(params.concurrency, deps.config.parallel?.concurrency),
 				worktree: params.worktree,
 			}],
+			model: params.model,
+			modelSource: params.modelSource,
 			forked: contextPolicy.usesFork,
 			forkedAgents,
 			resultMode: "parallel",
@@ -2136,6 +2141,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 		if (claimError) return formatAsyncStartError("chain", claimError);
 		const result = executeAsyncChain(id, {
 			chain,
+			model: params.model,
+			modelSource: params.modelSource,
 			forked: contextPolicy.usesFork,
 			forkedAgents,
 			task: params.task,
@@ -2377,6 +2384,8 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		if (claimError) return formatAsyncStartError("chain", claimError);
 		const asyncResult = executeAsyncChain(id, {
 			chain: asyncChain,
+			model: params.model,
+			modelSource: params.modelSource,
 			forked: contextPolicy.usesFork,
 			forkedAgents,
 			task: params.task,
@@ -2973,6 +2982,8 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			});
 			const result = executeAsyncChain(id, {
 				chain: [{ parallel: parallelTasks, concurrency: parallelConcurrency, worktree: params.worktree }],
+				model: params.model,
+				modelSource: params.modelSource,
 				forked: contextPolicy.usesFork,
 				forkedAgents,
 				resultMode: "parallel",
@@ -3847,8 +3858,13 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				return steerAsyncRun({ state: deps.state, runId: resolved.id, message, index: paramsWithResolvedCwd.index, kill: deps.kill, location: resolved.location, signal, recover: ({ absoluteDeadlineAt, ...limits }) => resumeAsyncRun({ params: { ...limits, action: "resume", id: resolved!.id, message }, requestCwd, ctx, deps, absoluteDeadlineAt }) });
 			}
 			if (action === "append-step") {
-				const model = paramsWithResolvedCwd.model ?? deps.sessionModelDefaults?.get(requestCwd);
-				const params = model === undefined ? paramsWithResolvedCwd : { ...paramsWithResolvedCwd, model };
+				// A step appended without a model is a launch too: take the session default, and
+				// carry its provenance so the receipt says "session default" rather than
+				// "caller request" (the model string alone cannot tell the two apart).
+				const sessionModel = paramsWithResolvedCwd.model === undefined ? deps.sessionModelDefaults?.get(requestCwd) : undefined;
+				const params = sessionModel === undefined
+					? paramsWithResolvedCwd
+					: { ...paramsWithResolvedCwd, model: sessionModel, modelSource: "session-default" as const };
 				return appendStepToAsyncChain({ params: applyInvocationModelDefaults(params), requestCwd, ctx, deps });
 			}
 			if (action === "schedule" || action === "schedule-list" || action === "schedule-status" || action === "schedule-cancel") {
