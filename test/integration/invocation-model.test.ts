@@ -6,6 +6,7 @@ import { readPendingChainAppendRequests } from "../../src/runs/background/chain-
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { createSubagentExecutor, type SubagentParamsLike } from "../../src/runs/foreground/subagent-executor.ts";
 import { ASYNC_DIR, RESULTS_DIR } from "../../src/shared/types.ts";
+import { SessionModelDefaultStore } from "../../src/runs/shared/session-model-default.ts";
 import { createEventBus, createMockPi, makeMinimalCtx, type MockPi } from "../support/helpers.ts";
 import type { AgentConfig } from "../../src/agents/agents.ts";
 
@@ -25,11 +26,13 @@ describe("invocation model defaults reach spawned children", () => {
 	let root: string;
 	let mockPi: MockPi;
 	const runIds: string[] = [];
+	let sessionDefaultEvents: Array<Record<string, unknown>> = [];
 
 	beforeEach(() => {
 		fs.mkdirSync("tmp", { recursive: true });
 		root = fs.mkdtempSync(path.resolve("tmp/invocation-model-"));
 		mockPi = createMockPi();
+		sessionDefaultEvents = [];
 		mockPi.install();
 		mockPi.onCall({ output: "probe complete" });
 	});
@@ -43,22 +46,29 @@ describe("invocation model defaults reach spawned children", () => {
 		fs.rmSync(root, { recursive: true, force: true });
 	});
 
-	async function launch(params: SubagentParamsLike): Promise<void> {
+	async function launch(params: SubagentParamsLike, sessionDefaultModel?: string): Promise<string> {
 		const agent: AgentConfig = {
 			name: "probe", description: "Model probe", systemPrompt: "Return a short response.",
 			systemPromptMode: "replace", inheritProjectContext: false, inheritSkills: false,
 			source: "project", filePath: path.join(root, "probe.md"), model: entryModel,
 		};
+		const sessionModelDefaults = new SessionModelDefaultStore();
+		if (sessionDefaultModel !== undefined) sessionModelDefaults.set(root, sessionDefaultModel);
 		const executor = createSubagentExecutor({
-			pi: { events: createEventBus(), getSessionName: () => undefined } as never,
+			pi: {
+				events: createEventBus(), getSessionName: () => undefined,
+				appendEntry: (type: string, data: unknown) => { if (type === "subagent_session_default_model") sessionDefaultEvents.push(data as Record<string, unknown>); },
+			} as never,
 			state: { baseCwd: root, currentSessionId: null, asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null } as never,
 			config: {}, asyncByDefault: false, tempArtifactsDir: root,
 			getSubagentSessionRoot: () => root, expandTilde: (value) => value,
-			discoverAgents: () => ({ agents: [agent] }),
+			discoverAgents: () => ({ agents: [agent] }), sessionModelDefaults,
+
 		});
 		const ctx = { ...makeMinimalCtx(root), model: parentModel, modelRegistry: { getAvailable: () => available } };
 		const result = await executor.execute("invocation-model", { context: "fresh", artifacts: false, ...params }, new AbortController().signal, undefined, ctx as never);
 		assert.notEqual((result as { isError?: boolean }).isError, true, JSON.stringify(result.content));
+		const output = result.content.filter((item) => item.type === "text").map((item) => item.text).join("\n");
 		if (params.async) {
 			const id = result.details?.asyncId;
 			assert.ok(id, "async launch must detach, not silently run in foreground");
@@ -73,6 +83,7 @@ describe("invocation model defaults reach spawned children", () => {
 			const payload = JSON.parse(fs.readFileSync(resultPath, "utf8"));
 			assert.equal(payload.success, true, JSON.stringify(payload));
 		}
+		return output;
 	}
 
 	function assertSpawnModel(task: string, model: string): void {
@@ -156,5 +167,19 @@ describe("invocation model defaults reach spawned children", () => {
 	it("omitting the batch model preserves agent model resolution", async () => {
 		await launch({ async: false, tasks: [{ agent: "probe", task: "agent-default" }] });
 		assertSpawnModel("agent-default", entryModel);
+	});
+
+	it("session default reaches spawned children when model is omitted, while explicit task models win", async () => {
+		const output = await launch({ async: false, tasks: [
+			{ agent: "probe", task: "session-default" },
+			{ agent: "probe", task: "explicit-model", model: entryModel },
+		] }, batchModel);
+		assertSpawnModel("session-default", batchModel);
+		assertSpawnModel("explicit-model", entryModel);
+		assert.match(output, /Child model gpt-6\.1-terra overrides session default gpt-6-luna\./);
+		const mismatchEvent = sessionDefaultEvents.find((event) => event.applied === false);
+		assert.ok(mismatchEvent, "explicit override should be recorded separately from default application");
+		assert.equal(mismatchEvent.explicitModel, "gpt-6.1-terra");
+		assert.equal(mismatchEvent.sessionDefaultModel, "gpt-6-luna");
 	});
 });

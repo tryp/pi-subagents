@@ -6,7 +6,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { type AgentConfig, type AgentScope } from "../../agents/agents.ts";
 import { getArtifactsDir, getProjectChainRunsDir } from "../../shared/artifacts.ts";
 import { ChainClarifyComponent, type ChainClarifyResult } from "./chain-clarify.ts";
-import { toModelInfo, type ModelInfo } from "../../shared/model-info.ts";
+import { splitKnownThinkingSuffix, toModelInfo, type ModelInfo } from "../../shared/model-info.ts";
 import { executeChain } from "./chain-execution.ts";
 import { resolveExecutionAgentScope } from "../../agents/agent-scope.ts";
 import { handleManagementAction } from "../../agents/agent-management.ts";
@@ -3651,7 +3651,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 					deps.sessionModelDefaults?.set(requestCwd, undefined);
 					return { content: [{ type: "text", text: "Subagent session default cleared; existing agent/parent defaults apply." }], details: { mode: "management", results: [] } };
 				}
-				const resolvedModel = supplied === "inherit" ? undefined : resolveWatchdogModelInput(ctx, supplied);
+				const resolvedModel = supplied === "inherit" ? undefined : resolveWatchdogModelInput(ctx, supplied, "Session default model");
 				const resolved = supplied === "inherit" ? "inherit" : `${resolvedModel!.model}${resolvedModel!.thinking ? `:${resolvedModel!.thinking}` : ""}`;
 				deps.sessionModelDefaults?.set(requestCwd, resolved);
 				return { content: [{ type: "text", text: `Subagent session default model set to ${resolved}; applies until changed or this session ends. No settings files were changed.` }], details: { mode: "management", results: [] } };
@@ -3987,6 +3987,34 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			: originalParams;
 		const sessionDefaultApplied = originalParams.model === undefined && sessionDefaultModel !== undefined;
 		const normalizedParams = applyInvocationModelDefaults(defaultedParams);
+		const modelBaseId = (model: string): string => splitKnownThinkingSuffix(model).baseModel.split("/").at(-1)?.toLowerCase() ?? model.toLowerCase();
+		const sessionDefaultBaseId = sessionDefaultModel === undefined ? undefined : modelBaseId(sessionDefaultModel);
+		const explicitlyRequestedModels: string[] = [
+			...(originalParams.model === undefined ? [] : [originalParams.model]),
+			...(originalParams.tasks ?? []).flatMap((task) => task.model === undefined ? [] : [task.model]),
+			...(originalParams.chain ?? []).flatMap((step) => isParallelStep(step)
+				? step.parallel.flatMap((task) => task.model === undefined ? [] : [task.model])
+				: isDynamicParallelStep(step)
+					? step.parallel.model === undefined ? [] : [step.parallel.model]
+					: step.model === undefined ? [] : [step.model]),
+		];
+		const sessionDefaultMismatch = sessionDefaultBaseId === undefined
+			? undefined
+			: explicitlyRequestedModels.find((model) => modelBaseId(model) !== sessionDefaultBaseId);
+		const sessionDefaultOverrideNote = sessionDefaultMismatch === undefined
+			? undefined
+			: `Child model ${modelBaseId(sessionDefaultMismatch)} overrides session default ${sessionDefaultBaseId}.`;
+		const noteSessionDefaultOverride = (result: AgentToolResult<Details>): AgentToolResult<Details> => {
+			if (!sessionDefaultOverrideNote) return result;
+			const firstTextIndex = result.content.findIndex((item) => item.type === "text");
+			if (firstTextIndex < 0) return { ...result, content: [...result.content, { type: "text", text: sessionDefaultOverrideNote }] };
+			return {
+				...result,
+				content: result.content.map((item, index) => index === firstTextIndex && item.type === "text"
+					? { ...item, text: `${item.text}\n${sessionDefaultOverrideNote}` }
+					: item),
+			};
+		};
 
 		const explicitAsyncRequest = normalizedParams.async === true;
 		let effectiveParams = applyForceTopLevelAsyncOverride(
@@ -4065,6 +4093,17 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				cwd: path.resolve(requestCwd),
 				mode: foregroundMode,
 				count: requestedSpawns,
+				applied: true,
+			});
+		}
+		if (sessionDefaultMismatch !== undefined && sessionDefaultBaseId !== undefined) {
+			deps.pi.appendEntry("subagent_session_default_model", {
+				version: 1,
+				cwd: path.resolve(requestCwd),
+				mode: foregroundMode,
+				applied: false,
+				explicitModel: modelBaseId(sessionDefaultMismatch),
+				sessionDefaultModel: sessionDefaultBaseId,
 			});
 		}
 
@@ -4307,7 +4346,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		let nestedForegroundStarted = false;
 		try {
 			const asyncResult = runAsyncPath(execData, deps);
-			if (asyncResult) return withForkContext(withForkThinkingNotes(asyncResult, forkThinkingDowngrades), effectiveParams.context);
+			if (asyncResult) return withForkContext(withForkThinkingNotes(noteSessionDefaultOverride(asyncResult), forkThinkingDowngrades), effectiveParams.context);
 			if (foregroundControl) {
 				writeNestedForegroundEvent("subagent.nested.started");
 				nestedForegroundStarted = true;
@@ -4315,17 +4354,17 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			if (hasChain && effectiveParams.chain) {
 				const result = await runChainPath(execData, deps);
 				writeNestedForegroundEvent("subagent.nested.completed", result);
-				return withForkContext(withForkThinkingNotes(result, forkThinkingDowngrades), effectiveParams.context);
+				return withForkContext(withForkThinkingNotes(noteSessionDefaultOverride(result), forkThinkingDowngrades), effectiveParams.context);
 			}
 			if (hasTasks && effectiveParams.tasks) {
 				const result = await runParallelPath(execData, deps);
 				writeNestedForegroundEvent("subagent.nested.completed", result);
-				return withForkContext(withForkThinkingNotes(result, forkThinkingDowngrades), effectiveParams.context);
+				return withForkContext(withForkThinkingNotes(noteSessionDefaultOverride(result), forkThinkingDowngrades), effectiveParams.context);
 			}
 			if (hasSingle) {
 				const result = await runSinglePath(execData, deps);
 				writeNestedForegroundEvent("subagent.nested.completed", result);
-				return withForkContext(withForkThinkingNotes(result, forkThinkingDowngrades), effectiveParams.context);
+				return withForkContext(withForkThinkingNotes(noteSessionDefaultOverride(result), forkThinkingDowngrades), effectiveParams.context);
 			}
 		} catch (error) {
 			const errorResult = withForkThinkingNotes(toExecutionErrorResult(effectiveParams, error), forkThinkingDowngrades);

@@ -103,6 +103,18 @@ describe("watchdog model selection", () => {
 		);
 	});
 
+	it("uses a caller-supplied label for model validation errors", () => {
+		const ctx = createCtx({ provider: "anthropic", id: "claude-opus-4-8" }, []);
+		assert.throws(
+			() => resolveWatchdogModelInput(ctx, "openai-codex/gpt-5.5", "Session default model"),
+			/Session default model 'openai-codex\/gpt-5.5' is not authenticated/,
+		);
+		assert.throws(
+			() => resolveWatchdogModelInput(ctx, "openai-codex/gpt-5.5"),
+			/Watchdog model 'openai-codex\/gpt-5.5' is not authenticated/,
+		);
+	});
+
 	it("canonicalizes explicit models and preserves thinking suffixes", () => {
 		const resolved = resolveWatchdogModelInput(createCtx({ provider: "anthropic", id: "claude-opus-4-8" }), "openai-codex/gpt-5-5:high");
 

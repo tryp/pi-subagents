@@ -76,23 +76,23 @@ export function parseWatchdogThinkingInput(value: string | false | undefined, so
 	return assertSupportedThinking(value, source);
 }
 
-export function resolveWatchdogModelInput(ctx: ExtensionContext, rawModel: string): ResolvedWatchdogModelInput {
+export function resolveWatchdogModelInput(ctx: ExtensionContext, rawModel: string, label = "Watchdog model"): ResolvedWatchdogModelInput {
 	const trimmed = rawModel.trim();
-	if (!trimmed) throw new Error("Watchdog model must be a non-empty provider/model value.");
+	if (!trimmed) throw new Error(`${label} must be a non-empty provider/model value.`);
 	const availableModels = modelRegistryEntries(ctx);
 	const preferredProvider = typeof ctx.model?.provider === "string" ? ctx.model.provider : undefined;
 	const resolved = resolveModelCandidate(trimmed, availableModels, preferredProvider) ?? trimmed;
 	const { baseModel, thinkingSuffix } = splitKnownThinkingSuffix(resolved);
 	const named = splitProviderModel(baseModel);
-	if (!named) throw new Error(`Watchdog model '${rawModel}' did not resolve to provider/model. Use a provider-qualified model such as openai-codex/gpt-5.5:high or anthropic/claude-opus-4-8:high.`);
+	if (!named) throw new Error(`${label} '${rawModel}' did not resolve to provider/model. Use a provider-qualified model such as openai-codex/gpt-5.5:high or anthropic/claude-opus-4-8:high.`);
 	const registryModel = ctx.modelRegistry.find(named.provider, named.id);
-	if (!registryModel) throw new Error(`Watchdog model '${rawModel}' was not found as '${baseModel}'.`);
+	if (!registryModel) throw new Error(`${label} '${rawModel}' was not found as '${baseModel}'.`);
 	if (!ctx.modelRegistry.hasConfiguredAuth(registryModel)) {
-		throw new Error(`Watchdog model '${baseModel}' is not authenticated. Configure credentials for provider '${named.provider}' or choose an authenticated model.`);
+		throw new Error(`${label} '${baseModel}' is not authenticated. Configure credentials for provider '${named.provider}' or choose an authenticated model.`);
 	}
 	return {
 		model: `${named.provider}/${named.id}`,
-		...(thinkingSuffix ? { thinking: assertSupportedThinking(thinkingSuffix.slice(1), "watchdog model suffix") } : {}),
+		...(thinkingSuffix ? { thinking: assertSupportedThinking(thinkingSuffix.slice(1), `${label.toLowerCase()} suffix`) } : {}),
 		registryModel,
 	};
 }

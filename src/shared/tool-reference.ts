@@ -90,9 +90,10 @@ export const COMPACT_SUBAGENT_TOOL_DESCRIPTION = `Delegate to subagents, or mana
 
 EXECUTE (omit action):
 • SINGLE {agent,task?}; PARALLEL {tasks:[{agent,task,count?,output?,outputMode?,reads?,progress?}],concurrency?,worktree?}; CHAIN {chain:[{agent,task?},{parallel:[{agent,task,count?}]}]}.
-• Every task also takes cwd, skill, model; chain keys beyond those shapes: as, collect, expand, outputSchema, phase, label, failFast, contextFiles. Templates: {task}, {previous}, {chain_dir}, {outputs.name}.
+• Task keys: cwd, skill, model; chain keys: as, collect, expand, outputSchema, phase, label, failFast, contextFiles. Templates: {previous}.
 • Cache-friendly PARALLEL: prefer one agent/model across children; top-level model is the default. Keep shared contextFiles identical and ordered. Sibling system prompts are batch-stable; per-child directives go in user messages.
-• context "fresh"|"fork" overrides the agent's defaultContext. model "provider/model[:thinking]" with thinking off|minimal|low|medium|high|xhigh|max.
+• Omit model to use this session's model (default-model setting, else agent/parent); name one only for a genuinely different child model.
+• context "fresh"|"fork" overrides defaultContext; model accepts provider/model[:thinking].
 • Limits: timeoutMs; rlimits {cpuSeconds,fileSizeMb,openFiles,coreSizeMb} (Linux only, inherited, only lowerable, no memory/process cap); turnBudget {maxTurns,graceTurns?}; toolBudget {soft,hard,block?}: soft nudges, hard blocks the named tools ("*" = all).
 
 MANAGE {action}: list, get, models, default-model, create, update, delete, eject, disable, enable, reset, grant-spawn-budget, doctor, help.
