@@ -3,13 +3,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
-import { afterEach, describe, it } from "node:test";
+import { after, afterEach, describe, it } from "node:test";
 import {
 	NATIVE_SUPERVISOR_TOOL_NAME,
-	createNativeSupervisorChannel,
+	createNativeSupervisorChannel as createNativeSupervisorChannelImpl,
 	ensureSupervisorChannelDir,
 	registerNativeSupervisorClient,
-	resolveSupervisorChannelDir,
 } from "../../src/intercom/native-supervisor-channel.ts";
 import {
 	SUBAGENT_CHILD_AGENT_ENV,
@@ -22,6 +21,7 @@ import {
 import { INTERCOM_DETACH_REQUEST_EVENT, type SubagentState } from "../../src/shared/types.ts";
 
 const createdChannels: string[] = [];
+const TEST_CHANNEL_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-native-supervisor-test-"));
 const savedEnv = {
 	[SUBAGENT_CHILD_AGENT_ENV]: process.env[SUBAGENT_CHILD_AGENT_ENV],
 	[SUBAGENT_CHILD_INDEX_ENV]: process.env[SUBAGENT_CHILD_INDEX_ENV],
@@ -33,9 +33,10 @@ const savedEnv = {
 
 function makeState(sessionId: string | null, ctx: unknown): SubagentState {
 	return {
+		userInputEpoch: 0,
 		baseCwd: process.cwd(),
 		currentSessionId: sessionId,
-		asyncJobs: new Map(),
+		asyncJobs: new Map([["test-live", { asyncId: "test-live", asyncDir: "", status: "running" }]]),
 		foregroundControls: new Map(),
 		lastForegroundControlId: null,
 		cleanupTimers: new Map(),
@@ -48,10 +49,18 @@ function makeState(sessionId: string | null, ctx: unknown): SubagentState {
 	};
 }
 
+function testChannelDir(runId: string, agent = "worker", index = 0): string {
+	return path.join(TEST_CHANNEL_ROOT, `${runId}-${agent}-${index}`);
+}
+
+function createNativeSupervisorChannel(pi: unknown, state: SubagentState) {
+	return createNativeSupervisorChannelImpl(pi as never, state, { channelRoot: TEST_CHANNEL_ROOT });
+}
+
 function writeRequest(input: { sessionId: string; runId: string; agent?: string; index?: number; message?: string; createdAt?: number; expiresAt?: number; legacyIdOnly?: boolean; reason?: "need_decision" | "interview_request" | "progress_update"; expectsReply?: boolean }): string {
 	const agent = input.agent ?? "worker";
 	const index = input.index ?? 0;
-	const channelDir = resolveSupervisorChannelDir(input.runId, agent, index);
+	const channelDir = testChannelDir(input.runId, agent, index);
 	createdChannels.push(channelDir);
 	ensureSupervisorChannelDir(channelDir);
 	const requestId = randomUUID();
@@ -74,15 +83,15 @@ function writeRequest(input: { sessionId: string; runId: string; agent?: string;
 }
 
 function requestFile(runId: string, requestId: string, agent = "worker", index = 0): string {
-	return path.join(resolveSupervisorChannelDir(runId, agent, index), "requests", `${requestId}.json`);
+	return path.join(testChannelDir(runId, agent, index), "requests", `${requestId}.json`);
 }
 
 function replyFile(runId: string, requestId: string, agent = "worker", index = 0): string {
-	return path.join(resolveSupervisorChannelDir(runId, agent, index), "replies", `${requestId}.json`);
+	return path.join(testChannelDir(runId, agent, index), "replies", `${requestId}.json`);
 }
 
 function makeEmptyChannel(runId: string): string {
-	const channelDir = resolveSupervisorChannelDir(runId, "worker", 0);
+	const channelDir = testChannelDir(runId, "worker", 0);
 	createdChannels.push(channelDir);
 	ensureSupervisorChannelDir(channelDir);
 	return channelDir;
@@ -106,6 +115,10 @@ afterEach(() => {
 	restoreEnv();
 	delete process.env.PI_INTERCOM_ASK_TIMEOUT_MS;
 	for (const channel of createdChannels.splice(0)) fs.rmSync(channel, { recursive: true, force: true });
+});
+
+after(() => {
+	fs.rmSync(TEST_CHANNEL_ROOT, { recursive: true, force: true });
 });
 
 describe("native supervisor channel", () => {
@@ -142,6 +155,41 @@ describe("native supervisor channel", () => {
 		assert.deepEqual(sent.map((message) => message.details?.id), [matchingId]);
 		assert.equal(channel.pending.has(matchingId), false, "disposed channel clears pending requests");
 		assert.equal(sent.some((message) => message.details?.id === otherId), false);
+	});
+
+	it("skips request scanning with only terminal child runs and resumes when one is live", () => {
+		const currentSessionId = `session-${randomUUID()}`;
+		const runId = `run-${randomUUID()}`;
+		const requestId = writeRequest({ sessionId: currentSessionId, runId });
+		const sent: Array<{ details?: { requestId?: string } }> = [];
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: false,
+			sessionManager: { getSessionId: () => currentSessionId, getSessionFile: () => null, getEntries: () => [] },
+		};
+		const pi = {
+			getAllTools: () => [],
+			registerTool: () => {},
+			sendMessage: (message: { details?: { requestId?: string } }) => { sent.push(message); },
+			getSessionName: () => "shared-name",
+		};
+		const state = makeState(currentSessionId, ctx);
+		state.asyncJobs.set("test-live", { asyncId: "test-live", asyncDir: "", status: "complete" });
+
+		const idleChannel = createNativeSupervisorChannel(pi as never, state);
+		idleChannel.start();
+		idleChannel.dispose();
+
+		assert.deepEqual(sent, []);
+		assert.equal(fs.existsSync(requestFile(runId, requestId)), true, "idle polling must leave the request untouched");
+
+		state.asyncJobs.set("test-live", { asyncId: "test-live", asyncDir: "", status: "running" });
+		const liveChannel = createNativeSupervisorChannel(pi as never, state);
+		liveChannel.start();
+
+		assert.deepEqual(sent.map((message) => message.details?.requestId), [requestId]);
+		assert.equal(liveChannel.pending.has(requestId), true);
+		liveChannel.dispose();
 	});
 
 	it("triggers a turn when delivering supervisor requests that expect a reply", () => {
@@ -524,7 +572,7 @@ describe("native supervisor channel", () => {
 
 	it("persists canonical requestId alongside legacy id for child progress updates", async () => {
 		const runId = `run-${randomUUID()}`;
-		const channelDir = resolveSupervisorChannelDir(runId, "worker", 0);
+		const channelDir = testChannelDir(runId, "worker", 0);
 		createdChannels.push(channelDir);
 		process.env[SUBAGENT_ORCHESTRATOR_TARGET_ENV] = "shared-name";
 		process.env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV] = "session-parent";
@@ -548,7 +596,7 @@ describe("native supervisor channel", () => {
 
 	it("removes the request file when a child supervisor ask is cancelled", async () => {
 		const runId = `run-${randomUUID()}`;
-		const channelDir = resolveSupervisorChannelDir(runId, "worker", 0);
+		const channelDir = testChannelDir(runId, "worker", 0);
 		createdChannels.push(channelDir);
 		process.env[SUBAGENT_ORCHESTRATOR_TARGET_ENV] = "shared-name";
 		process.env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV] = "session-parent";

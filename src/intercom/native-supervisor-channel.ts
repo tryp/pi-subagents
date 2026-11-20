@@ -342,10 +342,10 @@ function parseRequestFile(file: string, channelDir: string): PendingSupervisorRe
 	}
 }
 
-function listRequestFiles(): Array<{ channelDir: string; file: string }> {
+function listRequestFiles(channelRoot = SUPERVISOR_CHANNEL_ROOT): Array<{ channelDir: string; file: string }> {
 	let channelEntries: fs.Dirent[];
 	try {
-		channelEntries = fs.readdirSync(SUPERVISOR_CHANNEL_ROOT, { withFileTypes: true });
+		channelEntries = fs.readdirSync(channelRoot, { withFileTypes: true });
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
 		throw error;
@@ -353,7 +353,7 @@ function listRequestFiles(): Array<{ channelDir: string; file: string }> {
 	const files: Array<{ channelDir: string; file: string }> = [];
 	for (const entry of channelEntries) {
 		if (!entry.isDirectory()) continue;
-		const channelDir = path.join(SUPERVISOR_CHANNEL_ROOT, entry.name);
+		const channelDir = path.join(channelRoot, entry.name);
 		const requestsDir = path.join(channelDir, REQUESTS_DIR);
 		let requestEntries: fs.Dirent[];
 		try {
@@ -418,10 +418,10 @@ function removeStaleEmptySupervisorChannel(channelDir: string, nowMs: number): b
 	return true;
 }
 
-function cleanupStaleEmptySupervisorChannels(nowMs = Date.now()): number {
+function cleanupStaleEmptySupervisorChannels(nowMs = Date.now(), channelRoot = SUPERVISOR_CHANNEL_ROOT): number {
 	let channelEntries: fs.Dirent[];
 	try {
-		channelEntries = fs.readdirSync(SUPERVISOR_CHANNEL_ROOT, { withFileTypes: true });
+		channelEntries = fs.readdirSync(channelRoot, { withFileTypes: true });
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
 		throw error;
@@ -431,12 +431,19 @@ function cleanupStaleEmptySupervisorChannels(nowMs = Date.now()): number {
 	for (const entry of channelEntries) {
 		if (!entry.isDirectory()) continue;
 		try {
-			if (removeStaleEmptySupervisorChannel(path.join(SUPERVISOR_CHANNEL_ROOT, entry.name), nowMs)) removed++;
+			if (removeStaleEmptySupervisorChannel(path.join(channelRoot, entry.name), nowMs)) removed++;
 		} catch {
 			// Cleanup is opportunistic; active writers can race with us and will be picked up by a later pass.
 		}
 	}
 	return removed;
+}
+
+function hasLiveChildRuns(state: Pick<SubagentState, "asyncJobs" | "foregroundControls" | "foregroundRuns">): boolean {
+	for (const job of state.asyncJobs.values()) {
+		if (job.status === "queued" || job.status === "running" || job.status === "paused") return true;
+	}
+	return state.foregroundControls.size > 0 || (state.foregroundRuns?.size ?? 0) > 0;
 }
 
 function currentContextSessionId(state: Pick<SubagentState, "currentSessionId">, ctx: ExtensionContext): string | undefined {
@@ -628,7 +635,12 @@ function buildParentIntercomTool(pending: Map<string, PendingSupervisorRequest>,
 	};
 }
 
-export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentState): { start: () => void; dispose: () => void; pending: Map<string, PendingSupervisorRequest> } {
+export function createNativeSupervisorChannel(
+	pi: ExtensionAPI,
+	state: SubagentState,
+	options: { channelRoot?: string } = {},
+): { start: () => void; dispose: () => void; pending: Map<string, PendingSupervisorRequest> } {
+	const channelRoot = options.channelRoot ?? SUPERVISOR_CHANNEL_ROOT;
 	const pending = new Map<string, PendingSupervisorRequest>();
 	const seenFiles = new Set<string>();
 	let poller: ReturnType<typeof setInterval> | undefined;
@@ -644,7 +656,7 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 		if (nowMs - lastStaleCleanupAt < STALE_EMPTY_CHANNEL_CLEANUP_INTERVAL_MS) return;
 		lastStaleCleanupAt = nowMs;
 		try {
-			cleanupStaleEmptySupervisorChannels(nowMs);
+			cleanupStaleEmptySupervisorChannels(nowMs, channelRoot);
 		} catch {
 			// Supervisor delivery must not fail because best-effort temp cleanup failed.
 		}
@@ -654,9 +666,10 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 		cleanupStaleChannelsIfDue();
 		const ctx = state.lastUiContext;
 		if (!ctx) return;
+		if (!hasLiveChildRuns(state)) return;
 		refreshPendingRequests(pending, state, ctx);
 		const now = Date.now();
-		for (const { channelDir, file } of listRequestFiles()) {
+		for (const { channelDir, file } of listRequestFiles(channelRoot)) {
 			if (seenFiles.has(file)) continue;
 			const request = parseRequestFile(file, channelDir);
 			if (!request || !requestMatchesContext(request, state, ctx)) continue;
