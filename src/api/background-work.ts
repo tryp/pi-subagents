@@ -1,16 +1,27 @@
-export const BACKGROUND_WORK_PROTOCOL_VERSION = 1;
+/**
+ * Background-work registry protocol.
+ *
+ * v2 adds the optional per-item `summary`: a one-line status a heartbeat consumer
+ * can show without importing the provider. A consumer that does not know v2 must
+ * skip the registry rather than read it as v1, because an item's shape is part of
+ * the contract (Tau's reader accepts both versions).
+ */
+export const BACKGROUND_WORK_PROTOCOL_VERSION = 2;
 export const BACKGROUND_WORK_REGISTRY_KEY = "pi-subagents.background-work.v1";
 
 const MAX_PROVIDER_NAME_LENGTH = 128;
 const MAX_PROVIDERS = 100;
 const MAX_ITEM_ID_LENGTH = 256;
 const MAX_SESSION_ID_LENGTH = 256;
+const MAX_ITEM_SUMMARY_LENGTH = 400;
 const MAX_WAKE_CHANNEL_LENGTH = 256;
 const MAX_ITEMS_PER_PROVIDER = 10_000;
 
 export interface BackgroundWorkItem {
 	id: string;
 	sessionId: string;
+	/** Optional one-line status (protocol v2). */
+	summary?: string;
 }
 
 export interface BackgroundWorkReconcileContext {
@@ -107,13 +118,20 @@ function validateItem(provider: string, value: unknown, index: number): Backgrou
 		throw new Error(`Background-work provider '${provider}' item ${index} must be an object.`);
 	}
 	const item = value as Record<string, unknown>;
-	const unknownFields = Object.keys(item).filter((key) => key !== "id" && key !== "sessionId");
+	const unknownFields = Object.keys(item).filter((key) => key !== "id" && key !== "sessionId" && key !== "summary");
 	if (unknownFields.length > 0) {
 		throw new Error(`Background-work provider '${provider}' item ${index} has unknown fields: ${unknownFields.join(", ")}.`);
+	}
+	const summary = item.summary === undefined
+		? undefined
+		: validateString(item.summary, `Background-work provider '${provider}' item ${index} summary`, MAX_ITEM_SUMMARY_LENGTH);
+	if (summary !== undefined && /[\r\n]/.test(summary)) {
+		throw new Error(`Background-work provider '${provider}' item ${index} summary must be a single line.`);
 	}
 	return {
 		id: validateString(item.id, `Background-work provider '${provider}' item ${index} id`, MAX_ITEM_ID_LENGTH),
 		sessionId: validateString(item.sessionId, `Background-work provider '${provider}' item ${index} sessionId`, MAX_SESSION_ID_LENGTH),
+		...(summary === undefined ? {} : { summary }),
 	};
 }
 

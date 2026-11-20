@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import {
+	BACKGROUND_WORK_PROTOCOL_VERSION,
 	BACKGROUND_WORK_REGISTRY_KEY,
 	listBackgroundWorkProviders,
 	listBackgroundWorkWakeChannels,
@@ -76,6 +77,46 @@ function snapshot(providers: string[], items: BackgroundWorkSnapshot["items"]): 
 }
 
 describe("background-work provider protocol", () => {
+	it("declares protocol v2 and preserves an item summary in the active snapshot", () => {
+		assert.equal(BACKGROUND_WORK_PROTOCOL_VERSION, 2);
+		registerBackgroundWorkProvider({
+			name: "patty",
+			listActiveWork: () => [{ id: "job", sessionId: "session-a", summary: "running | step 1/2" }],
+		});
+		assert.deepEqual(snapshotBackgroundWork("session-a").items, [
+			{ provider: "patty", id: "job", sessionId: "session-a", summary: "running | step 1/2" },
+		]);
+	});
+
+	it("validates summary lines and retains the strict item-field allowlist", () => {
+		registerBackgroundWorkProvider({
+			name: "patty",
+			listActiveWork: () => [{ id: "job", sessionId: "session-a", summary: "line one\nline two" }],
+		});
+		assert.throws(() => snapshotBackgroundWork("session-a"), /single line/);
+		clearRegistry();
+
+		registerBackgroundWorkProvider({
+			name: "patty",
+			listActiveWork: () => [{ id: "job", sessionId: "session-a", summary: "line one\rline two" }],
+		});
+		assert.throws(() => snapshotBackgroundWork("session-a"), /single line/);
+		clearRegistry();
+
+		registerBackgroundWorkProvider({
+			name: "patty",
+			listActiveWork: () => [{ id: "job", sessionId: "session-a", summary: "x".repeat(401) }],
+		});
+		assert.throws(() => snapshotBackgroundWork("session-a"), /at most 400 characters/);
+		clearRegistry();
+
+		registerBackgroundWorkProvider({
+			name: "patty",
+			listActiveWork: () => [{ id: "job", sessionId: "session-a", summary: "valid", extra: true } as never],
+		});
+		assert.throws(() => snapshotBackgroundWork("session-a"), /unknown fields: extra/);
+	});
+
 	it("replaces registrations safely across reloads and scopes snapshots to one session", () => {
 		let context: { sessionId: string; nowMs: number } | undefined;
 		const disposeOld = registerBackgroundWorkProvider({
@@ -205,8 +246,24 @@ describe("pi-subagents background-work provider", () => {
 				delete status.pid;
 				fs.writeFileSync(statusPath, JSON.stringify(status));
 			}
-			const provider = createSubagentBackgroundWorkProvider({ asyncDir: root, getSessionId: () => "session-a" });
-			assert.deepEqual(provider.listActiveWork?.().map((item) => item.id).sort(), [id("healthy"), id("step-attention"), id("timed-out"), id("tool-blocked"), id("turn-blocked")].sort());
+			const fixedNow = Date.now() + 60_000;
+			const healthyStatusPath = path.join(root, id("healthy"), "status.json");
+			const healthyStatus = JSON.parse(fs.readFileSync(healthyStatusPath, "utf8"));
+			healthyStatus.startedAt = fixedNow - 12_000;
+			healthyStatus.currentStep = 0;
+			healthyStatus.steps[0].status = "running";
+			healthyStatus.steps[0].lastActivityAt = fixedNow - 4_000;
+			fs.writeFileSync(healthyStatusPath, JSON.stringify(healthyStatus));
+			const provider = createSubagentBackgroundWorkProvider({ asyncDir: root, getSessionId: () => "session-a", now: () => fixedNow });
+			const activeItems = provider.listActiveWork?.() ?? [];
+			assert.deepEqual(activeItems.map((item) => item.id).sort(), [id("healthy"), id("step-attention"), id("timed-out"), id("tool-blocked"), id("turn-blocked")].sort());
+			const healthyItem = activeItems.find((item) => item.id === id("healthy"));
+			assert.ok(healthyItem?.summary);
+			assert.match(healthyItem.summary, /running/);
+			assert.match(healthyItem.summary, /single/);
+			assert.match(healthyItem.summary, /step 1\/1/);
+			assert.match(healthyItem.summary, /elapsed/);
+			assert.doesNotMatch(healthyItem.summary, new RegExp(id("healthy")));
 			assert.deepEqual(provider.listAttentionWork?.().map((item) => item.id).sort(), [id("failed"), id("paused"), id("stopped"), id("step-attention"), id("timed-out"), id("tool-blocked"), id("turn-blocked")].sort());
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
