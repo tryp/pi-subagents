@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
-import { after, afterEach, describe, it } from "node:test";
+import { after, afterEach, beforeEach, describe, it } from "node:test";
 import {
 	NATIVE_SUPERVISOR_TOOL_NAME,
 	createNativeSupervisorChannel as createNativeSupervisorChannelImpl,
@@ -29,6 +29,7 @@ const savedEnv = {
 	[SUBAGENT_ORCHESTRATOR_TARGET_ENV]: process.env[SUBAGENT_ORCHESTRATOR_TARGET_ENV],
 	[SUBAGENT_RUN_ID_ENV]: process.env[SUBAGENT_RUN_ID_ENV],
 	[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV]: process.env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV],
+	PI_INTERCOM_ASK_TIMEOUT_MS: process.env.PI_INTERCOM_ASK_TIMEOUT_MS,
 };
 
 function makeState(sessionId: string | null, ctx: unknown): SubagentState {
@@ -115,9 +116,12 @@ function restoreEnv(): void {
 	}
 }
 
+beforeEach(() => {
+	delete process.env.PI_INTERCOM_ASK_TIMEOUT_MS;
+});
+
 afterEach(() => {
 	restoreEnv();
-	delete process.env.PI_INTERCOM_ASK_TIMEOUT_MS;
 	for (const channel of createdChannels.splice(0)) fs.rmSync(channel, { recursive: true, force: true });
 });
 
@@ -318,8 +322,8 @@ describe("native supervisor channel", () => {
 		const staleWithReply = makeEmptyChannel(`run-${randomUUID()}`);
 		const reply = path.join(staleWithReply, "replies", "reply.json");
 		fs.writeFileSync(reply, "{}");
-		agePath(reply, 2 * 60 * 1000);
-		ageChannel(staleWithReply, 2 * 60 * 1000);
+		agePath(reply, 11 * 60 * 1000 - 1000);
+		ageChannel(staleWithReply, 11 * 60 * 1000 - 1000);
 		const ctx = {
 			cwd: process.cwd(),
 			hasUI: false,
@@ -342,6 +346,29 @@ describe("native supervisor channel", () => {
 
 		assert.equal(fs.existsSync(freshEmptyChannel), true);
 		assert.equal(fs.existsSync(staleWithReply), true);
+	});
+
+	it("uses the configured ask timeout when deciding whether a reply is stale", () => {
+		process.env.PI_INTERCOM_ASK_TIMEOUT_MS = String(30 * 60 * 1000);
+		const currentSessionId = `session-${randomUUID()}`;
+		const channelDir = makeEmptyChannel(`run-${randomUUID()}`);
+		const reply = path.join(channelDir, "replies", "reply.json");
+		fs.writeFileSync(reply, "{}");
+		agePath(reply, 15 * 60 * 1000);
+		ageChannel(channelDir, 15 * 60 * 1000);
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: false,
+			sessionManager: { getSessionId: () => currentSessionId, getSessionFile: () => null, getEntries: () => [] },
+		};
+		const pi = { getAllTools: () => [], registerTool: () => {}, sendMessage: () => {}, getSessionName: () => "shared-name" };
+		const channel = createNativeSupervisorChannel(pi as never, makeState(currentSessionId, ctx));
+
+		channel.start();
+		channel.dispose();
+
+		assert.equal(fs.existsSync(channelDir), true);
+		assert.equal(fs.existsSync(reply), true);
 	});
 
 	it("prunes reply files older than the full ask timeout bound", () => {

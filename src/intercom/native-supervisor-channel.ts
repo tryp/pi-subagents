@@ -23,8 +23,10 @@ const MAX_MESSAGE_BYTES = 64 * 1024;
 const DEFAULT_ASK_TIMEOUT_MS = 10 * 60 * 1000;
 const CHANNEL_POLL_MS = Math.min(POLL_INTERVAL_MS, 500);
 const STALE_EMPTY_CHANNEL_AGE_MS = 60 * 1000;
-// An ask can remain pending until its full timeout; do not drop a reply while a child could still read it.
-const STALE_REPLY_AGE_MS = DEFAULT_ASK_TIMEOUT_MS + STALE_EMPTY_CHANNEL_AGE_MS;
+// An ask can remain pending until its configured timeout; do not drop a reply while a child could still read it.
+function staleReplyAgeMs(): number {
+	return askTimeoutMs() + STALE_EMPTY_CHANNEL_AGE_MS;
+}
 const STALE_EMPTY_CHANNEL_CLEANUP_INTERVAL_MS = 60 * 1000;
 
 type SupervisorReason = "need_decision" | "interview_request" | "progress_update";
@@ -421,9 +423,9 @@ function removeStaleEmptySupervisorChannel(channelDir: string, nowMs: number): b
 			const replyFile = path.join(repliesDir, entry.name);
 			const mtimeMs = fs.statSync(replyFile).mtimeMs;
 			newestKnownMtimeMs = Math.max(newestKnownMtimeMs, mtimeMs);
-			if (nowMs - mtimeMs < STALE_REPLY_AGE_MS) return false;
+			if (nowMs - mtimeMs < staleReplyAgeMs()) return false;
 		}
-		if (nowMs - newestKnownMtimeMs < STALE_REPLY_AGE_MS) return false;
+		if (nowMs - newestKnownMtimeMs < staleReplyAgeMs()) return false;
 	}
 
 	if (!removeEmptyDirectory(requestsDir)) return false;
