@@ -23,6 +23,8 @@ const MAX_MESSAGE_BYTES = 64 * 1024;
 const DEFAULT_ASK_TIMEOUT_MS = 10 * 60 * 1000;
 const CHANNEL_POLL_MS = Math.min(POLL_INTERVAL_MS, 500);
 const STALE_EMPTY_CHANNEL_AGE_MS = 60 * 1000;
+// An ask can remain pending until its full timeout; do not drop a reply while a child could still read it.
+const STALE_REPLY_AGE_MS = DEFAULT_ASK_TIMEOUT_MS + STALE_EMPTY_CHANNEL_AGE_MS;
 const STALE_EMPTY_CHANNEL_CLEANUP_INTERVAL_MS = 60 * 1000;
 
 type SupervisorReason = "need_decision" | "interview_request" | "progress_update";
@@ -400,19 +402,34 @@ function removeEmptyDirectory(dir: string): boolean {
 function removeStaleEmptySupervisorChannel(channelDir: string, nowMs: number): boolean {
 	const requestsDir = path.join(channelDir, REQUESTS_DIR);
 	const repliesDir = path.join(channelDir, REPLIES_DIR);
-	const newestKnownMtimeMs = Math.max(
+	let newestKnownMtimeMs = Math.max(
 		directoryMtimeMs(channelDir),
 		directoryMtimeMs(requestsDir),
 		directoryMtimeMs(repliesDir),
 	);
-	if (nowMs - newestKnownMtimeMs < STALE_EMPTY_CHANNEL_AGE_MS) return false;
 
 	const requestEntries = readDirectoryEntries(requestsDir);
 	if (!requestEntries || requestEntries.length > 0) return false;
 	const replyEntries = readDirectoryEntries(repliesDir);
-	if (!replyEntries || replyEntries.length > 0) return false;
+	if (!replyEntries) return false;
+
+	if (replyEntries.length === 0) {
+		if (nowMs - newestKnownMtimeMs < STALE_EMPTY_CHANNEL_AGE_MS) return false;
+	} else {
+		for (const entry of replyEntries) {
+			if (!entry.isFile()) return false;
+			const replyFile = path.join(repliesDir, entry.name);
+			const mtimeMs = fs.statSync(replyFile).mtimeMs;
+			newestKnownMtimeMs = Math.max(newestKnownMtimeMs, mtimeMs);
+			if (nowMs - mtimeMs < STALE_REPLY_AGE_MS) return false;
+		}
+		if (nowMs - newestKnownMtimeMs < STALE_REPLY_AGE_MS) return false;
+	}
 
 	if (!removeEmptyDirectory(requestsDir)) return false;
+	for (const entry of replyEntries) {
+		if (entry.isFile()) fs.rmSync(path.join(repliesDir, entry.name), { force: true });
+	}
 	if (!removeEmptyDirectory(repliesDir)) return false;
 	if (!removeEmptyDirectory(channelDir)) return false;
 	return true;
