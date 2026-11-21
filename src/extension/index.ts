@@ -53,6 +53,7 @@ import { drainOutstandingWork } from "../runs/background/auto-drain.ts";
 import { registerBackgroundWorkProvider } from "../api/background-work.ts";
 import { createSubagentBackgroundWorkProvider } from "../runs/background/background-work-provider.ts";
 import registerSubagentNotify, { resolveSubagentNotifyDetails, type SubagentNotifyDetails, type SubagentNotifyEnvelope } from "../runs/background/notify.ts";
+import { registerPendingResultsSweep } from "../runs/background/pending-results-sweep.ts";
 import { formatSteeringNotice, handleSubagentSteeringNotice, SUBAGENT_STEERING_MESSAGE_TYPE, type SubagentSteeringMessageDetails } from "./steering-notices.ts";
 import { SUBAGENT_CHILD_ENV, SUBAGENT_PARENT_SESSION_ENV } from "../runs/shared/pi-args.ts";
 import { formatDuration, shortenPath } from "../shared/formatters.ts";
@@ -294,6 +295,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	});
 	let disposeBackgroundWorkProvider = registerBackgroundWorkProvider(backgroundWorkProvider);
 	let disposeSubagentNotify = () => {};
+	let disposePendingResultsSweep = () => {};
 	let disposeStepNotifications = () => {};
 	let disposeStepResultEvents = () => {};
 	const { startResultWatcher, primeExistingResults, stopResultWatcher } = createResultWatcher(
@@ -311,6 +313,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		disposeBackgroundWorkProvider();
 		disposeBackgroundWorkProvider = () => {};
 		disposeSubagentNotify();
+		disposePendingResultsSweep();
 		disposeStepNotifications();
 		disposeStepResultEvents();
 		mainWatchdog.dispose();
@@ -557,6 +560,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		}
 	}
 	disposeSubagentNotify = registerSubagentNotify(pi, state, { batchConfig: config.completionBatch });
+	disposePendingResultsSweep = registerPendingResultsSweep(pi, state, ASYNC_DIR);
 	// Always on: this is what wakes a sleeping wait, independent of whether the
 	// progressive notification feature is enabled.
 	disposeStepResultEvents = registerStepResultEvents(pi, state);
