@@ -47,6 +47,7 @@ import { applyIntercomBridgeToAgent, INTERCOM_BRIDGE_MARKER, resolveIntercomBrid
 import { formatControlIntercomMessage, formatControlNoticeMessage, resolveControlConfig, shouldNotifyControlEvent } from "../shared/subagent-control.ts";
 import { resolveTurnBudgetConfig } from "../shared/turn-budget.ts";
 import { CwdClaimRegistry, type CwdClaimRequest } from "../shared/cwd-claims.ts";
+import { applyReadOnlyToolPolicy, READ_ONLY_CHILD_TOOLS, READ_ONLY_PARENT_ENV } from "../shared/writer-capability.ts";
 import { resolveExpectedWorktreeAgentCwd } from "../shared/worktree.ts";
 import { formatSpawnBudget, getSpawnBudgetSnapshot, grantSpawnBudget, preflightSpawnBudget, preflightSpawnBudgetGrant, reserveSpawnBudget } from "../shared/spawn-budget.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
@@ -168,6 +169,8 @@ export interface SubagentParamsLike {
 	concurrency?: number;
 	worktree?: boolean;
 	strictCwd?: boolean;
+	readOnly?: boolean;
+	overrideWriterGuard?: boolean;
 	expectedWorktreeRoot?: string;
 	allowCrossProjectWrites?: boolean;
 	context?: "fresh" | "fork";
@@ -2068,8 +2071,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 	const childIntercomTarget = intercomBridge.active ? (agent: string, index: number) => resolveSubagentIntercomTarget(id, agent, index) : undefined;
 
 	if (hasTasks && params.tasks) {
-		const claimError = registerAsyncCwdClaims(deps, { runId: id, params, cwd: effectiveCwd, parentCwd: ctx.cwd });
-		if (claimError) return buildParallelModeError(claimError);
+		const claimError = registerAsyncCwdClaims(deps, { runId: id, params, cwd: effectiveCwd, parentCwd: ctx.cwd, parentTools: getParentReadOnlyTools(ctx) });
+		if (claimError) return buildParallelModeError(claimError.message, claimError.conflict);
 		const skillOverrides = params.tasks.map((task) => normalizeSkillInput(task.skill));
 		const parallelTasks = params.tasks.map((task, index) => ({
 			agent: task.agent,
@@ -2137,8 +2140,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 		const chainSkills = normalized === false ? [] : (normalized ?? []);
 		const rawChain = params.chain as ChainStep[];
 		const chain = wrapChainTasksForFork(rawChain, contextPolicy);
-		const claimError = registerAsyncCwdClaims(deps, { runId: id, params, cwd: effectiveCwd, parentCwd: ctx.cwd });
-		if (claimError) return formatAsyncStartError("chain", claimError);
+		const claimError = registerAsyncCwdClaims(deps, { runId: id, params, cwd: effectiveCwd, parentCwd: ctx.cwd, parentTools: getParentReadOnlyTools(ctx) });
+		if (claimError) return formatAsyncStartError("chain", claimError.message, claimError.conflict);
 		const result = executeAsyncChain(id, {
 			chain,
 			model: params.model,
@@ -2196,8 +2199,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 		const normalizedSkills = normalizeSkillInput(params.skill);
 		const skills = normalizedSkills === false ? [] : normalizedSkills;
 		const maxSubagentDepth = resolveChildMaxSubagentDepth(currentMaxSubagentDepth, a.maxSubagentDepth);
-		const claimError = registerAsyncCwdClaims(deps, { runId: id, params, cwd: effectiveCwd, parentCwd: ctx.cwd });
-		if (claimError) return formatAsyncStartError("single", claimError);
+		const claimError = registerAsyncCwdClaims(deps, { runId: id, params, cwd: effectiveCwd, parentCwd: ctx.cwd, parentTools: getParentReadOnlyTools(ctx) });
+		if (claimError) return formatAsyncStartError("single", claimError.message, claimError.conflict);
 		const modelOverride = resolveEffectiveSubagentModel(
 			params.model as string | undefined,
 			a.model,
@@ -2293,24 +2296,26 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 				const cwd = stepWorktree
 					? resolveExpectedWorktreeAgentCwd(stepCwd, `${runId}-s${stepIndex}`, taskIndex, deps.config.worktreeBaseDir)
 					: resolveChildCwd(stepCwd, "cwd" in task && typeof task.cwd === "string" ? task.cwd : undefined);
-				chainClaimRequests.push({ runId, childIndex: chainChildIndex++, cwd, claimsFile: path.join(sessionRoot, "claims.jsonl") });
+				chainClaimRequests.push({ runId, childIndex: chainChildIndex++, cwd, ...(params.readOnly ? { tools: [...READ_ONLY_CHILD_TOOLS] } : {}), kind: "foreground", agentName: task.agent, claimsFile: path.join(sessionRoot, "claims.jsonl") });
 			});
 		} else if (isDynamicParallelStep(step)) {
 			const maxItems = step.expand.maxItems ?? deps.config.chain?.dynamicFanout?.maxItems ?? 0;
-			for (let index = 0; index < maxItems; index++) chainClaimRequests.push({ runId, childIndex: chainChildIndex++, cwd: resolveChildCwd(stepCwd, step.parallel.cwd), claimsFile: path.join(sessionRoot, "claims.jsonl") });
+			for (let index = 0; index < maxItems; index++) chainClaimRequests.push({ runId, childIndex: chainChildIndex++, cwd: resolveChildCwd(stepCwd, step.parallel.cwd), ...(params.readOnly ? { tools: [...READ_ONLY_CHILD_TOOLS] } : {}), kind: "foreground", claimsFile: path.join(sessionRoot, "claims.jsonl") });
 		} else if ("agent" in step && step.agent) {
-			chainClaimRequests.push({ runId, childIndex: chainChildIndex++, cwd: stepCwd, claimsFile: path.join(sessionRoot, "claims.jsonl") });
+			chainClaimRequests.push({ runId, childIndex: chainChildIndex++, cwd: stepCwd, ...(params.readOnly ? { tools: [...READ_ONLY_CHILD_TOOLS] } : {}), kind: "foreground", agentName: step.agent, claimsFile: path.join(sessionRoot, "claims.jsonl") });
 		}
 	}
 	const chainClaimResult = claimCwds(deps, {
 		runId,
 		requests: chainClaimRequests,
 		parentCwd: ctx.cwd,
+		parentTools: getParentReadOnlyTools(ctx),
 		parentRunId: deps.state.currentSessionId ? `parent:${deps.state.currentSessionId}` : "parent session",
 		strict: chainHasWorktree || params.strictCwd === true,
+		overrideWriterGuard: params.overrideWriterGuard,
 	});
 	for (const warning of chainClaimResult.warnings) console.warn(`pi-subagents: ${warning}`);
-	if (chainClaimResult.error) return formatAsyncStartError("chain", chainClaimResult.error);
+	if (chainClaimResult.error) return formatAsyncStartError("chain", chainClaimResult.error, chainClaimResult.conflict);
 	const chainResult = await executeChain({
 		chain,
 		task: params.task,
@@ -2380,8 +2385,8 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		const rawAsyncChain = chainResult.requestedAsync.chain;
 		const asyncChain = wrapChainTasksForFork(rawAsyncChain, contextPolicy);
 		const firstAgent = firstChainAgent(rawAsyncChain);
-		const claimError = registerAsyncCwdClaims(deps, { runId: id, params: { ...params, chain: rawAsyncChain }, cwd: effectiveCwd, parentCwd: ctx.cwd });
-		if (claimError) return formatAsyncStartError("chain", claimError);
+		const claimError = registerAsyncCwdClaims(deps, { runId: id, params: { ...params, chain: rawAsyncChain }, cwd: effectiveCwd, parentCwd: ctx.cwd, parentTools: getParentReadOnlyTools(ctx) });
+		if (claimError) return formatAsyncStartError("chain", claimError.message, claimError.conflict);
 		const asyncResult = executeAsyncChain(id, {
 			chain: asyncChain,
 			model: params.model,
@@ -2500,7 +2505,7 @@ interface ForegroundParallelRunInput {
 	rlimitsList: (ResolvedRlimits | undefined)[];
 }
 
-function buildParallelModeError(message: string): AgentToolResult<Details> {
+function buildParallelModeError(message: string, conflict?: Details["cwdWriterConflict"]): AgentToolResult<Details> {
 	const worktreeRootMismatch = message.includes("Blocked before implementation: root mismatch");
 	return {
 		content: [{ type: "text", text: message }],
@@ -2509,6 +2514,7 @@ function buildParallelModeError(message: string): AgentToolResult<Details> {
 			mode: "parallel" as const,
 			results: [],
 			...(worktreeRootMismatch ? { failureKind: "worktree_root_mismatch" as const, retryable: true } : {}),
+				...(conflict ? { cwdWriterConflict: conflict } : {}),
 		},
 	};
 }
@@ -2722,8 +2728,8 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 	}, input.globalSemaphore);
 }
 
-function formatAsyncStartError(mode: SubagentRunMode, message: string): AgentToolResult<Details> {
-	return { content: [{ type: "text", text: message }], isError: true, details: { mode, results: [] } } as AgentToolResult<Details>;
+function formatAsyncStartError(mode: SubagentRunMode, message: string, conflict?: Details["cwdWriterConflict"]): AgentToolResult<Details> {
+	return { content: [{ type: "text", text: message }], isError: true, details: { mode, results: [], ...(conflict ? { cwdWriterConflict: conflict } : {}) } } as AgentToolResult<Details>;
 }
 
 function liveCwdClaimRunIds(state: SubagentState): Set<string> {
@@ -2732,9 +2738,15 @@ function liveCwdClaimRunIds(state: SubagentState): Set<string> {
 	return new Set([...activeAsync, ...activeFleet, ...(state.foregroundControls?.keys() ?? [])]);
 }
 
+function getParentReadOnlyTools(ctx: ExtensionContext): readonly string[] | undefined {
+	const tools = (ctx as ExtensionContext & { tools?: unknown }).tools;
+	if (Array.isArray(tools) && tools.every((tool): tool is string => typeof tool === "string")) return tools;
+	return process.env[READ_ONLY_PARENT_ENV] === "1" ? READ_ONLY_CHILD_TOOLS : undefined;
+}
+
 function claimCwds(
 	deps: ExecutorDeps,
-	input: { runId: string; requests: CwdClaimRequest[]; parentCwd: string; parentRunId?: string; strict: boolean },
+	input: { runId: string; requests: CwdClaimRequest[]; parentCwd: string; parentRunId?: string; parentTools?: readonly string[]; strict: boolean; overrideWriterGuard?: boolean },
 ) {
 	const registry = deps.state.cwdClaims ??= new CwdClaimRegistry();
 	const liveRunIds = liveCwdClaimRunIds(deps.state);
@@ -2745,21 +2757,23 @@ function claimCwds(
 		strict: input.strict,
 		parentCwd: input.parentCwd,
 		parentRunId: input.parentRunId,
+		parentTools: input.parentTools,
+		overrideWriterGuard: input.overrideWriterGuard,
 	});
 }
 
 export function registerAsyncCwdClaims(
 	deps: ExecutorDeps,
-	input: { runId: string; params: SubagentParamsLike; cwd: string; parentCwd: string },
+	input: { runId: string; params: SubagentParamsLike; cwd: string; parentCwd: string; parentTools?: readonly string[] },
 	onPrepared?: () => void,
-): string | undefined {
+): { message: string; conflict?: Details["cwdWriterConflict"] } | undefined {
 	const requests: CwdClaimRequest[] = [];
 	let strict = input.params.worktree === true || input.params.strictCwd === true;
 	const add = (childIndex: number, cwd: string, worktree: boolean, stepId = input.runId, worktreeIndex = childIndex) => {
 		if (worktree) strict = true;
 		const childBaseCwd = resolveChildCwd(input.cwd, cwd);
 		const resolved = worktree ? resolveExpectedWorktreeAgentCwd(childBaseCwd, stepId, worktreeIndex, deps.config.worktreeBaseDir) : childBaseCwd;
-		requests.push({ runId: input.runId, childIndex, cwd: resolved, claimsFile: path.join(ASYNC_DIR, input.runId, "claims.jsonl") });
+		requests.push({ runId: input.runId, childIndex, cwd: resolved, ...(input.params.readOnly ? { tools: [...READ_ONLY_CHILD_TOOLS] } : {}), kind: "async", claimsFile: path.join(ASYNC_DIR, input.runId, "claims.jsonl") });
 	};
 	if (input.params.tasks?.length) {
 		input.params.tasks.forEach((task, index) => add(index, task.cwd ?? input.cwd, input.params.worktree === true, input.params.worktree ? `${input.runId}-s0` : input.runId));
@@ -2781,10 +2795,12 @@ export function registerAsyncCwdClaims(
 		requests,
 		parentCwd: input.parentCwd,
 		parentRunId: deps.state.currentSessionId ? `parent:${deps.state.currentSessionId}` : "parent session",
+		parentTools: input.parentTools,
 		strict,
+		overrideWriterGuard: input.params.overrideWriterGuard,
 	});
 	for (const warning of result.warnings) console.warn(`pi-subagents: ${warning}`);
-	if (result.error) return result.error;
+	if (result.error) return { message: result.error, ...(result.conflict ? { conflict: result.conflict } : {}) };
 	const asyncDir = path.join(ASYNC_DIR, input.runId);
 	deps.state.asyncJobs.set(input.runId, { asyncId: input.runId, asyncDir, status: "running", startedAt: Date.now(), updatedAt: Date.now() });
 	// Callers may use this boundary immediately before invoking the actual child spawn.
@@ -2949,8 +2965,8 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 				};
 			}
 			const id = randomUUID();
-			const claimError = registerAsyncCwdClaims(deps, { runId: id, params, cwd: effectiveCwd, parentCwd: ctx.cwd });
-			if (claimError) return buildParallelModeError(claimError);
+			const claimError = registerAsyncCwdClaims(deps, { runId: id, params, cwd: effectiveCwd, parentCwd: ctx.cwd, parentTools: getParentReadOnlyTools(ctx) });
+			if (claimError) return buildParallelModeError(claimError.message, claimError.conflict);
 			const asyncCtx = {
 				pi: deps.pi,
 				cwd: ctx.cwd,
@@ -3037,19 +3053,24 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 	const claimResult = claimCwds(deps, {
 		runId,
 		parentCwd: ctx.cwd,
+		parentTools: getParentReadOnlyTools(ctx),
 		parentRunId: deps.state.currentSessionId ? `parent:${deps.state.currentSessionId}` : "parent session",
 		strict: params.worktree === true || params.strictCwd === true,
+		overrideWriterGuard: params.overrideWriterGuard,
 		requests: tasks.map((task, childIndex) => ({
 			runId,
 			childIndex,
 			cwd: resolveParallelTaskCwd(task, effectiveCwd, worktreeSetup, childIndex),
+			...(params.readOnly ? { tools: [...READ_ONLY_CHILD_TOOLS] } : {}),
+			kind: "foreground" as const,
+			agentName: task.agent,
 			claimsFile,
 		})),
 	});
 	for (const warning of claimResult.warnings) console.warn(`pi-subagents: ${warning}`);
 	if (claimResult.error) {
 		if (worktreeSetup) cleanupWorktrees(worktreeSetup);
-		return buildParallelModeError(claimResult.error);
+		return buildParallelModeError(claimResult.error, claimResult.conflict);
 	}
 
 	let cleanupCompleted = false;
@@ -3337,8 +3358,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 				};
 			}
 			const id = randomUUID();
-			const claimError = registerAsyncCwdClaims(deps, { runId: id, params, cwd: effectiveCwd, parentCwd: ctx.cwd });
-			if (claimError) return formatAsyncStartError("single", claimError);
+			const claimError = registerAsyncCwdClaims(deps, { runId: id, params, cwd: effectiveCwd, parentCwd: ctx.cwd, parentTools: getParentReadOnlyTools(ctx) });
+			if (claimError) return formatAsyncStartError("single", claimError.message, claimError.conflict);
 			const asyncCtx = {
 				pi: deps.pi,
 				cwd: ctx.cwd,
@@ -3443,12 +3464,14 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 	const claimResult = claimCwds(deps, {
 		runId,
 		parentCwd: ctx.cwd,
+		parentTools: getParentReadOnlyTools(ctx),
 		parentRunId: deps.state.currentSessionId ? `parent:${deps.state.currentSessionId}` : "parent session",
 		strict: params.strictCwd === true,
-		requests: [{ runId, childIndex: 0, cwd: effectiveCwd, claimsFile: path.join(sessionRoot, "claims.jsonl") }],
+		overrideWriterGuard: params.overrideWriterGuard,
+		requests: [{ runId, childIndex: 0, cwd: effectiveCwd, ...(params.readOnly ? { tools: [...READ_ONLY_CHILD_TOOLS] } : {}), kind: "foreground", agentName: params.agent, claimsFile: path.join(sessionRoot, "claims.jsonl") }],
 	});
 	for (const warning of claimResult.warnings) console.warn(`pi-subagents: ${warning}`);
-	if (claimResult.error) return toExecutionErrorResult(params, new Error(claimResult.error));
+	if (claimResult.error) return formatAsyncStartError("single", claimResult.error, claimResult.conflict);
 	const deadlineAt = data.deadlineAt ?? (data.timeoutMs !== undefined ? Date.now() + data.timeoutMs : undefined);
 	const resolvedSyncWakeMs = resolveSyncWakeMs(deps.config, data.timeoutMs);
 	const r = await runSync(ctx.cwd, agents, params.agent!, task, {
@@ -4089,9 +4112,10 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			context: effectiveParams.context,
 			orchestratorTarget: sessionName,
 		});
-		const agents = intercomBridge.active
+		const bridgedAgents = intercomBridge.active
 			? discoveredAgents.map((agent) => applyIntercomBridgeToAgent(agent, intercomBridge))
 			: discoveredAgents;
+		const agents = effectiveParams.readOnly ? bridgedAgents.map(applyReadOnlyToolPolicy) : bridgedAgents;
 		const runId = randomUUID().slice(0, 8);
 		const inheritedNestedRoute = resolveInheritedNestedRouteFromEnv();
 		const nestedParentAddress = inheritedNestedRoute ? resolveNestedParentAddressFromEnv() : undefined;

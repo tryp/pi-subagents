@@ -6,6 +6,7 @@ import test from "node:test";
 import { CwdClaimRegistry, releaseTerminalCwdClaims } from "../../src/runs/shared/cwd-claims.ts";
 import { registerAsyncCwdClaims } from "../../src/runs/foreground/subagent-executor.ts";
 import { ASYNC_DIR } from "../../src/shared/types.ts";
+import { READ_ONLY_CHILD_TOOLS } from "../../src/runs/shared/writer-capability.ts";
 
 function fixture(t: test.TestContext) {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cwd-claims-"));
@@ -23,13 +24,16 @@ test("claim-record persists a claim with run, child, and resolved cwd", (t) => {
 	assert.deepEqual({ event: record.event, runId: record.runId, childIndex: record.childIndex, cwd: record.cwd }, { event: "claim", runId: "run-a", childIndex: 2, cwd: process.cwd() });
 });
 
-test("conflict-warn allows a second run and reports both owners", () => {
+test("same-cwd writer conflicts are structured and block the second run", () => {
 	const registry = new CwdClaimRegistry();
-	registry.claim({ requests: [{ runId: "run-a", childIndex: 0, cwd: "/repo" }], liveRunIds: new Set(["run-a"]) });
-	const result = registry.claim({ requests: [{ runId: "run-b", childIndex: 1, cwd: "/repo" }], liveRunIds: new Set(["run-a", "run-b"]) });
-	assert.equal(result.error, undefined);
-	assert.match(result.warnings[0]!, /run-b.*run-a.*\/repo/);
-	assert.equal(registry.list(new Set(["run-a", "run-b"])).length, 2);
+	registry.claim({ requests: [{ runId: "run-a", childIndex: 0, cwd: "/repo", agentName: "worker" }], liveRunIds: new Set(["run-a"]), now: 10 });
+	const result = registry.claim({ requests: [{ runId: "run-b", childIndex: 1, cwd: "/repo" }], liveRunIds: new Set(["run-a", "run-b"]), parentCwd: "/elsewhere", now: 20 });
+	assert.match(result.error ?? "", /^cwd_writer_conflict:/);
+	assert.equal(result.conflict?.code, "cwd_writer_conflict");
+	assert.deepEqual(result.conflict?.holders[0], { runId: "run-a", kind: "async", agentName: "worker", writeCapable: true, startedAt: 10, cwd: "/repo" });
+	assert.deepEqual(result.conflict?.remedies, ["use_worktree_or_different_cwd", "wait_for_holder", "dispatch_read_only", "override_writer_guard"]);
+	assert.equal(registry.list(new Set(["run-a", "run-b"])).length, 1);
+	assert.equal(registry.guardTrips, 1);
 });
 
 test("conflict-refuse rejects strict worktree launch before recording any claim", (t) => {
@@ -39,7 +43,8 @@ test("conflict-refuse rejects strict worktree launch before recording any claim"
 	const result = registry.claim({ requests: [{ runId: "run-b", childIndex: 0, cwd: "/repo", claimsFile: file }], liveRunIds: new Set(["run-a", "run-b"]), strict: true });
 	assert.match(result.error ?? "", /run-b.*\/repo.*run-a/);
 	assert.equal(registry.list(new Set(["run-a", "run-b"])).some((claim) => claim.runId === "run-b"), false);
-	assert.equal(fs.existsSync(file), false);
+	const audit = fs.readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+	assert.deepEqual(audit.map((event) => event.event), ["cwd-writer-guard-trip"]);
 });
 
 test("release-on-terminal appends release records and removes all run claims", (t) => {
@@ -55,11 +60,10 @@ test("release-on-terminal appends release records and removes all run claims", (
 
 test("status-summary reports run count and per-claim rows", () => {
 	const registry = new CwdClaimRegistry();
-	registry.claim({ requests: [{ runId: "run-a", childIndex: 0, cwd: "/repo" }, { runId: "run-b", childIndex: 1, cwd: "/repo" }], liveRunIds: new Set(["run-a", "run-b"]) });
+	registry.claim({ requests: [{ runId: "run-a", childIndex: 0, cwd: "/repo" }, { runId: "run-b", childIndex: 1, cwd: "/other" }], liveRunIds: new Set(["run-a", "run-b"]) });
 	const status = registry.format(new Set(["run-a", "run-b"]));
-	assert.match(status, /2 runs writing \/repo/);
 	assert.match(status, /run run-a child 0: \/repo/);
-	assert.match(status, /run run-b child 1: \/repo/);
+	assert.match(status, /run run-b child 1: \/other/);
 });
 
 test("stale-claim handling prunes claims for runs absent from the live table and counts them", (t) => {
@@ -132,8 +136,37 @@ test("kill path status is stopped and releases its cwd claim", (t) => {
 	assert.equal(releaseTerminalCwdClaims(registry, "killed-by-stop", "killed").length, 0, "no distinct killed status is supported");
 });
 
-test("parent cwd is treated as a live writer for conflict checks", () => {
+test("readOnly child dispatch claims the parent's cwd without a writer conflict", (t) => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cwd-readonly-"));
+	const runId = `readonly-${Date.now()}`;
+	t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+	const registry = new CwdClaimRegistry();
+	const state = { cwdClaims: registry, asyncJobs: new Map() };
+	const deps = { state, config: { worktreeBaseDir: path.join(root, "worktrees") } } as any;
+	const error = registerAsyncCwdClaims(deps, { runId, params: { agent: "reviewer", readOnly: true }, cwd: root, parentCwd: root });
+	assert.equal(error, undefined);
+	assert.equal(registry.list(new Set([runId]))[0]?.writeCapable, false);
+});
+
+test("a parent with the propagated enforced read-only capability can share its cwd", (t) => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cwd-parent-readonly-"));
+	const runId = `parent-readonly-${Date.now()}`;
+	const asyncDir = path.join(ASYNC_DIR, runId);
+	t.after(() => {
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(asyncDir, { recursive: true, force: true });
+	});
+	const registry = new CwdClaimRegistry();
+	const state = { cwdClaims: registry, asyncJobs: new Map() };
+	const deps = { state, config: { worktreeBaseDir: path.join(root, "worktrees") } } as any;
+	const error = registerAsyncCwdClaims(deps, { runId, params: { agent: "worker" }, cwd: root, parentCwd: root, parentTools: READ_ONLY_CHILD_TOOLS });
+	assert.equal(error, undefined);
+	assert.equal(registry.list(new Set([runId]))[0]?.writeCapable, true);
+});
+
+test("parent cwd defaults to write-capable and blocks a writer child", () => {
 	const registry = new CwdClaimRegistry();
 	const result = registry.claim({ requests: [{ runId: "child-run", childIndex: 0, cwd: "/repo" }], liveRunIds: new Set(["child-run"]), parentCwd: "/repo", parentRunId: "parent-session" });
-	assert.match(result.warnings[0] ?? "", /child-run.*parent-session.*\/repo/);
+	assert.equal(result.conflict?.holders[0]?.kind, "parent");
+	assert.equal(result.conflict?.holders[0]?.writeCapable, true);
 });

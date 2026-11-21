@@ -71,7 +71,7 @@ const AcceptanceOverride = Type.Unsafe({
 		{ type: "boolean", enum: [false] },
 		{ type: "object", additionalProperties: true },
 	],
-	description: "Optional acceptance policy. Omitted means auto-inferred; verified requires configured runtime commands. Reviewed is inferred-only because explicit runs cannot supply an independent reviewer result. Bare \"none\" requires { level: \"none\", reason: \"...\" }, while false is deprecated.",
+	description: "Optional acceptance policy. Omitted: auto-inferred. verified requires configured runtime commands; reviewed is inferred-only. Bare \"none\" requires { level: \"none\", reason: \"...\" }; false deprecated.",
 });
 
 const TurnBudgetOverride = Type.Object({
@@ -106,7 +106,7 @@ const RlimitsOverride = Type.Object({
 	fileSizeMb: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum size in MiB of any single file the child may write." })),
 	openFiles: Type.Optional(Type.Integer({ minimum: 64, description: "Maximum number of open file descriptors (minimum 64)." })),
 	coreSizeMb: Type.Optional(Type.Integer({ minimum: 0, description: "Maximum core dump size in MiB; 0 suppresses core dumps." })),
-}, { additionalProperties: false, description: "Optional OS resource limits applied to the child process (Linux, via prlimit). Bounds CPU time, per-file size, open files, and core dump size. Memory and process-count cannot be bounded with OS limits and are rejected." });
+}, { additionalProperties: false, description: "Optional OS resource limits (Linux, via prlimit). Bounds CPU time, per-file size, open files, core dump size. Memory and process-count cannot be bounded." });
 
 const TaskItem = Type.Object({
 	agent: Type.String(), 
@@ -280,7 +280,7 @@ const SubagentParamsSchema = Type.Object({
 		description: "Optional status view. Use view='fleet' for a read-only active foreground/async fleet surface, or view='transcript' with id/dir (and optional index) to tail a run transcript.",
 	})),
 	lines: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, description: "Maximum transcript lines for action='status', view='transcript'. Defaults to 80." })),
-	message: Type.Optional(Type.String({ description: "Follow-up message for action='resume' (revive paused, completed, or failed children, or reach a routed nested run) or live async guidance for action='steer'. Stopped runs are non-resumable. Use index to choose a child from multi-child runs." })),
+	message: Type.Optional(Type.String({ description: "Follow-up for action='resume' (revive paused/completed/failed children, or reach a routed nested run) or live guidance for action='steer'. Stopped runs are non-resumable; index chooses a child in multi-child runs." })),
 	additional: Type.Optional(Type.Integer({ minimum: 1, description: "Positive launches to add with action='grant-spawn-budget'. Root interactive parent with native user confirmation only; total grants cannot exceed the original configured cap." })),
 	scope: Type.Optional(Type.String({ enum: ["session", "user", "project"], description: "Scope for action='watchdog.configure'. Defaults to session to avoid persistent settings writes unless user/project is explicit." })),
 	target: Type.Optional(Type.String({ enum: ["main", "children", "child"], description: "Target for action='watchdog.configure'. Defaults to main. Use target='child' with agent for a per-agent child watchdog override." })),
@@ -304,12 +304,14 @@ const SubagentParamsSchema = Type.Object({
 	worktree: Type.Optional(Type.Boolean({
 		description: "Isolate parallel tasks in git worktrees; requires a clean tree."
 	})),
-	strictCwd: Type.Optional(Type.Boolean()),
+	strictCwd: Type.Optional(Type.Boolean({ description: "Reject launches that cannot claim their cwd." })),
+	readOnly: Type.Optional(Type.Boolean({ description: "Child limited to built-in read, grep, find, ls; extensions and MCP disabled. May share a writer's cwd." })),
+	overrideWriterGuard: Type.Optional(Type.Boolean({ description: "Allow a same-cwd writer conflict; logged to claims.jsonl. Transitional." })),
 	chain: Type.Optional(Type.Array(ChainItem, { description: "CHAIN mode: sequential steps; each result becomes {previous}. append-step takes one tail step and may use {chain_dir}/{outputs.name}." })),
 	batchStability: Type.Optional(BatchStabilitySchema),
 	context: Type.Optional(Type.String({
 		enum: ["fresh", "fork"],
-		description: "'fresh' or 'fork' to branch from parent session. Explicit context overrides every child in the invocation. If omitted, each requested agent uses its own defaultContext; agents without defaultContext: 'fork' run fresh.",
+		description: "'fresh' or 'fork' to branch from parent session; explicit context overrides every child. If omitted, each requested agent uses its own defaultContext; agents without one run fresh.",
 	})),
 	chainDir: Type.Optional(Type.String({ description: "Persistent chain artifact directory; defaults to user-scoped temp storage." })),
 	async: Type.Optional(Type.Boolean({ description: "Run in background (default true); child results arrive asynchronously. Set false only to wait for inline results; blocking launches cannot overlap." })),
@@ -340,7 +342,7 @@ const SubagentParamsSchema = Type.Object({
 	})),
 	outputMode: Type.Optional(OutputModeOverride),
 	skill: Type.Optional(SkillOverride),
-	model: Type.Optional(Type.String({ description: "Execution override or action='default-model': e.g. 'openai-codex/gpt-5.6-luna[:thinking]', 'inherit', 'off', or 'clear'. Bare names auto-resolve across providers; use list/models to discover. Omit on execution to use the session default, then agent/parent defaults. Top-level model fills entries without their own model." })),
+	model: Type.Optional(Type.String({ description: "Execution override or action='default-model': e.g. 'openai-codex/gpt-5.6-luna[:thinking]', 'inherit', 'off', 'clear'. Bare names auto-resolve across providers; list/models discovers. Omit on execution for the session default, then agent/parent defaults." })),
 	acceptance: Type.Optional(AcceptanceOverride),
 });
 

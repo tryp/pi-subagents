@@ -718,6 +718,8 @@ export interface SpawnBudgetSnapshot {
 
 export interface Details {
 	mode: SubagentRunMode | "management";
+	/** Structured same-cwd writer conflict, stable for machine handling. */
+	cwdWriterConflict?: import("../runs/shared/cwd-claims.ts").CwdWriterConflict;
 	/** Classified launch failure for a run rejected before children start. */
 	failureKind?: AsyncStepFailureKind;
 	/** True when correcting the launch inputs permits a safe retry. */

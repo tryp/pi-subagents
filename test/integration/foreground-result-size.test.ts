@@ -81,6 +81,7 @@ function makeExecutor(cwd: string) {
 function makeCtx(cwd: string) {
 	return {
 		cwd,
+		tools: ["read", "grep", "find", "ls"],
 		hasUI: false,
 		ui: {},
 		sessionManager: {

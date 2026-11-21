@@ -2226,7 +2226,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 	it("top-level async worktree parallel resolves reads against the worktree and output under project artifacts", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : process.platform === "win32" ? "worktree path separators unreliable on Windows CI" : undefined }, async () => {
 		const repoDir = createRepo("pi-subagent-async-worktree-");
 		try {
-			mockPi.onCall({ output: "Worktree report", writeCwdTo: "observed-cwd.txt" });
+			mockPi.onCall({ output: "Worktree report", writeCwdTo: "observed-cwd.txt", steps: [{ delay: 500 }] });
 			const executor = createSubagentExecutor!({
 				pi: { events: createEventBus(), getSessionName: () => undefined },
 				state: { baseCwd: repoDir, currentSessionId: null, asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },

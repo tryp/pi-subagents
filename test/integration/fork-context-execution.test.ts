@@ -270,6 +270,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 	function makeCtx(sessionManager: SessionManagerStub) {
 		return {
 			cwd: tempDir,
+			tools: ["read", "grep", "find", "ls"],
 			hasUI: false,
 			ui: {},
 			modelRegistry: { getAvailable: () => [] },
@@ -1558,28 +1559,28 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 			{
 				name: "direct single",
 				goal: rawSingleGoal,
-				params: { agent: "echo", task: rawSingleGoal, async: true, clarify: false },
+				params: { agent: "echo", task: rawSingleGoal, async: true, clarify: false, readOnly: true },
 			},
 			{
 				name: "top-level parallel",
 				goal: rawParallelGoal,
-				params: { tasks: [{ agent: "echo", task: rawParallelGoal }, { agent: "second", task: "Second child" }], async: true, clarify: false },
+				params: { tasks: [{ agent: "echo", task: rawParallelGoal }, { agent: "second", task: "Second child" }], async: true, clarify: false, readOnly: true },
 			},
 			{
 				name: "parallel chain whitespace workflow fallback",
 				goal: rawParallelChainGoal,
-				params: { task: "   ", chain: [{ parallel: [{ agent: "echo", task: rawParallelChainGoal }, { agent: "second", task: "Second chain child" }] }], async: true, clarify: false },
+				params: { task: "   ", chain: [{ parallel: [{ agent: "echo", task: rawParallelChainGoal }, { agent: "second", task: "Second chain child" }] }], async: true, clarify: false, readOnly: true },
 			},
 			{
 				name: "padded workflow goal",
 				goal: paddedWorkflowGoal,
-				params: { task: paddedWorkflowGoal, chain: [{ agent: "echo", task: "Forked child" }], async: true, clarify: false },
+				params: { task: paddedWorkflowGoal, chain: [{ agent: "echo", task: "Forked child" }], async: true, clarify: false, readOnly: true },
 			},
 			{
 				name: "literal preamble in fresh child",
 				goal: literalPreambleGoal.slice(0, 120),
 				allowsLiteralPreamble: true,
-				params: { chain: [{ agent: "second", task: literalPreambleGoal }], async: true, clarify: false },
+				params: { chain: [{ agent: "second", task: literalPreambleGoal }], async: true, clarify: false, readOnly: true }
 			},
 		]) {
 			const result = await executor.execute(
@@ -1615,19 +1616,19 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 			{
 				name: "single",
 				goal: "Edited single goal",
-				params: { agent: "echo", task: "Original single", async: true, clarify: true },
+				params: { agent: "echo", task: "Original single", async: true, clarify: true, readOnly: true },
 				templates: ["Edited single goal"],
 			},
 			{
 				name: "parallel",
 				goal: "Edited parallel goal",
-				params: { tasks: [{ agent: "echo", task: "Original parallel" }, { agent: "second", task: "Second child" }], async: true, clarify: true },
+				params: { tasks: [{ agent: "echo", task: "Original parallel" }, { agent: "second", task: "Second child" }], async: true, clarify: true, readOnly: true },
 				templates: ["Edited parallel goal", "Second child"],
 			},
 			{
 				name: "chain",
 				goal: "Edited chain goal",
-				params: { chain: [{ agent: "echo", task: "Original chain" }], async: true, clarify: true },
+				params: { chain: [{ agent: "echo", task: "Original chain" }], async: true, clarify: true, readOnly: true },
 				templates: ["Edited chain goal"],
 			},
 		]) {

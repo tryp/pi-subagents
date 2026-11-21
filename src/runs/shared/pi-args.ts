@@ -8,6 +8,7 @@ import { STRUCTURED_OUTPUT_CAPTURE_ENV, STRUCTURED_OUTPUT_SCHEMA_ENV } from "./s
 import { TEMP_ROOT_DIR, type JsonSchemaObject, type ResolvedRlimits, type ResolvedToolBudget } from "../../shared/types.ts";
 import { THINKING_LEVELS } from "../../shared/model-info.ts";
 import { TOOL_BUDGET_ENV, encodeToolBudgetEnv } from "./tool-budget.ts";
+import { isReadOnlyToolCapability, READ_ONLY_PARENT_ENV } from "./writer-capability.ts";
 import { RLIMITS_ENV, encodeRlimitsEnv } from "./rlimits.ts";
 import { CHILD_TOOL_DIAGNOSTIC_PATH_ENV, REQUIRED_CHILD_TOOLS_ENV } from "./tool-availability.ts";
 import { CHILD_WATCHDOG_CONFIG_ENV, encodeChildWatchdogConfig, type ChildWatchdogConfig } from "../../watchdog/child-status.ts";
@@ -213,6 +214,7 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 		env[REQUIRED_CHILD_TOOLS_ENV] = JSON.stringify(requiredChildTools);
 		env[CHILD_TOOL_DIAGNOSTIC_PATH_ENV] = toolDiagnosticPath;
 	}
+	env[READ_ONLY_PARENT_ENV] = isReadOnlyToolCapability({ tools: input.tools, extensions: input.extensions, subagentOnlyExtensions: input.subagentOnlyExtensions, mcpDirectTools: input.mcpDirectTools }) ? "1" : "0";
 	env[SUBAGENT_CHILD_ENV] = "1";
 	env[SUBAGENT_FANOUT_CHILD_ENV] = fanoutAuthorized ? "1" : "0";
 	if (input.waitToolEnabled !== undefined) {

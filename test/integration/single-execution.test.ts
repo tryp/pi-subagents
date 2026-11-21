@@ -487,8 +487,8 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		const executor = makeExecutor([makeAgent("echo"), makeAgent("second")]);
 		const ctx = makeMinimalCtx(tempDir);
 		const [first, second] = await Promise.all([
-			executor.execute("first", { agent: "echo", task: "First", async: true }, new AbortController().signal, undefined, ctx),
-			executor.execute("second", { agent: "second", task: "Second", async: true }, new AbortController().signal, undefined, ctx),
+			executor.execute("first", { agent: "echo", task: "First", async: true, readOnly: true }, new AbortController().signal, undefined, ctx),
+			executor.execute("second", { agent: "second", task: "Second", async: true, readOnly: true }, new AbortController().signal, undefined, ctx),
 		]);
 		assert.doesNotMatch(first.content[0]?.text ?? "", /Issue exactly ONE subagent call per turn/);
 		assert.doesNotMatch(second.content[0]?.text ?? "", /Issue exactly ONE subagent call per turn/);

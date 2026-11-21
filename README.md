@@ -821,13 +821,19 @@ Important fields:
 | `turnBudget` | JSON object default such as `{"maxTurns":20,"graceTurns":2}` for single-agent launches. An explicit call value wins, followed by this agent default, then global `turnBudget` config. |
 | `rlimits` | JSON object default for single-agent launches, using the fields described in [Resource limits](#resource-limits). An explicit task/step or run value wins, followed by this agent default, then global `rlimits` config. |
 | `acceptance` | Acceptance default for single-agent launches. Use a scalar level such as `checked` or an inline/block YAML map such as `{ level: "none", reason: "lightweight lookup" }`. Explicit call values win; chain and parallel acceptance remains task/step configuration. |
-| `acceptanceRole` | Optional `read-only` or `writer` role for automatic acceptance inference. Explicit task mutation or no-edit intent wins; otherwise the declared role replaces agent-name guessing. This does not grant or revoke tools. |
+| `acceptanceRole` | Optional `read-only` or `writer` role for automatic acceptance inference. Explicit task mutation or no-edit intent wins; otherwise the declared role replaces agent-name guessing. This does not grant or revoke tools and is not a cwd-safety capability signal. |
 | `completionGuard` | Set `false` only for non-implementation agents that may mention implementation words while using mutation-capable tools such as `bash`. |
 | `interactive` | Parsed for compatibility but not enforced in v1. |
 | `maxSubagentDepth` | Tightens nested delegation for this agent's children. |
 | `memory` | Opt-in role-specific persistent memory. `memory: { scope: "project" \| "user", path: "<name>" }` injects the first lines of a `MEMORY.md` from a dedicated `agent-memory/` directory into the child system prompt. Agents with write tools (`edit`/`write`/`bash`) get a read-write block; read-only agents get a read-only fallback. Project scope resolves under `<project>/.pi/agent-memory/`, user scope under `~/.pi/agent/agent-memory/`. Paths are validated against traversal and symlink escape. |
 
 Agent-local `skillPath` candidates never enter Pi's parent/global skills catalog. Pair `inheritSkills: false` with explicit `skills` and `skillPath` when a child should receive only its selected private skills.
+
+### Same-cwd writer guard and read-only dispatch
+
+The subagent tool prevents two write-capable runs from claiming the same resolved cwd; read-only runs may share it. A child is read-only only when pi-subagents enforces the `readOnly: true` capability described below. The parent is treated as read-only only when that enforced capability is available to pi-subagents; otherwise it defaults to write-capable. A rejected launch includes `details.cwdWriterConflict` with stable `code: "cwd_writer_conflict"`, holder identity/capability/timestamp, and remedies; use a worktree or different cwd, wait for the holder, or dispatch read-only. If an operator intentionally accepts shared-tree mutation risk, `overrideWriterGuard: true` permits the launch and records the holders and override in the run's `claims.jsonl` audit stream.
+
+`readOnly: true` is the capability switch for a reviewer/validator in the same cwd. It restricts the child to the built-in `read`, `grep`, `find`, and `ls` tools and disables user extensions and MCP tools. This is intentionally distinct from `acceptanceRole: "read-only"` (acceptance inference only) and `toolBudget` (a call-count limit, not a no-write guarantee). Unknown tools remain write-capable; pi-subagents does not infer safety from agent names or task wording.
 
 ### Per-agent persistent memory
 

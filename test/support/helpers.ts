@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createMockPi as _createMockPi } from "./mock-pi.ts";
 import type { MockPi } from "./mock-pi.ts";
+import { READ_ONLY_CHILD_TOOLS } from "../../src/runs/shared/writer-capability.ts";
 
 export type { MockPi };
 
@@ -91,6 +92,8 @@ export function makeAgent(name: string, overrides: Partial<AgentConfig> = {}): A
 
 interface MinimalCtx {
 	cwd: string;
+	/** The mock parent exposes no tools beyond this read-only set. */
+	tools: readonly string[];
 	hasUI: boolean;
 	ui: Record<string, never>;
 	sessionManager: {
@@ -106,6 +109,7 @@ interface MinimalCtx {
 export function makeMinimalCtx(cwd: string): MinimalCtx {
 	return {
 		cwd,
+		tools: READ_ONLY_CHILD_TOOLS,
 		hasUI: false,
 		ui: {},
 		sessionManager: {

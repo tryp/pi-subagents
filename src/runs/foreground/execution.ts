@@ -55,6 +55,7 @@ import { getPiSpawnCommand } from "../shared/pi-spawn.ts";
 import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
+import { isReadOnlyToolCapability } from "../shared/writer-capability.ts";
 import { RLIMITS_ENV, decodeRlimitsEnv, resourceLimitExceededMessage, resourceLimitKindForSignal } from "../shared/rlimits.ts";
 import { readStructuredOutput } from "../shared/structured-output.ts";
 import { prepareContextDelivery, writeContextDeliveryReceipt } from "../shared/context-delivery.ts";
@@ -244,7 +245,7 @@ async function runSingleAttempt(
 		parentRootRunId: options.nestedRoute?.rootRunId,
 		parentCapabilityToken: options.nestedRoute?.capabilityToken,
 		parentSessionId: options.parentSessionId,
-		structuredOutput: options.structuredOutput,
+		structuredOutput: isReadOnlyToolCapability({ tools: agent.tools, extensions: agent.extensions, subagentOnlyExtensions: agent.subagentOnlyExtensions, mcpDirectTools: agent.mcpDirectTools }) ? undefined : options.structuredOutput,
 		toolBudget: options.toolBudget,
 		// Forwarded so the child environment carries PI_SUBAGENT_RLIMITS: the spawn
 		// below decodes the limits back out of that same env, which keeps what the
