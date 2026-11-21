@@ -40,6 +40,7 @@ import {
 	type ResolvedRlimits,
 	type SubagentRunMode,
 	type SteeringRecoveryDescriptor,
+	type AsyncStatus,
 	ASYNC_DIR,
 	RESULTS_DIR,
 	SUBAGENT_ASYNC_STARTED_EVENT,
@@ -59,6 +60,21 @@ import { prepareContextDelivery } from "../shared/context-delivery.ts";
 
 const require = createRequire(import.meta.url);
 const piPackageRoot = resolvePiPackageRoot();
+
+function writeStartupStatus(asyncDir: string, runId: string, mode: SubagentRunMode, error?: string): void {
+	const now = Date.now();
+	const failed = error !== undefined;
+	const status: AsyncStatus = {
+		runId,
+		mode,
+		state: failed ? "failed" : "queued",
+		startupPhase: failed ? "spawn_error" : "starting",
+		startedAt: now,
+		lastUpdate: now,
+		...(error ? { error } : {}),
+	};
+	writePrivateAtomicJson(path.join(asyncDir, "status.json"), status);
+}
 
 function resolveJitiCliFromPackageJson(packageJsonPath: string): string | undefined {
 	if (!fs.existsSync(packageJsonPath)) return undefined;
@@ -925,6 +941,7 @@ export function executeAsyncChain(
 		: path.join(ASYNC_DIR, id);
 	try {
 		fs.mkdirSync(asyncDir, { recursive: true });
+		writeStartupStatus(asyncDir, id, resultMode);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return {
@@ -964,11 +981,7 @@ export function executeAsyncChain(
 		configRlimits: params.configRlimits,
 	});
 	if ("error" in built) {
-		try {
-			fs.rmSync(asyncDir, { recursive: true, force: true });
-		} catch {
-			// Best-effort cleanup for validation failures before the runner is spawned.
-		}
+		writeStartupStatus(asyncDir, id, resultMode, built.error);
 		return formatAsyncStartError(resultMode, built.error);
 	}
 	const { steps, runnerCwd, workflowGraph, eventChain } = built;
@@ -1040,6 +1053,7 @@ export function executeAsyncChain(
 	}
 
 	if (spawnResult.error) {
+		writeStartupStatus(asyncDir, id, resultMode, spawnResult.error);
 		return formatAsyncStartError(resultMode, `Failed to start async ${resultMode} '${id}': ${spawnResult.error}`);
 	}
 
@@ -1189,7 +1203,10 @@ export function executeAsyncSingle(
 		agentConfig.skillPath,
 		agentConfig.filePath ? path.dirname(agentConfig.filePath) : runnerCwd,
 	);
-	if (missingSkills.includes("pi-subagents")) return formatAsyncStartError("single", UNAVAILABLE_SUBAGENT_SKILL_ERROR);
+	if (missingSkills.includes("pi-subagents")) {
+		writeStartupStatus(asyncDir, id, "single", UNAVAILABLE_SUBAGENT_SKILL_ERROR);
+		return formatAsyncStartError("single", UNAVAILABLE_SUBAGENT_SKILL_ERROR);
+	}
 	let systemPrompt = agentConfig.systemPrompt?.trim() ?? "";
 	if (resolvedSkills.length > 0) {
 		const injection = buildSkillInjection(resolvedSkills);
@@ -1207,6 +1224,7 @@ export function executeAsyncSingle(
 		: path.join(ASYNC_DIR, id);
 	try {
 		fs.mkdirSync(asyncDir, { recursive: true });
+		writeStartupStatus(asyncDir, id, "single");
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return {
@@ -1221,7 +1239,10 @@ export function executeAsyncSingle(
 	systemPrompt = injectOutputPathSystemPrompt(systemPrompt, outputPath, agentConfig);
 	const outputMode = params.outputMode ?? "inline";
 	const validationError = validateFileOnlyOutputMode(outputMode, outputPath, `Async single run (${agent})`);
-	if (validationError) return formatAsyncStartError("single", validationError);
+	if (validationError) {
+		writeStartupStatus(asyncDir, id, "single", validationError);
+		return formatAsyncStartError("single", validationError);
+	}
 	const taskWithOutputInstruction = injectSingleOutputInstruction(task, outputPath, agentConfig);
 	const primaryModelResolution = resolveEffectiveSubagentModelWithSource(
 		params.modelOverride,
@@ -1245,17 +1266,30 @@ export function executeAsyncSingle(
 	};
 	const toolBudgetInput = params.toolBudget ?? agentConfig.toolBudget ?? params.configToolBudget;
 	const resolvedToolBudget = validateToolBudgetConfig(toolBudgetInput, params.toolBudget ? "toolBudget" : agentConfig.toolBudget ? "agent.toolBudget" : "config.toolBudget");
-	if (resolvedToolBudget.error) return formatAsyncStartError("single", resolvedToolBudget.error);
+	if (resolvedToolBudget.error) {
+		writeStartupStatus(asyncDir, id, "single", resolvedToolBudget.error);
+		return formatAsyncStartError("single", resolvedToolBudget.error);
+	}
 	const rlimitsInput = params.rlimits ?? agentConfig.rlimits ?? params.configRlimits;
 	const resolvedRlimits = validateRlimitsConfig(rlimitsInput, params.rlimits ? "rlimits" : agentConfig.rlimits ? "agent.rlimits" : "config.rlimits");
-	if (resolvedRlimits.error) return formatAsyncStartError("single", resolvedRlimits.error);
+	if (resolvedRlimits.error) {
+		writeStartupStatus(asyncDir, id, "single", resolvedRlimits.error);
+		return formatAsyncStartError("single", resolvedRlimits.error);
+	}
 	const rlimitsUnsupported = rlimitsEnforceabilityError(resolvedRlimits.rlimits, process.platform, () => resolvePrlimitPath() !== undefined);
-	if (rlimitsUnsupported) return formatAsyncStartError("single", rlimitsUnsupported);
+	if (rlimitsUnsupported) {
+		writeStartupStatus(asyncDir, id, "single", rlimitsUnsupported);
+		return formatAsyncStartError("single", rlimitsUnsupported);
+	}
 	const deadlineAt = params.absoluteDeadlineAt ?? (params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined);
 	const timeoutMs = params.absoluteDeadlineAt !== undefined && deadlineAt !== undefined
 		? deadlineAt - Date.now()
 		: params.timeoutMs;
-	if (timeoutMs !== undefined && timeoutMs <= 0) return formatAsyncStartError("single", "The source run's absolute deadline expired before recovery could launch.");
+	if (timeoutMs !== undefined && timeoutMs <= 0) {
+		const error = "The source run's absolute deadline expired before recovery could launch.";
+		writeStartupStatus(asyncDir, id, "single", error);
+		return formatAsyncStartError("single", error);
+	}
 	const initialTurnBudget = params.turnBudget ? initialTurnBudgetState(params.turnBudget) : undefined;
 	const resolvedSessionDir = params.sessionDir ?? (sessionRoot ? path.join(sessionRoot, `async-${id}`) : undefined);
 	const resolvedAcceptance = resolveEffectiveAcceptance({
@@ -1307,7 +1341,9 @@ export function executeAsyncSingle(
 	try {
 		writePrivateAtomicJson(path.join(asyncDir, "recovery-descriptor.json"), recoveryDescriptor);
 	} catch (error) {
-		return formatAsyncStartError("single", `Failed to persist async recovery descriptor for '${id}': ${error instanceof Error ? error.message : String(error)}`);
+		const message = `Failed to persist async recovery descriptor for '${id}': ${error instanceof Error ? error.message : String(error)}`;
+		writeStartupStatus(asyncDir, id, "single", message);
+		return formatAsyncStartError("single", message);
 	}
 	let spawnResult: { pid?: number; error?: string } = {};
 	try {
@@ -1389,10 +1425,12 @@ export function executeAsyncSingle(
 		);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
+		writeStartupStatus(asyncDir, id, "single", message);
 		return formatAsyncStartError("single", `Failed to start async run '${id}': ${message}`);
 	}
 
 	if (spawnResult.error) {
+		writeStartupStatus(asyncDir, id, "single", spawnResult.error);
 		return formatAsyncStartError("single", `Failed to start async run '${id}': ${spawnResult.error}`);
 	}
 

@@ -1,25 +1,24 @@
-# Completion notification error preview
-
-Branch: `fix-notify-error-preview` (base `bb0e421c`)
+# Parent-written async startup status
 
 ## Change
 
-Failed completions with an empty/whitespace summary now use the first line of a failed child step's `error` in the preview, formatted as `(failed: <error>)`. If no step error is available, the top-level completion `error` is used. Multiple failed steps retain each error with its agent label. Non-empty summaries, paused results, and successful previews remain unchanged.
+The parent now atomically writes an initial status record immediately after creating an async run directory. The record uses the existing `AsyncStatus` state `queued` plus optional `startupPhase: "starting"`, preserving compatibility with existing readers. Validation/spawn failures overwrite it with `state: "failed"`, `startupPhase: "spawn_error"`, and the error text. Validation failures retain the run directory instead of deleting the only forensic record. The child runner continues to replace the marker with its normal status payload.
 
-## Files
+## Changed files
 
-- `src/runs/background/notify.ts`
-- `test/unit/notify.test.ts`
+- `src/runs/background/async-execution.ts`
+- `src/shared/types.ts`
+- `test/integration/async-execution.test.ts`
 
 ## Validation
 
-- `npm ci`: passed (reported 9 dependency audit vulnerabilities; no dependency changes made).
-- `node --experimental-strip-types --test test/unit/notify.test.ts`: **28 passed, 0 failed**.
-- `npm run test:unit`: **1,736 passed, 1 failed, 1 skipped** (1,738 total). The sole failure is the known base failure `test/unit/package-manifest.test.ts` expecting background-work protocol version 1 while base exports version 2.
-- `npm run test:integration`: **654 passed, 5 failed, 2 skipped** (661 total). Four failures are pre-existing fork-context warning-count assertions that the sibling model-scope lane adjusts to filter unrelated warnings. One async worktree test failed on a missing `observed-cwd.txt` artifact and reproduced when run alone; neither failure touches notification code.
+- `npm ci`: passed.
+- Focused startup/status integration tests: 3 passed, 0 failed (normal child transition, missing-cwd validation failure, simulated spawn failure).
+- `npm run test:unit`: 1,734 total; 1,732 passed, 1 failed, 1 skipped. The failure is the known base failure `published extension APIs use supported package entrypoints` (protocol version expectation 1 vs base export 2).
+- `npm run test:integration`: 661 total; 651 passed, 8 failed, 2 skipped. Failures were in existing dynamic-status/worktree/subagent-wait and fork-context/intercom tests; these were not independently verified against base in this task. The startup-specific tests passed.
 - `git diff --check`: passed.
-- LSP diagnostics for changed files: clean after `npm ci`.
 
 ## Residual risks
 
-- The full unit and integration suites are not green on this base for the unrelated failures listed above. The focused notification suite is green; this branch only changes notification implementation and tests.
+- Full integration suite remains red (8 failures); they are outside the changed startup-status paths but have not all been independently compared against base.
+- The compatibility representation intentionally uses `state: "queued"` plus `startupPhase` rather than extending the established state enum with `starting`/`spawn_error`; this avoids breaking status consumers while making parent-side startup state explicit.

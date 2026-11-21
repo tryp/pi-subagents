@@ -448,6 +448,9 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const payload = await readAsyncPayload(id);
 		assert.equal(payload.success, true);
 		assert.equal(payload.results[0]?.output, "你好 from fragmented async JSON");
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as { state: string; startupPhase?: string };
+		assert.equal(status.state, "complete");
+		assert.equal(status.startupPhase, undefined, "child status replaces the parent's starting marker");
 	});
 
 	it("background fails with protocol_output_limit for an oversized stdout line", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
@@ -3600,6 +3603,10 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(chainResult.isError, true);
 		assert.match(chainResult.content[0]?.text ?? "", /Failed to start async chain/);
 		assert.match(chainResult.content[0]?.text ?? "", /cwd does not exist/);
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, chainId, "status.json"), "utf-8")) as { state: string; startupPhase?: string; error?: string };
+		assert.equal(status.state, "failed");
+		assert.equal(status.startupPhase, "spawn_error");
+		assert.match(status.error ?? "", /cwd does not exist/);
 	});
 
 	it("returns a tool error when the async runner process cannot spawn", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, () => {
@@ -3631,6 +3638,10 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			assert.equal(result.isError, true);
 			assert.match(result.content[0]?.text ?? "", /Failed to start async run/);
 			assert.match(result.content[0]?.text ?? "", /async runner did not produce a pid/);
+			const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as { state: string; startupPhase?: string; error?: string };
+			assert.equal(status.state, "failed");
+			assert.equal(status.startupPhase, "spawn_error");
+			assert.match(status.error ?? "", /did not produce a pid/);
 		} finally {
 			process.execPath = originalExecPath;
 			if (originalPath === undefined) {

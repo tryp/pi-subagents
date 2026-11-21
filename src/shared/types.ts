@@ -919,6 +919,8 @@ export interface AsyncStatus {
 	mode: SubagentRunMode;
 	isNested?: boolean;
 	state: "queued" | "running" | "complete" | "failed" | "paused" | "stopped";
+	/** Parent-side startup marker; optional so existing status readers remain compatible. */
+	startupPhase?: "starting" | "spawn_error";
 	error?: string;
 	/** Rolled-up step failure kind, so a failed run's reason is readable at the top level. */
 	failureKind?: AsyncStepFailureKind;
