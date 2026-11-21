@@ -3265,7 +3265,18 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		ctx.model,
 		availableModels,
 		currentProvider,
-		{ scope: data.modelScope, forked: shouldForkAgent(contextPolicy, agentConfig.name), agentModelFromDefault: isDefaultedAgentModel(agentConfig.modelSource) },
+		{
+			scope: data.modelScope,
+			forked: shouldForkAgent(contextPolicy, agentConfig.name),
+			agentModelFromDefault: isDefaultedAgentModel(agentConfig.modelSource),
+			resolution: {
+				enabledModels: (ctx as typeof ctx & { scopedModels?: readonly { model: NonNullable<ReturnType<typeof ctx.modelRegistry.find>> }[] }).scopedModels?.map((scoped) => toModelInfo(scoped.model)),
+				isAuthenticated: (info) => {
+					const registryModel = ctx.modelRegistry.find(info.provider, info.id);
+					return !!registryModel && (typeof ctx.modelRegistry.hasConfiguredAuth !== "function" || ctx.modelRegistry.hasConfiguredAuth(registryModel));
+				},
+			},
+		},
 	);
 	let skillOverride: string[] | false | undefined = normalizeSkillInput(params.skill);
 	const rawOutput = params.output !== undefined ? params.output : agentConfig.output;
@@ -3302,7 +3313,18 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 
 		task = result.templates[0]!;
 		const override = result.behaviorOverrides[0];
-		if (override?.model !== undefined) modelOverride = resolveEffectiveSubagentModel(override.model, agentConfig.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope, forked: shouldForkAgent(contextPolicy, agentConfig.name), agentModelFromDefault: isDefaultedAgentModel(agentConfig.modelSource) });
+		if (override?.model !== undefined) modelOverride = resolveEffectiveSubagentModel(override.model, agentConfig.model, ctx.model, availableModels, currentProvider, {
+				scope: data.modelScope,
+				forked: shouldForkAgent(contextPolicy, agentConfig.name),
+				agentModelFromDefault: isDefaultedAgentModel(agentConfig.modelSource),
+				resolution: {
+					enabledModels: (ctx as typeof ctx & { scopedModels?: readonly { model: NonNullable<ReturnType<typeof ctx.modelRegistry.find>> }[] }).scopedModels?.map((scoped) => toModelInfo(scoped.model)),
+					isAuthenticated: (info) => {
+						const registryModel = ctx.modelRegistry.find(info.provider, info.id);
+						return !!registryModel && (typeof ctx.modelRegistry.hasConfiguredAuth !== "function" || ctx.modelRegistry.hasConfiguredAuth(registryModel));
+					},
+				},
+			});
 		if (override?.output !== undefined) effectiveOutput = normalizeSingleOutputOverride(override.output, agentConfig.output);
 		if (override?.skills !== undefined) skillOverride = override.skills;
 

@@ -1,4 +1,4 @@
-import type { ModelInfo as AvailableModelInfo } from "../../shared/model-info.ts";
+import { resolveScopedModelInfo, type ModelInfo as AvailableModelInfo, type ModelResolutionOptions } from "../../shared/model-info.ts";
 import type { Usage } from "../../shared/types.ts";
 import { checkModelScope, type ModelScopeConfig, type ModelScopeViolation, type ModelSource } from "./model-scope.ts";
 
@@ -141,9 +141,16 @@ export function resolveModelCandidate(
 	model: string | undefined,
 	availableModels: AvailableModelInfo[] | undefined,
 	preferredProvider?: string,
+	resolutionOptions?: Omit<ModelResolutionOptions, "preferredProvider">,
 ): string | undefined {
 	if (!model) return undefined;
 	if (!availableModels || availableModels.length === 0) return model;
+
+	if (resolutionOptions) {
+		const scoped = resolveScopedModelInfo(model, availableModels, { ...resolutionOptions, preferredProvider, onWarning: resolutionOptions.onWarning ?? ((message) => console.warn(`[pi-subagents] ${message}`)) });
+		if (scoped.error) throw new Error(scoped.error);
+		if (scoped.model) return `${scoped.model.fullId}${scoped.thinkingSuffix}`;
+	}
 
 	const resolvedWhole = resolveBaseModelCandidate(model, availableModels, preferredProvider);
 	if (resolvedWhole) return resolvedWhole;
@@ -156,6 +163,8 @@ export function resolveModelCandidate(
 }
 
 export interface ResolveSubagentModelOverrideOptions {
+	/** Scope-aware registry resolution for caller-supplied bare model ids. */
+	resolution?: Omit<ModelResolutionOptions, "preferredProvider">;
 	/** When set with `enforce: true`, out-of-scope models are rejected. */
 	scope?: ModelScopeConfig;
 	/** Origin of the requested model: explicit caller-supplied (hard error) vs inherited (warn). Defaults to `"inherited"`. */
@@ -236,7 +245,7 @@ export function resolveSubagentModelOverride(
 	if (explicit === undefined) {
 		resolved = parentModel ? `${parentModel.provider}/${parentModel.id}` : undefined;
 	} else {
-		resolved = resolveModelCandidate(explicit, availableModels, preferredProvider);
+		resolved = resolveModelCandidate(explicit, availableModels, preferredProvider, options?.resolution);
 	}
 	if (resolved && options?.scope?.enforce) {
 		const source: ModelSource = explicit === undefined ? "inherited" : (options.source ?? "inherited");

@@ -1400,7 +1400,14 @@ export function registerSlashCommands(
 							`Profile loaded. Also switch this session to the profile worker model?\n\n${workerModel}`,
 						);
 						if (shouldSwitch) {
-							const modelInfo = findModelInfo(workerModel, ctx.modelRegistry.getAvailable().map(toModelInfo));
+							const modelInfo = findModelInfo(workerModel, ctx.modelRegistry.getAvailable().map(toModelInfo), undefined, {
+								enabledModels: (ctx as ExtensionContext & { scopedModels?: readonly { model: NonNullable<ReturnType<ExtensionContext["modelRegistry"]["find"]>> }[] }).scopedModels?.map((scoped) => toModelInfo(scoped.model)),
+								isAuthenticated: (info) => {
+									const registryModel = ctx.modelRegistry.find(info.provider, info.id);
+									return !!registryModel && (typeof ctx.modelRegistry.hasConfiguredAuth !== "function" || ctx.modelRegistry.hasConfiguredAuth(registryModel));
+								},
+								onWarning: (message) => ctx.ui.notify(message, "warning"),
+							});
 							const model = modelInfo ? ctx.modelRegistry.find(modelInfo.provider, modelInfo.id) : undefined;
 							if (!modelInfo || !model) {
 								lines.push(`Could not switch current session model: '${workerModel}' is not available in the current model registry.`);

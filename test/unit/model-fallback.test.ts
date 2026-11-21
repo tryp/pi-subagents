@@ -48,6 +48,22 @@ describe("model fallback helpers", () => {
 		assert.equal(resolveModelCandidate("claude-sonnet-4", availableModels, "github-copilot"), "anthropic/claude-sonnet-4");
 	});
 
+	it("uses enabled scope for ambiguous subagent model overrides and rejects unauthenticated fallback", () => {
+		const models = ["amazon-bedrock", "openai-codex", "opencode", "opencode-go"].map((provider) => ({
+			provider,
+			id: "gpt-6-luna",
+			fullId: `${provider}/gpt-6-luna`,
+		}));
+		assert.equal(
+			resolveModelCandidate("gpt-6-luna:high", models, undefined, { enabledModels: [models[1]!], isAuthenticated: () => false }),
+			"openai-codex/gpt-6-luna:high",
+		);
+		assert.throws(
+			() => resolveModelCandidate("gpt-6-luna", models, undefined, { isAuthenticated: () => false }),
+			/without configured credentials/,
+		);
+	});
+
 	it("builds a deduplicated ordered candidate list", () => {
 		assert.deepEqual(
 			buildModelCandidates("gpt-5-mini", ["openai/gpt-5-mini", "anthropic/claude-sonnet-4", "gpt-5-mini"], availableModels),

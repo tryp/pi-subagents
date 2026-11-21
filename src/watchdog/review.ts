@@ -93,7 +93,13 @@ function resolveReviewThinking(input: {
 function resolveConfiguredModel(ctx: ExtensionContext, rawModel: string): { model: RegistryModel; modelString: string } {
 	const availableModels = ctx.modelRegistry.getAvailable().map(toModelInfo);
 	const preferredProvider = typeof ctx.model?.provider === "string" ? ctx.model.provider : undefined;
-	const resolved = resolveModelCandidate(rawModel, availableModels, preferredProvider);
+	const resolved = resolveModelCandidate(rawModel, availableModels, preferredProvider, {
+		enabledModels: (ctx as ExtensionContext & { scopedModels?: readonly { model: NonNullable<ReturnType<ExtensionContext["modelRegistry"]["find"]>> }[] }).scopedModels?.map((scoped) => toModelInfo(scoped.model)),
+		isAuthenticated: (info) => {
+			const registryModel = ctx.modelRegistry.find(info.provider, info.id);
+			return !!registryModel && (typeof ctx.modelRegistry.hasConfiguredAuth !== "function" || ctx.modelRegistry.hasConfiguredAuth(registryModel));
+		},
+	}) ?? rawModel;
 	const { baseModel } = splitKnownThinkingSuffix(resolved);
 	const named = splitProviderModel(baseModel);
 	if (!named) {

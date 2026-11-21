@@ -29,7 +29,7 @@ import {
 	buildProactiveSkillSubagentRecommendationLines,
 } from "./proactive-skills.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
-import { toModelInfo } from "../shared/model-info.ts";
+import { resolveScopedModelInfo, toModelInfo, type ModelInfo, type ModelResolutionOptions } from "../shared/model-info.ts";
 import {
 	isDefaultedAgentModel,
 	resolveEffectiveSubagentModelWithSource,
@@ -45,7 +45,7 @@ type ManagementAction = "list" | "get" | "models" | "create" | "update" | "delet
 type ManagementScope = "user" | "project";
 type ManagementContext = Pick<ExtensionContext, "cwd" | "modelRegistry"> & {
 	model?: ExtensionContext["model"];
-	scopedModels?: ExtensionContext["scopedModels"];
+	scopedModels?: readonly { model: NonNullable<ReturnType<ExtensionContext["modelRegistry"]["find"]>> }[];
 	config?: ExtensionConfig;
 };
 
@@ -176,13 +176,29 @@ function unknownChainAgents(cwd: string, steps: ChainStepConfig[]): string[] {
 	return [...new Set(steps.map((s) => s.agent).filter((a) => !known.has(a)))].sort((a, b) => a.localeCompare(b));
 }
 
+function managementModelResolutionOptions(ctx: ManagementContext): ModelResolutionOptions {
+	const scopedModels = ctx.scopedModels;
+	return {
+		enabledModels: scopedModels?.map((scoped) => toModelInfo(scoped.model)),
+		isAuthenticated: (info) => {
+			const model = ctx.modelRegistry.find(info.provider, info.id);
+			return !!model && (typeof ctx.modelRegistry.hasConfiguredAuth !== "function" || ctx.modelRegistry.hasConfiguredAuth(model));
+		},
+		onWarning: (message) => console.warn(`[pi-subagents] ${message}`),
+	};
+}
+
+function resolveManagementModel(ctx: ManagementContext, model: string): ModelInfo | undefined {
+	return resolveScopedModelInfo(model, ctx.modelRegistry.getAvailable().map(toModelInfo), managementModelResolutionOptions(ctx)).model;
+}
+
 function chainStepWarnings(ctx: ManagementContext, steps: ChainStepConfig[]): string[] {
 	const warnings: string[] = [];
 	const available = new Set(discoverAvailableSkills(ctx.cwd).map((s) => s.name));
 	for (let i = 0; i < steps.length; i++) {
 		const s = steps[i]!;
 		if (s.model) {
-			const found = ctx.modelRegistry.getAvailable().some((m) => `${m.provider}/${m.id}` === s.model || m.id === s.model);
+			const found = resolveManagementModel(ctx, s.model);
 			if (!found) warnings.push(`Warning: step ${i + 1} (${s.agent}): model '${s.model}' is not in the current model registry.`);
 		}
 		if (Array.isArray(s.skills) && s.skills.length > 0) {
@@ -195,14 +211,13 @@ function chainStepWarnings(ctx: ManagementContext, steps: ChainStepConfig[]): st
 
 function modelWarning(ctx: ManagementContext, model: string | undefined): string | undefined {
 	if (!model) return undefined;
-	const found = ctx.modelRegistry.getAvailable().some((m) => `${m.provider}/${m.id}` === model || m.id === model);
-	return found ? undefined : `Warning: model '${model}' is not in the current model registry.`;
+	const found = resolveManagementModel(ctx, model);
+	return found ? undefined : `Warning: model '${model}' is not in the current authenticated model scope.`;
 }
 
 function fallbackModelsWarning(ctx: ManagementContext, fallbackModels: string[] | undefined): string | undefined {
 	if (!fallbackModels || fallbackModels.length === 0) return undefined;
-	const available = new Set(ctx.modelRegistry.getAvailable().flatMap((m) => [`${m.provider}/${m.id}`, m.id]));
-	const missing = fallbackModels.filter((model) => !available.has(model));
+	const missing = fallbackModels.filter((model) => !resolveManagementModel(ctx, model));
 	return missing.length ? `Warning: fallback models not in the current model registry: ${missing.join(", ")}.` : undefined;
 }
 

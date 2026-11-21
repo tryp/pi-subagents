@@ -81,7 +81,13 @@ export function resolveWatchdogModelInput(ctx: ExtensionContext, rawModel: strin
 	if (!trimmed) throw new Error(`${label} must be a non-empty provider/model value.`);
 	const availableModels = modelRegistryEntries(ctx);
 	const preferredProvider = typeof ctx.model?.provider === "string" ? ctx.model.provider : undefined;
-	const resolved = resolveModelCandidate(trimmed, availableModels, preferredProvider) ?? trimmed;
+	const resolved = resolveModelCandidate(trimmed, availableModels, preferredProvider, {
+		enabledModels: (ctx as ExtensionContext & { scopedModels?: readonly { model: NonNullable<ReturnType<ExtensionContext["modelRegistry"]["find"]>> }[] }).scopedModels?.map((scoped) => toModelInfo(scoped.model)),
+		isAuthenticated: (info) => {
+			const registryModel = ctx.modelRegistry.find(info.provider, info.id);
+			return !!registryModel && (typeof ctx.modelRegistry.hasConfiguredAuth !== "function" || ctx.modelRegistry.hasConfiguredAuth(registryModel));
+		},
+	}) ?? trimmed;
 	const { baseModel, thinkingSuffix } = splitKnownThinkingSuffix(resolved);
 	const named = splitProviderModel(baseModel);
 	if (!named) throw new Error(`${label} '${rawModel}' did not resolve to provider/model. Use a provider-qualified model such as openai-codex/gpt-5.5:high or anthropic/claude-opus-4-8:high.`);

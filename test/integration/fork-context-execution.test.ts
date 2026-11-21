@@ -540,8 +540,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 			);
 
 			assert.equal(result.isError, undefined);
-			assert.equal(warnings.length, 1);
-			assert.match(warnings[0]!, /outside the configured subagent model scope/);
+			assert.equal(warnings.filter((warning) => warning.includes("outside the configured subagent model scope")).length, 1);
 			const args = readCallArgs();
 			assert.equal(args[args.indexOf("--model") + 1], "openai/gpt-5-mini:high");
 		} finally {
@@ -580,8 +579,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 				assert.equal(result.isError, undefined);
 			}
 
-			assert.equal(warnings.length, 2);
-			assert.equal(warnings.every((warning) => warning.includes("outside the configured subagent model scope")), true);
+			assert.equal(warnings.filter((warning) => warning.includes("outside the configured subagent model scope")).length, 2);
 			for (const args of readAllCallArgs()) {
 				assert.equal(args[args.indexOf("--model") + 1], "openai/gpt-5-mini:high");
 			}
@@ -1490,8 +1488,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 			);
 			assert.equal(result.isError, undefined);
 			assert.ok(result.details?.asyncId);
-			assert.equal(warnings.length, 1);
-			assert.match(warnings[0]!, /outside the configured subagent model scope/);
+			assert.equal(warnings.filter((warning) => warning.includes("outside the configured subagent model scope")).length, 1);
 		} finally {
 			console.warn = originalWarn;
 		}
@@ -1531,8 +1528,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 			);
 			assert.equal(result.isError, undefined);
 			assert.ok(result.details?.asyncId);
-			assert.equal(warnings.length, 2);
-			assert.equal(warnings.every((warning) => warning.includes("outside the configured subagent model scope")), true);
+			assert.equal(warnings.filter((warning) => warning.includes("outside the configured subagent model scope")).length, 2);
 		} finally {
 			console.warn = originalWarn;
 		}

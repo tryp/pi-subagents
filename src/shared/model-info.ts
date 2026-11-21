@@ -51,18 +51,54 @@ export function splitKnownThinkingSuffix(model: string): { baseModel: string; th
 	};
 }
 
-export function findModelInfo(model: string | undefined, availableModels: ModelInfo[] | undefined, preferredProvider?: string): ModelInfo | undefined {
-	if (!model || !availableModels || availableModels.length === 0) return undefined;
-	const { baseModel } = splitKnownThinkingSuffix(model);
-	const exact = availableModels.find((entry) => entry.fullId === baseModel);
-	if (exact) return exact;
+export interface ModelResolutionOptions {
+	enabledModels?: ModelInfo[];
+	isAuthenticated?: (model: ModelInfo) => boolean;
+	preferredProvider?: string;
+	onWarning?: (message: string) => void;
+}
 
-	const matches = availableModels.filter((entry) => entry.id === baseModel);
-	if (preferredProvider) {
-		const preferred = matches.find((entry) => entry.provider === preferredProvider);
-		if (preferred) return preferred;
+/** Resolve exact qualified ids unchanged; bare ids honor enabled scope before authenticated registry fallback. */
+export function resolveScopedModelInfo(
+	model: string | undefined,
+	availableModels: ModelInfo[] | undefined,
+	options: ModelResolutionOptions = {},
+): { model?: ModelInfo; thinkingSuffix: string; error?: string } {
+	if (!model || !availableModels?.length) return { thinkingSuffix: "" };
+	const { baseModel, thinkingSuffix } = splitKnownThinkingSuffix(model);
+	if (baseModel.includes("/")) {
+		return { model: availableModels.find((entry) => entry.fullId === baseModel), thinkingSuffix };
 	}
-	return matches.length === 1 ? matches[0] : undefined;
+
+	const enabledMatches = options.enabledModels?.filter((entry) => entry.id === baseModel) ?? [];
+	const allMatches = availableModels.filter((entry) => entry.id === baseModel);
+	let matches = enabledMatches.length ? enabledMatches : allMatches;
+	if (!enabledMatches.length && options.isAuthenticated) {
+		matches = matches.filter((entry) => options.isAuthenticated!(entry));
+		if (allMatches.length && !matches.length) {
+			return { thinkingSuffix, error: `Model '${baseModel}' is present only under providers without configured credentials.` };
+		}
+	}
+	if (!matches.length) return { thinkingSuffix };
+	if (!enabledMatches.length && !options.isAuthenticated && !options.preferredProvider && matches.length > 1) return { thinkingSuffix };
+
+	const preferred = options.preferredProvider ? matches.find((entry) => entry.provider === options.preferredProvider) : undefined;
+	const ordered = [...matches].sort((a, b) => a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id));
+	const chosen = preferred ?? ordered[0]!;
+	if (matches.length > 1 && !preferred) {
+		const alternatives = ordered.filter((entry) => entry.fullId !== chosen.fullId).map((entry) => entry.fullId);
+		options.onWarning?.(`Ambiguous model '${baseModel}'; selected ${chosen.fullId} from ${enabledMatches.length ? "enabled scope" : "authenticated providers"}; alternatives: ${alternatives.join(", " )}.`);
+	}
+	return { model: chosen, thinkingSuffix };
+}
+
+export function findModelInfo(
+	model: string | undefined,
+	availableModels: ModelInfo[] | undefined,
+	preferredProvider?: string,
+	options: Omit<ModelResolutionOptions, "preferredProvider"> = {},
+): ModelInfo | undefined {
+	return resolveScopedModelInfo(model, availableModels, { ...options, preferredProvider }).model;
 }
 
 export function getSupportedThinkingLevels(model: ModelInfo | undefined): ThinkingLevel[] {
