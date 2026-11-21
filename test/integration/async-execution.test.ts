@@ -1829,12 +1829,19 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.ok(!result.isError);
 		const statusPath = path.join(ASYNC_DIR, id, "status.json");
 		const deadline = Date.now() + 5_000;
-		let status: AsyncStatusPayload | undefined;
-		while (!status) {
-			if (Date.now() > deadline) assert.fail(`Timed out waiting for async status file: ${statusPath}`);
-			if (fs.existsSync(statusPath)) status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
-			else await new Promise((resolve) => setTimeout(resolve, 50));
+		let status: (AsyncStatusPayload & { startupPhase?: string }) | undefined;
+		let observedStartupMarker = false;
+		while (!status?.steps) {
+			if (Date.now() > deadline) assert.fail(`Timed out waiting for runner status: ${statusPath}`);
+			if (fs.existsSync(statusPath)) {
+				status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload & { startupPhase?: string };
+				observedStartupMarker ||= status.startupPhase === "starting";
+			} else {
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
 		}
+		assert.equal(status.state, "running");
+		if (observedStartupMarker) assert.equal(status.startupPhase, undefined, "runner status replaces the parent's startup marker");
 		assert.deepEqual(status.steps?.map((step) => step.agent), ["producer", "expand:reviewer", "consumer"]);
 		assert.equal(status.steps?.[1]?.label, "Review {target.path}");
 		assert.equal(status.steps?.[1]?.outputName, "reviews");
@@ -4392,13 +4399,19 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const asyncDir = path.join(ASYNC_DIR, asyncId);
 		const secondArtifact = path.join(asyncDir, "step-results", "step-1.json");
 
-		// Wait for the runner to exist before asking wait to find it.
+		// Wait for child status, not the parent's startup marker, before deriving
+		// the child session identity used to scope wait consumption.
+		const statusPath = path.join(asyncDir, "status.json");
 		const statusDeadline = Date.now() + 30_000;
-		while (!fs.existsSync(path.join(asyncDir, "status.json"))) {
-			if (Date.now() > statusDeadline) assert.fail(`Timed out waiting for ${asyncDir}/status.json`);
-			await new Promise((resolve) => setTimeout(resolve, 50));
+		let sessionId: string | undefined;
+		while (!sessionId) {
+			if (Date.now() > statusDeadline) assert.fail(`Timed out waiting for child status: ${statusPath}`);
+			if (fs.existsSync(statusPath)) {
+				const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as { sessionId?: string; startupPhase?: string };
+				if (!status.startupPhase) sessionId = status.sessionId;
+			}
+			if (!sessionId) await new Promise((resolve) => setTimeout(resolve, 50));
 		}
-		const sessionId = (JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as { sessionId?: string }).sessionId;
 
 		const startedAt = Date.now();
 		// One session state across both calls: consumption is per session, so the

@@ -495,8 +495,13 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			assert.ok(attachedId, "expected attached chain async id");
 			assert.match(result.details?.asyncDir ?? "", new RegExp(`${attachedId}$`));
 			const statusPath = path.join(result.details!.asyncDir!, "status.json");
-			await waitForFile(statusPath);
-			const attachedStatus = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as { mode?: string; chainStepCount?: number; steps?: Array<{ agent?: string; label?: string; status?: string }> };
+			const statusDeadline = Date.now() + 10_000;
+			let attachedStatus: { mode?: string; chainStepCount?: number; steps?: Array<{ agent?: string; label?: string; status?: string }> } | undefined;
+			while (!attachedStatus?.chainStepCount) {
+				if (Date.now() > statusDeadline) assert.fail(`Timed out waiting for runner status: ${statusPath}`);
+				if (fs.existsSync(statusPath)) attachedStatus = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as typeof attachedStatus;
+				if (!attachedStatus?.chainStepCount) await new Promise((resolve) => setTimeout(resolve, 25));
+			}
 			assert.equal(attachedStatus.mode, "chain");
 			assert.equal(attachedStatus.chainStepCount, 2);
 			assert.deepEqual(attachedStatus.steps?.map((step) => step.agent), ["worker", "reviewer"]);
