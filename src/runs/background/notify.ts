@@ -23,6 +23,7 @@ interface ChainStepResult {
 	agent: string;
 	output: string;
 	success: boolean;
+	error?: string;
 }
 
 export interface SubagentNotifyDetails {
@@ -61,6 +62,7 @@ interface SubagentResult {
 	summary: string;
 	exitCode?: number;
 	state?: string;
+	error?: string;
 	timestamp: number;
 	durationMs?: number;
 	cwd?: string;
@@ -212,6 +214,24 @@ function completionBatchKey(result: SubagentResult): string {
 	return cwd ? `cwd:${cwd}` : "unknown";
 }
 
+function firstErrorLine(error: string | undefined): string | undefined {
+	const firstLine = error?.split(/\r?\n/, 1)[0]?.trim();
+	return firstLine || undefined;
+}
+
+function failedResultPreview(result: SubagentResult): string {
+	const failedSteps = (result.results ?? [])
+		.filter((step) => !step.success)
+		.map((step) => ({ agent: step.agent, error: firstErrorLine(step.error) }))
+		.filter((step): step is { agent: string; error: string } => Boolean(step.error));
+	if (failedSteps.length === 1) return `(failed: ${failedSteps[0]!.error})`;
+	if (failedSteps.length > 1) {
+		return failedSteps.map((step) => `${step.agent}: (failed: ${step.error})`).join("\n");
+	}
+	const error = firstErrorLine(result.error);
+	return error ? `(failed: ${error})` : "";
+}
+
 export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDetails {
 	const agent = result.agent ?? "unknown";
 	const summary = typeof result.summary === "string" ? result.summary : "";
@@ -221,6 +241,7 @@ export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDe
 		|| summary.startsWith("Paused after interrupt.")
 	);
 	const status = paused ? "paused" : result.success ? "completed" : "failed";
+	const resultPreview = status === "failed" && !summary.trim() ? failedResultPreview(result) : summary;
 
 	const taskInfo =
 		result.taskIndex !== undefined && result.totalTasks !== undefined
@@ -245,7 +266,7 @@ export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDe
 		...(taskInfo ? { taskInfo } : {}),
 		...(result.taskIndex !== undefined ? { taskIndex: result.taskIndex } : {}),
 		...(result.totalTasks !== undefined ? { totalTasks: result.totalTasks } : {}),
-		resultPreview: summary,
+		resultPreview,
 		...(typeof result.durationMs === "number" ? { durationMs: result.durationMs } : {}),
 		...(result.sessionFile ? { sessionFile: result.sessionFile } : {}),
 		...(session ? { sessionLabel: session.label, sessionValue: session.value } : {}),

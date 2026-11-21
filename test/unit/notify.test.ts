@@ -147,6 +147,78 @@ describe("registerSubagentNotify", () => {
 		});
 	});
 
+	it("includes the first error line when a failed completion has no summary", () => {
+		const { events, sent } = createPi();
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "notify-failed-empty-1",
+			agent: "worker",
+			success: false,
+			summary: "",
+			results: [{ agent: "researcher", output: "", success: false, error: "Provider authentication failed\nAdditional diagnostic" }],
+			timestamp: 123,
+			sessionId: "session-1",
+		});
+
+		assert.equal(sent.length, 1);
+		assert.deepEqual(sent[0], {
+			message: {
+				customType: "subagent-notify",
+				content: "Background task failed: **worker**\n\n(failed: Provider authentication failed)",
+				display: true,
+				details: { version: 1, completions: [{ runId: "notify-failed-empty-1", completionId: "notify-failed-empty-1", agent: "worker", status: "failed", resultPreview: "(failed: Provider authentication failed)" }] },
+			},
+			options: { triggerTurn: true },
+		});
+	});
+
+	it("uses a top-level failure error when no failed step error is available", () => {
+		const { events, sent } = createPi();
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "notify-failed-top-level-1",
+			agent: "worker",
+			success: false,
+			summary: "",
+			error: "Launch rejected\nAdditional diagnostic",
+			timestamp: 123,
+			sessionId: "session-1",
+		});
+
+		assert.equal((sent[0]!.message as { content: string }).content, "Background task failed: **worker**\n\n(failed: Launch rejected)");
+	});
+
+	it("preserves a non-empty failed summary instead of replacing it with the error", () => {
+		const { events, sent } = createPi();
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "notify-failed-summary-1",
+			agent: "worker",
+			success: false,
+			summary: "  Provider request rejected  ",
+			results: [{ agent: "researcher", output: "", success: false, error: "Provider authentication failed" }],
+			timestamp: 123,
+			sessionId: "session-1",
+		});
+
+		assert.equal((sent[0]!.message as { content: string }).content, "Background task failed: **worker**\n\n  Provider request rejected  ");
+		assert.equal(((sent[0]!.message as { details: { completions: Array<{ resultPreview: string }> } }).details.completions[0]!).resultPreview, "  Provider request rejected  ");
+	});
+
+	it("leaves successful result previews unchanged", () => {
+		const clock = createFakeClock();
+		const batched = createBatchingPi(clock);
+		batched.events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "notify-success-result-2",
+			agent: "worker",
+			success: true,
+			summary: "Done",
+			results: [{ agent: "researcher", output: "Done", success: true, error: "ignored" }],
+			timestamp: 123,
+			sessionId: "session-a",
+		});
+		clock.advance(1000);
+		assert.equal((batched.sent[0]!.message as { content: string }).content, "Background task completed: **worker**\n\nDone");
+	});
+
 	it("wakes the originating session with recovered detached foreground output", () => {
 		const { events, sent } = createPi();
 
