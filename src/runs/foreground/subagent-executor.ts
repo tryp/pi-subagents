@@ -1440,7 +1440,10 @@ async function emitForegroundResultIntercom(input: {
 		...(typeof input.chainSteps === "number" ? { chainSteps: input.chainSteps } : {}),
 	});
 	const delivered = await deliverSubagentResultIntercomEvent(input.pi.events, payload);
-	if (!delivered) return null;
+	if (!delivered) {
+		console.error(`Subagent foreground grouped result intercom delivery was not acknowledged (derived candidate '${payload.derivedTargetCandidate}', registered name '${payload.registeredTargetName}').`);
+		return null;
+	}
 	return payload;
 }
 

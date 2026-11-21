@@ -55,11 +55,36 @@ interface ResolveIntercomBridgeInput {
 	agentDir?: string;
 }
 
-export function resolveIntercomSessionTarget(sessionName: string | undefined, sessionId: string): string {
+export interface IntercomSessionTargetResolution {
+	target: string;
+	/** The old short fallback, retained only to make a failed delivery attributable. */
+	derivedCandidate: string;
+	registeredName: string;
+}
+
+export function resolveIntercomSessionTargetDetails(sessionName: string | undefined, sessionId: string): IntercomSessionTargetResolution {
 	const trimmedName = sessionName?.trim();
-	if (trimmedName) return trimmedName;
 	const normalizedSessionId = sessionId.startsWith("session-") ? sessionId.slice("session-".length) : sessionId;
-	return `${DEFAULT_INTERCOM_TARGET_PREFIX}-${normalizedSessionId.slice(0, 8)}`;
+	const derivedCandidate = `${DEFAULT_INTERCOM_TARGET_PREFIX}-${normalizedSessionId.slice(0, 8)}`;
+	// pi-intercom registers unnamed sessions with the first 18 session-id characters.
+	// Keep this fallback in lockstep with its resolveIntercomPresenceName implementation.
+	const registeredName = trimmedName || `${DEFAULT_INTERCOM_TARGET_PREFIX}-${normalizedSessionId.slice(0, 18)}`;
+	return { target: registeredName, derivedCandidate: trimmedName || derivedCandidate, registeredName };
+}
+
+export function resolveIntercomSessionTarget(sessionName: string | undefined, sessionId: string): string {
+	return resolveIntercomSessionTargetDetails(sessionName, sessionId).target;
+}
+
+/** Diagnostic names attached to result delivery so a failed route shows both identities. */
+export function intercomTargetFailureContext(target: string): Pick<IntercomSessionTargetResolution, "derivedCandidate" | "registeredName"> {
+	const prefix = `${DEFAULT_INTERCOM_TARGET_PREFIX}-`;
+	if (!target.startsWith(prefix)) return { derivedCandidate: target, registeredName: target };
+	const suffix = target.slice(prefix.length);
+	return {
+		derivedCandidate: `${prefix}${suffix.slice(0, 8)}`,
+		registeredName: target,
+	};
 }
 
 function sanitizeIntercomTargetPart(value: string): string {

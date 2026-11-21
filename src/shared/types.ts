@@ -383,6 +383,10 @@ export interface SubagentResultIntercomChild {
 
 export interface SubagentResultIntercomPayload {
 	to: string;
+	/** Candidate name produced by the short fallback; useful if delivery fails. */
+	derivedTargetCandidate?: string;
+	/** Full target name expected in the intercom session registry. */
+	registeredTargetName?: string;
 	message: string;
 	/** Delivery correlation id; distinct from the canonical runId. */
 	requestId?: string;

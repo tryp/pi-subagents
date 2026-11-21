@@ -1,29 +1,32 @@
-# Parent-written async startup status
+# Intercom completion target resolution
 
 ## Change
 
-The parent now atomically writes an initial status record immediately after creating an async run directory. The record uses the existing `AsyncStatus` state `queued` plus optional `startupPhase: "starting"`, preserving compatibility with existing readers. Validation/spawn failures overwrite it with `state: "failed"`, `startupPhase: "spawn_error"`, and the error text. Validation failures retain the run directory instead of deleting the only forensic record. The child runner continues to replace the marker with its normal status payload.
+The completion target fallback now matches pi-intercom's registered-name rule: when `getSessionName()` is empty, both sides use the first 18 session-id characters. pi-subagents previously used only 8, causing its completion steer to address `subagent-chat-01a1ff05` instead of the registered `subagent-chat-01a1ff05-1514-77d7`. Explicit session names remain unchanged.
 
-Tests that previously assumed no status file existed before child startup now distinguish the parent startup marker from child status and wait for child status fields before consuming session identity or chain metadata.
+Result payloads now carry the short derived candidate and full registered target name; unacknowledged foreground and async deliveries log both values. This makes route failures attributable while retaining the current fallback behavior.
 
 ## Changed files
 
-- `src/runs/background/async-execution.ts`
+- `src/intercom/intercom-bridge.ts`
+- `src/intercom/result-intercom.ts`
+- `src/runs/background/result-watcher.ts`
+- `src/runs/foreground/subagent-executor.ts`
 - `src/shared/types.ts`
-- `test/integration/async-execution.test.ts`
+- `test/unit/intercom-bridge.test.ts`
+- `test/unit/result-intercom.test.ts`
 - `test/integration/intercom-result-delivery.test.ts`
 
 ## Validation
 
 - `npm ci`: passed.
-- Focused startup/status integration tests: 3 passed, 0 failed (normal child transition, missing-cwd validation failure, simulated spawn failure).
-- Solo `node --experimental-strip-types --test test/integration/async-execution.test.ts`: 100 passed, 1 failed. The only failure is the pre-existing top-level async worktree parallel test (confirmed by parent on base and sibling tree).
-- Focused intercom startup-status integration test: 1 passed, 0 failed.
-- `npm run test:unit`: 1,734 total; 1,732 passed, 1 failed, 1 skipped. The failure is the known base failure `published extension APIs use supported package entrypoints` (protocol version expectation 1 vs base export 2).
-- `npm run test:integration`: 661 total; 654 passed, 5 failed, 2 skipped. The failures are the known pre-existing async-worktree test and four fork-context model-scope tests; the additional intercom failure caused by observing the startup marker was fixed by waiting for child status and then passed in the full rerun.
+- Focused unit tests (`intercom-bridge`, `result-intercom`): 26 passed, 0 failed, 0 skipped.
+- Focused integration (`intercom-result-delivery.test.ts`): 30 passed, 0 failed, 0 skipped.
+- `npm run test:unit`: 1,754 total; 1,752 passed, 1 failed, 1 skipped. The only failure is the known baseline `package-manifest.test.ts` expectation (protocol version mismatch).
+- `npm run test:integration`: 661 total; 659 passed, 0 failed, 2 skipped.
 - `git diff --check`: passed.
 
 ## Residual risks
 
-- Full integration suite remains red only on the five listed baseline failures; the parent verified the async-worktree failure on untouched main, and fork-context failures are known on this base.
-- The compatibility representation intentionally uses `state: "queued"` plus `startupPhase` rather than extending the established state enum with `starting`/`spawn_error`; this avoids breaking status consumers while making parent-side startup state explicit.
+- The known package-manifest unit failure remains; this change does not touch that code.
+- The registered-name fallback length (18) must remain aligned with pi-intercom's `resolveIntercomPresenceName` implementation.

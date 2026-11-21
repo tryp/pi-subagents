@@ -247,7 +247,11 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			makeMinimalCtx(tempDir),
 		);
 
-		assert.equal(events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), true);
+		const event = events.emitted.find((entry) => entry.channel === "subagent:result-intercom");
+		assert.ok(event);
+		const payload = event.payload as { derivedTargetCandidate?: string; registeredTargetName?: string };
+		assert.equal(payload.derivedTargetCandidate, "orchestrator");
+		assert.equal(payload.registeredTargetName, "orchestrator");
 		assert.match(result.content[0]?.text ?? "", /Unacknowledged foreground output/);
 	});
 

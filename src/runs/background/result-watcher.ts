@@ -189,7 +189,7 @@ export function createResultWatcher(
 				});
 				const delivered = await deliverSubagentResultIntercomEvent(pi.events, payload);
 				if (!delivered) {
-					console.error(`Subagent async grouped result intercom delivery was not acknowledged for '${resultPath}'.`);
+					console.error(`Subagent async grouped result intercom delivery was not acknowledged for '${resultPath}' (derived candidate '${payload.derivedTargetCandidate}', registered name '${payload.registeredTargetName}').`);
 				}
 			}
 

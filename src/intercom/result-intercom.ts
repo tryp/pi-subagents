@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
+import { intercomTargetFailureContext } from "./intercom-bridge.ts";
 import {
 	type Details,
 	type IntercomEventBus,
@@ -256,8 +257,11 @@ export function buildSubagentResultIntercomPayload(input: GroupedResultIntercomM
 	const status = resolveGroupedStatus(children);
 	const summary = formatStatusCounts(countStatuses(children));
 	const firstChild = children[0];
+	const targetFailureContext = intercomTargetFailureContext(input.to);
 	const payload: SubagentResultIntercomPayload = {
 		to: input.to,
+		derivedTargetCandidate: targetFailureContext.derivedCandidate,
+		registeredTargetName: targetFailureContext.registeredName,
 		runId: input.runId,
 		mode: input.mode,
 		status,

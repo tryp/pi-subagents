@@ -14,7 +14,7 @@ import {
 describe("result intercom formatter", () => {
 	it("builds one grouped intercom payload with status counts and child sections", () => {
 		const payload = buildSubagentResultIntercomPayload({
-			to: "subagent-chat-main",
+			to: "subagent-chat-01a1ff05-1514-77d7",
 			runId: "run-123",
 			mode: "chain",
 			source: "foreground",
@@ -39,6 +39,8 @@ describe("result intercom formatter", () => {
 
 		assert.equal(payload.status, "failed");
 		assert.equal(payload.summary, "1 completed, 1 failed");
+		assert.equal(payload.derivedTargetCandidate, "subagent-chat-01a1ff05");
+		assert.equal(payload.registeredTargetName, "subagent-chat-01a1ff05-1514-77d7");
 		assert.equal(payload.children.length, 2);
 		assert.match(payload.message, /^subagent results/m);
 		assert.match(payload.message, /Run: run-123/);

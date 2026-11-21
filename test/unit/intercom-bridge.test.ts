@@ -9,7 +9,9 @@ import {
 	applyIntercomBridgeToAgent,
 	diagnoseIntercomBridge,
 	resolveIntercomBridge,
+	intercomTargetFailureContext,
 	resolveIntercomSessionTarget,
+	resolveIntercomSessionTargetDetails,
 	resolveSubagentIntercomTarget,
 	resolveIntercomBridgeMode,
 	type IntercomBridgeState,
@@ -47,8 +49,30 @@ describe("resolveIntercomSessionTarget", () => {
 		assert.equal(resolveIntercomSessionTarget("planner", "session-12345678"), "planner");
 	});
 
-	it("uses a runtime-only subagent chat alias when unnamed", () => {
-		assert.equal(resolveIntercomSessionTarget(undefined, "session-12345678"), "subagent-chat-12345678");
+	it("uses the same full runtime alias as the intercom registry when unnamed", () => {
+		assert.equal(resolveIntercomSessionTarget(undefined, "session-01a1ff05-1514-77d7"), "subagent-chat-01a1ff05-1514-77d7");
+	});
+
+	it("preserves a registered chat session name without truncating it", () => {
+		const registeredName = "subagent-chat-01a1ff05-1514-77d7";
+		assert.equal(resolveIntercomSessionTarget(registeredName, "session-01a1ff05-1514-77d7"), registeredName);
+	});
+
+	it("retains both the short candidate and full registered name for delivery diagnostics", () => {
+		assert.deepEqual(resolveIntercomSessionTargetDetails(undefined, "session-01a1ff05-1514-77d7"), {
+			target: "subagent-chat-01a1ff05-1514-77d7",
+			derivedCandidate: "subagent-chat-01a1ff05",
+			registeredName: "subagent-chat-01a1ff05-1514-77d7",
+		});
+		assert.deepEqual(intercomTargetFailureContext("subagent-chat-01a1ff05-1514-77d7"), {
+			derivedCandidate: "subagent-chat-01a1ff05",
+			registeredName: "subagent-chat-01a1ff05-1514-77d7",
+		});
+	});
+
+	it("keeps the ordinary explicit-name path unchanged", () => {
+		assert.equal(resolveIntercomSessionTarget("planner", "session-12345678"), "planner");
+		assert.deepEqual(intercomTargetFailureContext("planner"), { derivedCandidate: "planner", registeredName: "planner" });
 	});
 });
 
