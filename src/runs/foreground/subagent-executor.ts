@@ -143,6 +143,7 @@ interface TaskParam {
 	model?: string;
 	skill?: string | string[] | boolean;
 	acceptance?: AcceptanceInput;
+	workClass?: import("../../shared/types.ts").WorkClass;
 	toolBudget?: ToolBudgetConfig;
 	rlimits?: RlimitsConfig;
 	timeoutMs?: number;
@@ -199,6 +200,7 @@ export interface SubagentParamsLike {
 	agentScope?: unknown;
 	chainDir?: string;
 	acceptance?: AcceptanceInput;
+	workClass?: import("../../shared/types.ts").WorkClass;
 	schedule?: string;
 	scheduleName?: string;
 	additional?: number;
@@ -865,7 +867,7 @@ function appendStepToAsyncChain(input: {
 		interactive: input.ctx.hasUI,
 	};
 	const built = buildAsyncRunnerSteps(resolved.id, {
-		chain: wrapChainTasksForFork(input.params.chain, contextPolicy),
+		chain: wrapChainTasksForFork(input.params.chain, contextPolicy, input.params.workClass),
 		model: input.params.model,
 		modelSource: input.params.modelSource,
 		task: input.params.task,
@@ -1236,7 +1238,7 @@ async function resumeAsyncRun(input: {
 		const forkedAgents = agents.filter((candidate) => shouldForkAgent(contextPolicy, candidate.name)).map((candidate) => candidate.name);
 		const workflowTask = (input.params.task ?? followUp) || undefined;
 		const goal = resolveAsyncEventGoal(workflowTask, attachChain);
-		const chain = wrapChainTasksForFork(attachChain, contextPolicy);
+		const chain = wrapChainTasksForFork(attachChain, contextPolicy, input.params.workClass);
 		const normalized = normalizeSkillInput(input.params.skill);
 		const result = executeAsyncChain(runId, {
 			chain,
@@ -1925,13 +1927,14 @@ function resolveAsyncEventGoal(workflowTask: string | undefined, rawChain: Chain
 	return fallback.startsWith(forkPrefix) ? fallback.slice(forkPrefix.length) : fallback;
 }
 
-function wrapChainTasksForFork(chain: ChainStep[], contextPolicy: AgentDefaultContextPolicy): ChainStep[] {
+function wrapChainTasksForFork(chain: ChainStep[], contextPolicy: AgentDefaultContextPolicy, workClass?: import("../../shared/types.ts").WorkClass): ChainStep[] {
 	return chain.map((step, stepIndex) => {
 		if (isParallelStep(step)) {
 			return {
 				...step,
 				parallel: step.parallel.map((task) => ({
 					...task,
+					...((task.workClass ?? workClass) ? { workClass: task.workClass ?? workClass } : {}),
 					task: shouldForkAgent(contextPolicy, task.agent)
 						? wrapForkTask(task.task ?? "{previous}")
 						: task.task,
@@ -1943,6 +1946,7 @@ function wrapChainTasksForFork(chain: ChainStep[], contextPolicy: AgentDefaultCo
 				...step,
 				parallel: {
 					...step.parallel,
+					...((step.parallel.workClass ?? workClass) ? { workClass: step.parallel.workClass ?? workClass } : {}),
 					task: shouldForkAgent(contextPolicy, step.parallel.agent)
 						? wrapForkTask(step.parallel.task ?? "{previous}")
 						: step.parallel.task,
@@ -1952,6 +1956,7 @@ function wrapChainTasksForFork(chain: ChainStep[], contextPolicy: AgentDefaultCo
 		const sequential = step as SequentialStep;
 		return {
 			...sequential,
+			...((sequential.workClass ?? workClass) ? { workClass: sequential.workClass ?? workClass } : {}),
 			task: shouldForkAgent(contextPolicy, sequential.agent)
 				? wrapForkTask(sequential.task ?? (stepIndex === 0 ? "{task}" : "{previous}"))
 				: sequential.task,
@@ -2090,6 +2095,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			...(task.toolBudget !== undefined ? { toolBudget: task.toolBudget } : {}),
 			...(task.rlimits !== undefined ? { rlimits: task.rlimits } : {}),
 			...(task.acceptance !== undefined ? { acceptance: task.acceptance } : {}),
+			...((task.workClass ?? params.workClass) ? { workClass: task.workClass ?? params.workClass } : {}),
 			...(task.expectedWorktreeRoot ? { expectedWorktreeRoot: task.expectedWorktreeRoot } : {}),
 			...(task.allowCrossProjectWrites ? { allowCrossProjectWrites: true } : {}),
 		}));
@@ -2142,7 +2148,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 		const normalized = normalizeSkillInput(params.skill);
 		const chainSkills = normalized === false ? [] : (normalized ?? []);
 		const rawChain = params.chain as ChainStep[];
-		const chain = wrapChainTasksForFork(rawChain, contextPolicy);
+		const chain = wrapChainTasksForFork(rawChain, contextPolicy, params.workClass);
 		const claimError = registerAsyncCwdClaims(deps, { runId: id, params, cwd: effectiveCwd, parentCwd: ctx.cwd, parentTools: getParentReadOnlyTools(ctx) });
 		if (claimError) return formatAsyncStartError("chain", claimError.message, claimError.conflict);
 		const result = executeAsyncChain(id, {
@@ -2245,6 +2251,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			childIntercomTarget: childIntercomTarget ? (agent, index) => childIntercomTarget(agent, index) : undefined,
 			nestedRoute,
 			acceptance: params.acceptance,
+			workClass: params.workClass,
 			timeoutMs: data.timeoutMs,
 			turnBudget: data.turnBudget,
 			toolBudget: data.toolBudget,
@@ -2283,7 +2290,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 	const foregroundControl = deps.state.foregroundControls.get(runId);
 	const normalized = normalizeSkillInput(params.skill);
 	const chainSkills = normalized === false ? [] : (normalized ?? []);
-	const chain = wrapChainTasksForFork(params.chain as ChainStep[], contextPolicy);
+	const chain = wrapChainTasksForFork(params.chain as ChainStep[], contextPolicy, params.workClass);
 	const forkedAgents = agents.filter((candidate) => shouldForkAgent(contextPolicy, candidate.name)).map((candidate) => candidate.name);
 	const currentMaxSubagentDepth = resolveCurrentMaxSubagentDepth(deps.config.maxSubagentDepth);
 	const chainClaimRequests: CwdClaimRequest[] = [];
@@ -2386,7 +2393,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 			interactive: ctx.hasUI,
 		};
 		const rawAsyncChain = chainResult.requestedAsync.chain;
-		const asyncChain = wrapChainTasksForFork(rawAsyncChain, contextPolicy);
+		const asyncChain = wrapChainTasksForFork(rawAsyncChain, contextPolicy, params.workClass);
 		const firstAgent = firstChainAgent(rawAsyncChain);
 		const claimError = registerAsyncCwdClaims(deps, { runId: id, params: { ...params, chain: rawAsyncChain }, cwd: effectiveCwd, parentCwd: ctx.cwd, parentTools: getParentReadOnlyTools(ctx) });
 		if (claimError) return formatAsyncStartError("chain", claimError.message, claimError.conflict);
@@ -2652,6 +2659,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			...(input.worktreeSetup ? { expectedWorktreeCwd: input.worktreeSetup.worktrees[index]!.agentCwd } : {}),
 			...(task.expectedWorktreeRoot ? { expectedWorktreeRoot: task.expectedWorktreeRoot } : {}),
 			...(task.allowCrossProjectWrites ? { allowCrossProjectWrites: true } : {}),
+			workClass: task.workClass,
 			signal: input.signal,
 			interruptSignal: interruptController.signal,
 			allowIntercomDetach: agentConfig?.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
@@ -3482,6 +3490,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		cwd: effectiveCwd,
 		expectedWorktreeRoot: params.expectedWorktreeRoot,
 		allowCrossProjectWrites: params.allowCrossProjectWrites,
+		workClass: params.workClass,
 		signal,
 		interruptSignal: interruptController.signal,
 		allowIntercomDetach: agentConfig.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,

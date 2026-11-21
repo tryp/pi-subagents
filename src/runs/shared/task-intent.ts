@@ -89,7 +89,9 @@ const GENERAL_IMPLEMENTATION_PATTERNS = [
 	/\b(?:update|add|remove|replace|delete|create)\s+(?:the\s+)?(?:file|files|code|source|implementation|test|tests|component|function|module|class|method|logic|import|imports|readme|docs?|changelog|package\.json|config|manifest|extension|prompt|command)\b/i,
 ];
 
-export type TaskMutationIntent = { kind: "implementation" } | { kind: "read-only" } | { kind: "unknown" };
+export type TaskMutationIntent = { kind: "implementation" } | { kind: "execution" } | { kind: "read-only" } | { kind: "unknown" };
+
+const EXECUTION_CLASS_PATTERN = /\b(?:stage[- ]\d+[a-z0-9-]*\s+execution|execution(?:\/| or )adjudication lane|execution[- ]class task)\b/i;
 
 function stripFrameworkInstructions(task: string): string {
 	return task
@@ -143,6 +145,7 @@ function hasImplementationIntent(agent: string, taskText: string): boolean {
 export function classifyTaskMutationIntent(agent: string, task: string): TaskMutationIntent {
 	const taskText = stripFrameworkInstructions(task);
 	const taskTextWithoutScopedConstraints = stripPatterns(taskText, SCOPED_NO_EDIT_CONSTRAINT_PATTERNS);
+	if (EXECUTION_CLASS_PATTERN.test(taskText)) return { kind: "execution" };
 	const prohibitions = analyzeNoEditProhibitions(taskTextWithoutScopedConstraints);
 	if (prohibitions.present) {
 		if (prohibitions.blanket) return { kind: "read-only" };

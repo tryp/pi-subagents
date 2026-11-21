@@ -1178,11 +1178,12 @@ async function runSingleAttempt(
 			messages: result.messages,
 			tools: agent.tools,
 			mcpDirectTools: agent.mcpDirectTools,
+			workClass: options.workClass,
 		})
 		: undefined;
 	if (completionGuard?.triggered && !observedMutationAttempt) {
 		result.exitCode = 1;
-		result.error = "Subagent completed without making edits for an implementation task.\nIt appears to have returned planning or scratchpad output instead of applying changes.";
+		result.error = "Subagent completed without making edits for an implementation task.\nIt appears to have returned planning or scratchpad output instead of applying changes.\nIf this is an execution/adjudication task, dispatch with workClass: \"execute\".";
 		progress.status = "failed";
 		progress.error = result.error;
 		emitControlEvent(buildControlEvent({

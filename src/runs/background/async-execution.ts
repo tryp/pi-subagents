@@ -234,6 +234,7 @@ interface AsyncSingleParams {
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	nestedRoute?: NestedRouteInfo;
 	acceptance?: AcceptanceInput;
+	workClass?: import("../../shared/types.ts").WorkClass;
 	timeoutMs?: number;
 	absoluteDeadlineAt?: number;
 	turnBudget?: ResolvedTurnBudget;
@@ -737,6 +738,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			task,
 			phase: s.phase,
 			label: s.label,
+			workClass: s.workClass,
 			outputName: s.as,
 			structured: Boolean(s.outputSchema),
 			contextFiles: s.contextFiles,
@@ -1382,6 +1384,7 @@ export function executeAsyncSingle(
 						maxSubagentDepth: resolveChildMaxSubagentDepth(maxSubagentDepth, agentConfig.maxSubagentDepth),
 						waitToolEnabled: params.waitToolEnabled,
 						effectiveAcceptance: resolvedAcceptance,
+						...(params.workClass ? { workClass: params.workClass } : {}),
 						...(resolvedToolBudget.budget ? { toolBudget: resolvedToolBudget.budget } : {}),
 						...(resolvedRlimits.rlimits ? { rlimits: resolvedRlimits.rlimits } : {}),
 					},

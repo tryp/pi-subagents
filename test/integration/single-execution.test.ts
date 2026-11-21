@@ -776,6 +776,17 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		]);
 	});
 
+	it("foreground execute-class runs may return an adjudication report without edits", async () => {
+		mockPi.onCall({ output: "Admission failed; receipt path and SHA-256 reported." });
+		const result = await runSync(tempDir, [makeAgent("worker")], "worker", "Implement the protocol result", {
+			runId: "guard-execute-class",
+			workClass: "execute",
+		});
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.progress.status, "completed");
+		assert.equal(result.finalOutput, "Admission failed; receipt path and SHA-256 reported.");
+	});
+
 	it("returns captured output when the foreground executor fails an implementation run", async () => {
 		mockPi.onCall({ output: "Oracle review:\n- finding one\n- finding two" });
 		const executor = makeExecutor([makeAgent("oracle")]);

@@ -1,62 +1,42 @@
-# Parent-written async startup status
+# Execute-class completion guard
 
-## Change
+## Changes
 
-The parent now atomically writes an initial status record immediately after creating an async run directory. The record uses the existing `AsyncStatus` state `queued` plus optional `startupPhase: "starting"`, preserving compatibility with existing readers. Validation/spawn failures overwrite it with `state: "failed"`, `startupPhase: "spawn_error"`, and the error text. Validation failures retain the run directory instead of deleting the only forensic record. The child runner continues to replace the marker with its normal status payload.
+- Added the dispatch-level `workClass: "implement" | "execute"` parameter. It applies consistently to foreground single runs, background single runs, and all children/steps of parallel and chain dispatches.
+- The shared completion guard honors a declared class deterministically: `execute` allows zero-edit completion; `implement` requires an observed mutation. Undeclared tasks retain the implementation-intent guard, with narrowly explicit execution/adjudication task wording classified as non-implementation.
+- Guard failures now explain the remedy: declare `workClass: "execute"` for execution/adjudication tasks.
+- Added the peer's complete task text as a regression fixture. It classifies as execution and a zero-edit receipt/report no longer trips the guard.
+- Added foreground and background integration tests for declared execute-class success, while existing tests continue to verify that implementation tasks with no edits fail.
+- Kept the serialized SubagentParams schema under its hard 16 KiB ceiling: 16,376 bytes.
 
-Tests that previously assumed no status file existed before child startup now distinguish the parent startup marker from child status and wait for child status fields before consuming session identity or chain metadata.
+## Files changed
 
-## Changed files
-
+- `src/extension/schemas.ts`
 - `src/runs/background/async-execution.ts`
+- `src/runs/background/subagent-runner.ts`
+- `src/runs/foreground/execution.ts`
+- `src/runs/foreground/subagent-executor.ts`
+- `src/runs/shared/completion-guard.ts`
+- `src/runs/shared/parallel-utils.ts`
+- `src/runs/shared/task-intent.ts`
+- `src/shared/settings.ts`
 - `src/shared/types.ts`
+- `test/fixtures/execute-class-false-positive-task.txt`
 - `test/integration/async-execution.test.ts`
-- `test/integration/intercom-result-delivery.test.ts`
+- `test/integration/single-execution.test.ts`
+- `test/unit/completion-guard.test.ts`
+- `test/unit/schemas.test.ts`
+- `test/unit/task-intent.test.ts`
 
 ## Validation
 
-- `npm ci`: passed.
-- Focused startup/status integration tests: 3 passed, 0 failed (normal child transition, missing-cwd validation failure, simulated spawn failure).
-- Solo `node --experimental-strip-types --test test/integration/async-execution.test.ts`: 100 passed, 1 failed. The only failure is the pre-existing top-level async worktree parallel test (confirmed by parent on base and sibling tree).
-- Focused intercom startup-status integration test: 1 passed, 0 failed.
-- `npm run test:unit`: 1,734 total; 1,732 passed, 1 failed, 1 skipped. The failure is the known base failure `published extension APIs use supported package entrypoints` (protocol version expectation 1 vs base export 2).
-- `npm run test:integration`: 661 total; 654 passed, 5 failed, 2 skipped. The failures are the known pre-existing async-worktree test and four fork-context model-scope tests; the additional intercom failure caused by observing the startup marker was fixed by waiting for child status and then passed in the full rerun.
-- `git diff --check`: passed.
+- Focused unit suites (`task-intent`, `completion-guard`, `schemas`): **42 passed, 0 failed**.
+- `npm run test:unit`: **1,760 passed, 1 failed, 1 skipped**. The sole failure is the known pre-existing `test/unit/package-manifest.test.ts` provider-count mismatch (`expected 1, got 2`; protocol-version mismatch), also observed on base.
+- `npm run test:integration`: **661 passed, 0 failed, 2 skipped**.
+- Targeted dynamic/fork integration files after correcting optional-field propagation: passed.
+- `git diff --check`: clean.
 
 ## Residual risks
 
-- Full integration suite remains red only on the five listed baseline failures; the parent verified the async-worktree failure on untouched main, and fork-context failures are known on this base.
-- The compatibility representation intentionally uses `state: "queued"` plus `startupPhase` rather than extending the established state enum with `starting`/`spawn_error`; this avoids breaking status consumers while making parent-side startup state explicit.
-
-# Pending async subagent results
-
-## Change
-
-This change adds a best-effort pending-results sweep at `agent_settled`. Async completion and `session_compact` events mark the sweep dirty; a successful scan with no pending runs emits nothing. Completion notices and sweep notices write a per-run `completion-ack.json` marker only when `message_start` confirms the parent began consuming the message. This makes repeated sweeps idempotent while allowing an appended-but-unseen notice to be recovered.
-
-The sweep filters the current session's terminal runs, checks the persisted ack marker and the existing in-memory `consumedCompletionRuns`, and scans retained session entries for `subagent-notify` run IDs. Matching history entries are folded into the same bounded `Pending results: N` message and labeled as recovered. The message is capped at 24 child lines / 4,000 characters; skipped and unreadable history/ack/status paths are recorded in `subagent_pending_results_sweep` entries.
-
-## Hook boundary
-
-pi-tau `1fe9c16` requeues retained **background-job** completion notices into its wake-visible queue when host delivery is stale or canceled. This change does not modify that queue: it sweeps pi-subagents' **async-run status registry**, whose terminal result notices and acknowledgements are separate. No dedicated post-compaction callback was needed; `session_compact` marks the sweep dirty and the next `agent_settled` performs it.
-
-## Changed files
-
-- `src/extension/index.ts`
-- `src/runs/background/pending-results.ts`
-- `src/runs/background/pending-results-sweep.ts`
-- `test/unit/pending-results.test.ts`
-- `REPORT.md` (this section; the existing parent-written report is preserved above)
-
-## Validation
-
-- `npm ci`: passed.
-- Focused tests (`node --experimental-strip-types --test test/unit/pending-results.test.ts test/unit/notify.test.ts`): 33 passed, 0 failed.
-- `npm run test:unit` on commit `26c9b118`: 1,756 total; 1,754 passed, 1 failed, 1 skipped. The sole failure is the known pre-existing `package-manifest.test.ts` protocol-version expectation (`2 !== 1`).
-- `npm run test:integration`: 661 total; 659 passed, 0 failed, 2 skipped.
-- `git diff --check`: passed. LSP diagnostics on both new modules and the new test: clean. `src/extension/index.ts` retains the base's existing `view` type mismatch diagnostic, unrelated to this change.
-
-## Residual risks
-
-- The status registry scan is best-effort; an unreadable registry prevents that sweep and increments telemetry for retry on a later wake.
-- No live deployed-runtime probe was run in this worker branch; the parent should probe delivery/ack recovery after merge and deploy.
+- The pre-existing package-manifest unit failure remains; it is unrelated to these files.
+- No separate TypeScript build/typecheck was run; unit and integration suites use the repository's TypeScript runtime harness.

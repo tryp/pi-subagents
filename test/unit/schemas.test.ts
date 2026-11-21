@@ -206,6 +206,7 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.equal(SubagentParams?.properties?.expectedWorktreeRoot?.type, "string");
 		assert.equal(SubagentParams?.properties?.expectedWorktreeRoot?.minLength, 1);
 		assert.equal(SubagentParams?.properties?.allowCrossProjectWrites?.type, "boolean");
+		assert.deepEqual(SubagentParams?.properties?.workClass?.enum, ["implement", "execute"]);
 		assert.equal(SubagentParams?.properties?.tasks?.items?.properties?.expectedWorktreeRoot?.type, "string");
 		assert.equal(SubagentParams?.properties?.chain?.items?.properties?.expectedWorktreeRoot?.type, "string");
 		const idSchema = SubagentParams?.properties?.id;

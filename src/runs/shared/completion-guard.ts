@@ -1,6 +1,7 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { isMutatingBashCommand } from "./long-running-guard.ts";
 import { expectsImplementationMutation } from "./task-intent.ts";
+import type { WorkClass } from "../../shared/types.ts";
 
 export { expectsImplementationMutation };
 
@@ -22,6 +23,7 @@ interface CompletionMutationGuardInput {
 	messages: Message[];
 	tools?: string[];
 	mcpDirectTools?: string[];
+	workClass?: WorkClass;
 }
 
 interface CompletionMutationGuardResult {
@@ -52,9 +54,10 @@ export function hasMutationToolCall(messages: Message[]): boolean {
 }
 
 export function evaluateCompletionMutationGuard(input: CompletionMutationGuardInput): CompletionMutationGuardResult {
-	const expectedMutation = hasMutationToolCapability(input.tools, input.mcpDirectTools)
-		? expectsImplementationMutation(input.agent, input.task)
-		: false;
+	const mutationCapable = hasMutationToolCapability(input.tools, input.mcpDirectTools);
+	const expectedMutation = mutationCapable && (input.workClass === "execute"
+		? false
+		: input.workClass === "implement" || expectsImplementationMutation(input.agent, input.task));
 	const attemptedMutation = hasMutationToolCall(input.messages);
 	return {
 		expectedMutation,

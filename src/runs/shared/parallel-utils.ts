@@ -54,6 +54,7 @@ export interface RunnerSubagentStep {
 	effectiveAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
 	acceptanceInput?: import("../../shared/types.ts").AcceptanceInput;
 	acceptanceRole?: import("../../shared/types.ts").AcceptanceRole;
+	workClass?: import("../../shared/types.ts").WorkClass;
 	toolBudget?: import("../../shared/types.ts").ResolvedToolBudget;
 	rlimits?: import("../../shared/types.ts").ResolvedRlimits;
 	allowCrossProjectWrites?: boolean;

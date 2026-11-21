@@ -23,6 +23,7 @@ export interface MaxOutputConfig {
 export type OutputMode = "inline" | "file-only";
 
 export type AcceptanceRole = "read-only" | "writer";
+export type WorkClass = "implement" | "execute";
 
 export type JsonSchemaObject = Record<string, unknown>;
 
@@ -1320,6 +1321,7 @@ export interface RunSyncOptions {
 		outputPath: string;
 	};
 	acceptance?: AcceptanceInput;
+	workClass?: WorkClass;
 	contextFiles?: { required?: string[]; optional?: string[] };
 	/** Exact invocation-level user preamble shared by every child in a PARALLEL/CHAIN run. */
 	sharedContext?: string;

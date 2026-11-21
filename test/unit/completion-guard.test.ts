@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import type { Message } from "@earendil-works/pi-ai";
 
@@ -35,6 +36,23 @@ test("implementation task with no mutation triggers the completion guard", () =>
 		attemptedMutation: false,
 		triggered: true,
 	});
+});
+
+test("peer execution task completes with zero edits instead of a false implementation failure", () => {
+	const task = readFileSync(new URL("../fixtures/execute-class-false-positive-task.txt", import.meta.url), "utf8");
+	const result = evaluateCompletionMutationGuard({
+		agent: "worker",
+		task,
+		messages: [assistantText("Admission failed; wrote the mandated failure receipt and stopped per the binding stop rule.")],
+	});
+	assert.deepEqual(result, { expectedMutation: false, attemptedMutation: false, triggered: false });
+});
+
+test("declared workClass governs zero-edit completion deterministically", () => {
+	const task = "Implement the fix, but the execution/adjudication attempt must stop on first failed admission and report the receipt.";
+	const messages = [assistantText("Admission failed; receipt path and hash reported.")];
+	assert.equal(evaluateCompletionMutationGuard({ agent: "worker", task, messages, workClass: "execute" }).triggered, false);
+	assert.equal(evaluateCompletionMutationGuard({ agent: "worker", task: "A prose-only execution task", messages, workClass: "implement" }).triggered, true);
 });
 
 test("declared read-only builtin tools suppress implementation-word false positives", () => {

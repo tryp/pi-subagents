@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { readFileSync } from "node:fs";
 import { classifyTaskMutationIntent, expectsImplementationMutation, taskMayMutate } from "../../src/runs/shared/task-intent.ts";
 
 describe("classifyTaskMutationIntent", () => {
@@ -59,6 +60,12 @@ describe("classifyTaskMutationIntent", () => {
 	it("expectsImplementationMutation mirrors the classifier", () => {
 		assert.equal(expectsImplementationMutation("worker", "Do not modify tests; implement the fix"), true);
 		assert.equal(expectsImplementationMutation("worker", "Review the diff and suggest fixes only. Do not edit files."), false);
+	});
+	it("classifies the peer's execution/adjudication task as execution, not implementation", () => {
+		const task = readFileSync(new URL("../fixtures/execute-class-false-positive-task.txt", import.meta.url), "utf8");
+		assert.match(task, /STAGE-2B EXECUTION/);
+		assert.equal(classifyTaskMutationIntent("worker", task).kind, "execution");
+		assert.equal(expectsImplementationMutation("worker", task), false);
 	});
 });
 

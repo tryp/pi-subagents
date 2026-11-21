@@ -1,0 +1,69 @@
+Task: You are a delegated subagent running from a fork of the parent session. Treat the inherited conversation as reference-only context, not a live thread to continue. Do not continue or answer prior messages as if they are waiting for a reply. Your sole job is to execute the task below and return a focused result for that task using your tools.
+
+Task:
+STAGE-2B EXECUTION — vpanel attempt-2, per the ADMITTED R2 freeze (commit 4a5a59516 on lane-vpanel-rc2-1121, worktree /home/dev/src/sippi/tmp/agent-worktrees/lane-vpanel-rc2-1121 — work there; all pinned script bytes are the freeze's). Authoritative spec: doc/plans/2026-11-21-vpanel-rootcause-predeclaration.md in that worktree. Follow its declared paths, work units, and verdict rules EXACTLY.
+
+STOP RULE (binding): the FIRST failed admission of any kind ends the attempt. On any admission failure: write the failure receipt (the runner does this), commit nothing further, and report the receipt path + SHA-256 + the failing check. DO NOT retry, re-run, adjust inputs, or 'fix' anything. A retry requires a protocol-revision commit by the parent.
+
+Sequence:
+1. PRE-RUN: verify sha256sum -c on the artifacts SHA256SUMS (both review payloads intact); confirm the four pinned script digests still match the provenance table (they must — if not, STOP and report, do not proceed).
+2. RUN: execute the frozen adjudicating measurement exactly as the predecl declares — the 1 MHz terminal-trace run with the two-run repeatability gate (--repeatability emits two receipts requiring exact byte equality). Use SIPPI_VENV=/home/dev/src/sippi/venv. Expected work-unit table must be satisfied exactly (extras rejected). The observer admission enforces the frozen bands (R_far <= 0.05 open-like, >= 0.5 short-like, else INCONCLUSIVE).
+3. If repeatability byte-compare FAILS: that is a failed admission -> stop rule. No third run.
+4. POST-RUN: run the pinned summarizer (scripts/summarize_vpanel_rootcause_attempt2.py) and the pinned reference chain (scripts/vpanel_reference_chain_attempt2.py, mpmath dps=80) per the frozen order. The chain result must show mp_dps_at_construction: 80.
+5. RECORD: write the result record at the path the predecl declares (doc/research/, dated 2026-11-21), citing every receipt by path+SHA. Map the observed R_far/scored_label into H3 (terminal/ground topology) vs H4 (functional mapping) EXACTLY per the frozen interpretation rules — if the label is INCONCLUSIVE, the record says INCONCLUSIVE ends the attempt. Scope honestly: this fixture/instrument only; no physical S/Z claims; arithmetic band <=5e-14 citable, trailing digits not.
+6. RECEIPTS: store run receipts + summarizer/chain outputs under doc/research/artifacts/2026-11-21-vpanel-rootcause-attempt2/runs/ and add their digests to that directory's SHA256SUMS (or a runs/ sub-manifest if the predecl declares one). sha256sum -c must pass. Run artifacts are NOT acceptable under tmp/ as the only copy.
+7. COMMIT on the lane branch: receipts + result record + manifest, hooks green, tree clean. Gate-light targeted at the touched tests + predecl lint 0-new. NO merge to master (parent integrates after the caretaker's submodule landing).
+8. REPORT: verdict (label + H3/H4 disposition or INCONCLUSIVE-stop), both receipt paths+hashes, byte-equality confirmation, chain dps, record path, commit hash. Do NOT state a physics claim beyond the frozen scope; do NOT run anything beyond the declared work-unit table (extra runs = protocol violation).
+
+Note: the two runs are the expensive step (dense KKT solve at 1 MHz on the modal rung fixture) — expect tens of minutes; let them run to completion, do not abort a healthy run.
+
+## Acceptance Contract
+Acceptance level: checked
+Completion is not accepted from prose alone. End with a structured acceptance report.
+
+Criteria:
+- criterion-1: Implement the requested change without widening scope
+
+Required evidence: changed-files, tests-added, commands-run, residual-risks, no-staged-files
+
+Finish with a fenced JSON block tagged `acceptance-report` in this shape:
+Use empty arrays when no items apply; array fields contain strings unless object entries are shown.
+`criteriaSatisfied[].status` must be exactly one of: satisfied, not-satisfied, not-applicable.
+`commandsRun[].result` must be exactly one of: passed, failed, not-run.
+`manualNotes` and `notes` are optional strings; an empty string means no note and does not satisfy `manual-notes` evidence.
+```acceptance-report
+{
+  "criteriaSatisfied": [
+    {
+      "id": "criterion-1",
+      "status": "satisfied",
+      "evidence": "specific proof"
+    }
+  ],
+  "changedFiles": [
+    "src/file.ts"
+  ],
+  "testsAddedOrUpdated": [
+    "test/file.test.ts"
+  ],
+  "commandsRun": [
+    {
+      "command": "command",
+      "result": "passed",
+      "summary": "short result"
+    }
+  ],
+  "validationOutput": [
+    "validation output or concise summary"
+  ],
+  "residualRisks": [
+    "none"
+  ],
+  "noStagedFiles": true,
+  "diffSummary": "short description of the diff",
+  "reviewFindings": [
+    "blocker: file.ts:12 - issue found, or no blockers"
+  ],
+  "manualNotes": "anything else the parent should know"
+}
+```

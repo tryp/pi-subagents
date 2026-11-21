@@ -1409,11 +1409,12 @@ async function runSingleStep(
 				messages: run.messages,
 				tools: step.tools,
 				mcpDirectTools: step.mcpDirectTools,
+				workClass: step.workClass,
 			})
 			: undefined;
 		const completionGuardTriggered = completionGuard?.triggered === true && !run.observedMutationAttempt;
 		const completionGuardError = completionGuardTriggered
-			? "Subagent completed without making edits for an implementation task.\nIt appears to have returned planning or scratchpad output instead of applying changes."
+			? "Subagent completed without making edits for an implementation task.\nIt appears to have returned planning or scratchpad output instead of applying changes.\nIf this is an execution/adjudication task, dispatch with workClass: \"execute\"."
 			: undefined;
 		const effectiveExitCode = toolAvailabilityError || completionGuardTriggered || structuredError
 			? 1

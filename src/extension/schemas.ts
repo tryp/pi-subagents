@@ -342,8 +342,9 @@ const SubagentParamsSchema = Type.Object({
 	})),
 	outputMode: Type.Optional(OutputModeOverride),
 	skill: Type.Optional(SkillOverride),
-	model: Type.Optional(Type.String({ description: "Execution override or action='default-model': e.g. 'openai-codex/gpt-5.6-luna[:thinking]', 'inherit', 'off', 'clear'. Bare names auto-resolve across providers; list/models discovers. Omit on execution for the session default, then agent/parent defaults." })),
+	model: Type.Optional(Type.String({ description: "Model/action='default-model': provider/id[:thinking], inherit/off/clear; bare IDs resolve; list/models discovers. Omit for session, then agent defaults." })),
 	acceptance: Type.Optional(AcceptanceOverride),
+	workClass: Type.Optional(Type.String({ enum: ["implement", "execute"], description: "execute skips zero-edit guard." })),
 });
 
 export const SubagentParams = keepTopLevelParameterDescriptions(SubagentParamsSchema);
