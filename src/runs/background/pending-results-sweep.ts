@@ -28,7 +28,14 @@ function isAckRecord(value: unknown, runId: string): value is AckRecord {
 	return isRecord(value) && value.version === 1 && value.runId === runId && typeof value.acknowledgedAt === "number";
 }
 
-function readAcknowledged(asyncDir: string, runId: string): { acknowledged: boolean; unreadable: boolean } {
+/**
+ * Whether a run's completion has already been delivered to the parent session.
+ *
+ * Exported because the background-work provider has to ask the same question: a
+ * terminal run that the parent has already been told about is finished work,
+ * not work awaiting attention.
+ */
+export function readAcknowledged(asyncDir: string, runId: string): { acknowledged: boolean; unreadable: boolean } {
 	try {
 		const parsed: unknown = JSON.parse(fs.readFileSync(path.join(asyncDir, ACK_FILE), "utf8"));
 		return { acknowledged: isAckRecord(parsed, runId), unreadable: !isAckRecord(parsed, runId) };

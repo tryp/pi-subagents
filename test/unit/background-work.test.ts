@@ -400,3 +400,46 @@ describe("subagent_wait with background-work providers", () => {
 		}
 	});
 });
+
+describe("pi-subagents background-work attention after delivery", () => {
+	it("reports a terminal run only until its completion has been acknowledged", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-provider-ack-"));
+		try {
+			const id = (suffix: string) => `${path.basename(root)}-${suffix}`;
+			writeStatus(root, id("failed-acked"), "failed");
+			writeStatus(root, id("failed-unacked"), "failed");
+			writeStatus(root, id("stopped-acked"), "stopped");
+			writeStatus(root, id("paused-acked"), "paused");
+			writeStatus(root, id("running-attention-acked"), "running");
+			for (const suffix of ["failed-acked", "failed-unacked", "stopped-acked", "paused-acked", "running-attention-acked"]) {
+				const statusPath = path.join(root, id(suffix), "status.json");
+				const status = JSON.parse(fs.readFileSync(statusPath, "utf8"));
+				delete status.pid;
+				if (suffix === "running-attention-acked") status.steps[0].activityState = "needs_attention";
+				fs.writeFileSync(statusPath, JSON.stringify(status));
+			}
+			// Acknowledged = the parent session already received this run's result.
+			for (const suffix of ["failed-acked", "stopped-acked", "paused-acked", "running-attention-acked"]) {
+				fs.writeFileSync(
+					path.join(root, id(suffix), "completion-ack.json"),
+					JSON.stringify({ version: 1, runId: id(suffix), acknowledgedAt: Date.now() }),
+				);
+			}
+
+			const provider = createSubagentBackgroundWorkProvider({ asyncDir: root, getSessionId: () => "session-a" });
+			const attention = (provider.listAttentionWork?.() ?? []).map((item) => item.id).sort();
+
+			// Delivered terminal work is finished, not awaiting attention.
+			assert.ok(!attention.includes(id("failed-acked")), "an acknowledged failure must not keep waking the parent");
+			assert.ok(!attention.includes(id("stopped-acked")), "an acknowledged stop must not keep waking the parent");
+			// Undelivered terminal work still needs the parent to look at it.
+			assert.ok(attention.includes(id("failed-unacked")), "an undelivered failure must still be reported");
+			// A paused run is resumable, so an ack does not make it finished.
+			assert.ok(attention.includes(id("paused-acked")), "paused work stays actionable after delivery");
+			// Ack suppresses terminal states only; live attention is still live.
+			assert.ok(attention.includes(id("running-attention-acked")), "a running run needing attention is unaffected by an ack");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+});

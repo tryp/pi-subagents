@@ -55,7 +55,10 @@ test("published extension APIs use supported package entrypoints", async () => {
 		"./delegation": "./src/api/delegation.ts",
 	});
 	const backgroundWork = await import("pi-subagents/background-work");
-	assert.equal(backgroundWork.BACKGROUND_WORK_PROTOCOL_VERSION, 1);
+	// Tracks the exported constant, which moved to 2 when the v2 payload gained a
+	// one-line status summary (bb0e421c); the assertion was left at 1 and made the
+	// suite un-greenable on main.
+	assert.equal(backgroundWork.BACKGROUND_WORK_PROTOCOL_VERSION, 2);
 	assert.equal(backgroundWork.BACKGROUND_WORK_REGISTRY_KEY, "pi-subagents.background-work.v1");
 	const delegation = await import("pi-subagents/delegation");
 	assert.equal(delegation.SUBAGENT_DELEGATION_PROTOCOL_VERSION, 1);
