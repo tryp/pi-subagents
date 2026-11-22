@@ -8,6 +8,7 @@ type SubagentExecutionContext = "fresh" | "fork";
 
 interface BranchSessionEntry {
 	type: string;
+	cwd?: string;
 	id?: string;
 	parentId?: string | null;
 	timestamp?: string;
@@ -113,6 +114,37 @@ function sanitizeUnsafeThinkingBlocks(entries: BranchSessionEntry[]): boolean {
 		sanitized = true;
 	}
 	return sanitized;
+}
+
+export function setForkedSessionCwd(sessionFile: string, cwd: string): void {
+	if (!fs.existsSync(sessionFile)) return;
+	const entries = readSessionEntries(sessionFile);
+	const header = entries[0];
+	if (header?.type !== "session") throw new Error(`Forked session has no session header: ${sessionFile}`);
+	header.cwd = path.resolve(cwd);
+	fs.writeFileSync(sessionFile, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf-8");
+}
+
+/**
+ * Binds a forked child's session header to the worktree the parent allocated
+ * for it. A fork copies the parent's header verbatim, so without this the child
+ * process runs in its worktree while its session context resolves tool calls
+ * against the parent checkout -- observed as a root-mismatch guard trip in
+ * every child of a `worktree: true` + fork-context group.
+ *
+ * This is the single place that decides which allocated path wins, and it is
+ * exported so the call site can be tested: the helper above is easy to test and
+ * easy to stop calling.
+ */
+export function bindForkedSessionToAssignedWorktree(options: {
+	sessionFile?: string;
+	expectedWorktreeRoot?: string;
+	expectedWorktreeCwd?: string;
+}): string | undefined {
+	const assigned = options.expectedWorktreeRoot ?? options.expectedWorktreeCwd;
+	if (!assigned || !options.sessionFile) return undefined;
+	setForkedSessionCwd(options.sessionFile, assigned);
+	return assigned;
 }
 
 function readSessionEntries(sessionFile: string): BranchSessionEntry[] {

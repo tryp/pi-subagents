@@ -230,7 +230,7 @@ function resolveWorktreeBaseDir(configuredBaseDir: string | undefined, repoRoot:
 	return resolved;
 }
 
-function buildWorktreePath(baseDir: string, runId: string, index: number): string {
+export function buildWorktreePath(baseDir: string, runId: string, index: number): string {
 	return path.join(baseDir, `pi-worktree-${runId}-${index}`);
 }
 
@@ -659,6 +659,23 @@ function cleanupSingleWorktree(setup: WorktreeSetup, worktree: WorktreeInfo): Wo
 	return outcome;
 }
 
+export function validateAllocatedWorktree(repoRoot: string, worktreePath: string, baseDir: string): string | undefined {
+	let checkFailure: string | undefined;
+	try {
+		if (!fs.existsSync(worktreePath)) checkFailure = "path does not exist";
+		else if (!fs.statSync(worktreePath).isDirectory()) checkFailure = "path is not a directory";
+		else {
+			const actualRoot = fs.realpathSync.native(runGitChecked(worktreePath, ["rev-parse", "--show-toplevel"]).trim());
+			const expectedRoot = fs.realpathSync.native(worktreePath);
+			if (actualRoot !== expectedRoot) checkFailure = `Git toplevel is ${actualRoot}, expected worktree root ${expectedRoot}`;
+		}
+	} catch (error) {
+		checkFailure = `Git toplevel check failed: ${error instanceof Error ? error.message : String(error)}`;
+	}
+	if (!checkFailure) return undefined;
+	return `Worktree preflight failed for repo ${repoRoot}: ${worktreePath} (${checkFailure}); base directory: ${baseDir}. Set worktreeBaseDir or PI_SUBAGENTS_WORKTREE_DIR to a usable location, or retry without worktree.`;
+}
+
 export function createWorktrees(cwd: string, runId: string, count: number, options?: CreateWorktreesOptions): WorktreeSetup {
 	const repo = resolveRepoState(cwd);
 	pruneExpiredSalvageRefs(repo.toplevel);
@@ -693,6 +710,14 @@ export function createWorktrees(cwd: string, runId: string, count: number, optio
 			salvageDir,
 		});
 		throw error;
+	}
+
+	for (const worktree of worktrees) {
+		const failure = validateAllocatedWorktree(repo.toplevel, worktree.path, baseDir);
+		if (failure) {
+			cleanupWorktrees({ cwd: repo.toplevel, worktrees, baseCommit: repo.baseCommit, runId, salvageStartedAtMs, salvageDir });
+			throw new Error(failure);
+		}
 	}
 
 	return {

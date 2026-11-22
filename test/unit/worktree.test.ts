@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 import {
 	assertWorktreeChildCwd,
+	buildWorktreePath,
 	cleanupWorktrees,
 	createWorktrees,
 	findWorktreeTaskCwdConflict,
@@ -13,6 +14,7 @@ import {
 	pruneExpiredSalvageRefs,
 	resolveParallelChildCwd,
 	resolveExpectedWorktreeAgentCwd,
+	validateAllocatedWorktree,
 	worktreeRootMismatchReason,
 	type WorktreeSetup,
 } from "../../src/runs/shared/worktree.ts";
@@ -148,6 +150,34 @@ describe("worktree", () => {
 		} finally {
 			if (setup) cleanupWorktrees(setup);
 			cleanupRepo(repoDir);
+		}
+	});
+
+	it("worktree preflight failure names repo, path, check, base directory, and remediation", () => {
+		const repoDir = createRepo("pi-worktree-preflight-message-");
+		const invalidWorktree = fs.mkdtempSync(path.join(os.tmpdir(), "pi-worktree-preflight-invalid-"));
+		const baseDir = path.dirname(invalidWorktree);
+		const failure = validateAllocatedWorktree(repoDir, invalidWorktree, baseDir);
+		assert.match(failure ?? "", new RegExp(`repo ${repoDir.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}`));
+		assert.match(failure ?? "", new RegExp(invalidWorktree.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")));
+		assert.match(failure ?? "", /Git toplevel check failed/);
+		assert.match(failure ?? "", new RegExp(`base directory: ${baseDir.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}`));
+		assert.match(failure ?? "", /Set worktreeBaseDir or PI_SUBAGENTS_WORKTREE_DIR.*retry without worktree/);
+	});
+
+	it("uses the allocated worktree path as the expected cwd for root and subdirectory claims", () => {
+		const repoDir = createRepo("pi-worktree-claim-allocation-");
+		const subdir = path.join(repoDir, "packages", "app");
+		fs.mkdirSync(subdir, { recursive: true });
+		const baseDir = path.join(os.tmpdir(), `pi-worktree-claim-base-${Date.now().toString(36)}`);
+		const setup = createWorktrees(subdir, "claim-allocation", 1, { baseDir });
+		try {
+			const allocated = setup.worktrees[0]!;
+			assert.equal(allocated.path, buildWorktreePath(baseDir, "claim-allocation", 0));
+			assert.equal(allocated.agentCwd, path.join(allocated.path, "packages", "app"));
+			assert.equal(resolveExpectedWorktreeAgentCwd(subdir, "claim-allocation", 0, baseDir), allocated.agentCwd);
+		} finally {
+			cleanupWorktrees(setup);
 		}
 	});
 

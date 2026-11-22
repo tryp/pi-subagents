@@ -508,10 +508,16 @@ subagent({
 })
 ```
 
-`worktree: true` gives each parallel task its own git worktree branched from
-HEAD. This requires a clean git state and is mainly for intentionally parallel
-write workflows. If you want one writer thread and several advisory agents,
-prefer a single-writer pattern instead.
+`worktree: true` requires the parent cwd to be inside a clean git repository.
+Each child runs in its own worktree: at the worktree root, or in the same
+repo-relative subdirectory when the parent cwd is below the repo root. A task's
+`cwd` override is rejected. Read-only children share the parent cwd and are not
+isolated. Worktrees use configured `worktreeBaseDir`, then
+`PI_SUBAGENTS_WORKTREE_DIR`, otherwise the OS temp directory. Worktrees are
+cleaned after the run; failures preserve salvage refs. Setup failures are one
+group-level error naming the offending path, not per-child refusals. If setup
+fails, change the worktree base directory or retry without worktree. If you want
+one writer thread and several advisory agents, prefer a single-writer pattern.
 
 ## The Oracle Workflow
 

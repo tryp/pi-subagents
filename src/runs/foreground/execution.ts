@@ -32,6 +32,7 @@ import {
 	getSubagentDepthEnv,
 } from "../../shared/types.ts";
 import { formatSharedContextPreamble } from "../shared/shared-context.ts";
+import { bindForkedSessionToAssignedWorktree } from "../../shared/fork-context.ts";
 import { worktreeRootMismatchReason } from "../shared/worktree.ts";
 import { CompactionSettlementTracker, recoverAbortOnce } from "../shared/abort-recovery.ts";
 import {
@@ -205,6 +206,11 @@ async function runSingleAttempt(
 		originalTask?: string;
 	},
 ): Promise<SingleResult> {
+	bindForkedSessionToAssignedWorktree({
+		sessionFile: options.sessionFile,
+		expectedWorktreeRoot: options.expectedWorktreeRoot,
+		expectedWorktreeCwd: options.expectedWorktreeCwd,
+	});
 	const effectiveThinking = options.thinkingOverride ?? agent.thinking;
 	const modelArg = applyThinkingSuffix(model, effectiveThinking, options.thinkingOverride !== undefined);
 	const watchdogConfig = resolveWatchdogConfig(options.cwd ?? runtimeCwd);

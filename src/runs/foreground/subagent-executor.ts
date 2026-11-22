@@ -2517,13 +2517,15 @@ interface ForegroundParallelRunInput {
 
 function buildParallelModeError(message: string, conflict?: Details["cwdWriterConflict"]): AgentToolResult<Details> {
 	const worktreeRootMismatch = message.includes("Blocked before implementation: root mismatch");
+	const worktreePreflightFailure = message.startsWith("Worktree preflight failed for repo ");
 	return {
 		content: [{ type: "text", text: message }],
 		isError: true,
 		details: {
 			mode: "parallel" as const,
 			results: [],
-			...(worktreeRootMismatch ? { failureKind: "worktree_root_mismatch" as const, retryable: true } : {}),
+			...(worktreeRootMismatch ? { failureKind: "worktree_root_mismatch" as const, retryable: false } : {}),
+			...(worktreePreflightFailure ? { failureKind: "worktree_preflight_failure" as const, retryable: false } : {}),
 				...(conflict ? { cwdWriterConflict: conflict } : {}),
 		},
 	};

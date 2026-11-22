@@ -1685,12 +1685,12 @@ function markParallelGroupSetupFailure(input: {
 			success: false,
 			exitCode: 1,
 			sessionFile: input.group.parallel[taskIndex].sessionFile,
-			...(worktreeRootMismatch ? { failureKind: "worktree_root_mismatch", retryable: true } : {}),
+			...(worktreeRootMismatch ? { failureKind: "worktree_root_mismatch", retryable: false } : {}),
 		});
 	}
 	if (worktreeRootMismatch) {
 		input.statusPayload.failureKind = "worktree_root_mismatch";
-		input.statusPayload.retryable = true;
+		input.statusPayload.retryable = false;
 	}
 	input.statusPayload.currentStep = input.groupStartFlatIndex;
 	input.statusPayload.lastUpdate = input.failedAt;

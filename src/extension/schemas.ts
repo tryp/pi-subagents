@@ -227,7 +227,7 @@ export const ChainItem = Type.Object({
 	concurrency: Type.Optional(Type.Number({ description: "Max concurrent tasks (default: 4)" })),
 	failFast: Type.Optional(Type.Boolean({ description: "Stop on first failure (default: false)" })),
 	worktree: Type.Optional(Type.Boolean({
-		description: "Create isolated git worktrees for each parallel task."
+		description: "Worktree per child; clean parent repo required. Preserve subdirectory; reject task cwd. Read-only children share parent cwd. Base: worktreeBaseDir, PI_SUBAGENTS_WORKTREE_DIR, or OS temp."
 	})),
 }, {
 	description: "Chain step: use {agent, task?, ...} for sequential, {parallel: [...]} for static concurrent execution, or {expand, parallel: {...}, collect} for dynamic fanout.",
@@ -302,7 +302,7 @@ const SubagentParamsSchema = Type.Object({
 	tasks: Type.Optional(Type.Array(TaskItem)),
 	concurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Top-level PARALLEL mode only: max concurrent tasks. Defaults to config.parallel.concurrency or 4." })),
 	worktree: Type.Optional(Type.Boolean({
-		description: "Isolate parallel tasks in git worktrees; requires a clean tree."
+		description: "Isolate each task in a worktree; requires clean git repo."
 	})),
 	strictCwd: Type.Optional(Type.Boolean({ description: "Reject launches that cannot claim their cwd." })),
 	readOnly: Type.Optional(Type.Boolean({ description: "Child limited to built-in read, grep, find, ls; extensions and MCP disabled. May share a writer's cwd." })),

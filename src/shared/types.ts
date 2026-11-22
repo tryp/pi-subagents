@@ -1041,7 +1041,7 @@ export interface AsyncStatus {
 	outputs?: ChainOutputMap;
 }
 
-export type AsyncStepFailureKind = "compacted_then_aborted" | "compacted_abort_after_resume" | "worktree_root_mismatch";
+export type AsyncStepFailureKind = "compacted_then_aborted" | "compacted_abort_after_resume" | "worktree_root_mismatch" | "worktree_preflight_failure";
 
 /**
  * What the end of a child transcript says about compaction.

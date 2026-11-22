@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { createForkContextResolver, forkedChildRequiresThinkingOff, resolveSubagentContext } from "../../src/shared/fork-context.ts";
+import { bindForkedSessionToAssignedWorktree, createForkContextResolver, forkedChildRequiresThinkingOff, resolveSubagentContext, setForkedSessionCwd } from "../../src/shared/fork-context.ts";
 
 function writeMinimalSessionFile(filePath: string, id = "session"): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -51,6 +51,68 @@ describe("forkedChildRequiresThinkingOff", () => {
 		];
 		assert.equal(forkedChildRequiresThinkingOff("shared", availableModels, "anthropic"), true);
 		assert.equal(forkedChildRequiresThinkingOff("shared", availableModels, "openai"), false);
+	});
+});
+
+describe("forked child session cwd", () => {
+	it("updates only the fork header to the assigned worktree cwd", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fork-worktree-cwd-"));
+		const parentFile = path.join(root, "parent.jsonl");
+		const childFile = path.join(root, "child.jsonl");
+		writeMinimalSessionFile(parentFile, "parent");
+		writeMinimalSessionFile(childFile, "child");
+		const parentBefore = fs.readFileSync(parentFile, "utf-8");
+
+		setForkedSessionCwd(childFile, path.join(root, "worktrees", "child"));
+
+		assert.equal(JSON.parse(fs.readFileSync(childFile, "utf-8").split("\\n")[0]!).cwd, path.join(root, "worktrees", "child"));
+		assert.equal(fs.readFileSync(parentFile, "utf-8"), parentBefore);
+	});
+});
+
+describe("bindForkedSessionToAssignedWorktree", () => {
+	const makeSession = (): { root: string; file: string; parentBefore: string } => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fork-bind-"));
+		const file = path.join(root, "child.jsonl");
+		writeMinimalSessionFile(file, "child");
+		return { root, file, parentBefore: fs.readFileSync(file, "utf-8") };
+	};
+
+	const headerCwd = (file: string): string | undefined => JSON.parse(fs.readFileSync(file, "utf-8").split("\n")[0]!).cwd;
+
+	it("binds the fork header when the caller passes the allocated worktree root", () => {
+		const { root, file } = makeSession();
+		const assigned = path.join(root, "worktrees", "child");
+
+		const bound = bindForkedSessionToAssignedWorktree({ sessionFile: file, expectedWorktreeRoot: assigned });
+
+		assert.equal(bound, assigned);
+		assert.equal(headerCwd(file), assigned);
+	});
+
+	it("falls back to expectedWorktreeCwd when no root is passed", () => {
+		const { root, file } = makeSession();
+		const assigned = path.join(root, "worktrees", "subdir", "child");
+
+		assert.equal(bindForkedSessionToAssignedWorktree({ sessionFile: file, expectedWorktreeCwd: assigned }), assigned);
+		assert.equal(headerCwd(file), assigned);
+	});
+
+	it("prefers the root over the cwd when both are present", () => {
+		const { root, file } = makeSession();
+		const assignedRoot = path.join(root, "worktrees", "child");
+		const nested = path.join(assignedRoot, "pkg");
+
+		bindForkedSessionToAssignedWorktree({ sessionFile: file, expectedWorktreeRoot: assignedRoot, expectedWorktreeCwd: nested });
+
+		assert.equal(headerCwd(file), assignedRoot);
+	});
+
+	it("leaves a non-worktree child alone", () => {
+		const { file, parentBefore } = makeSession();
+
+		assert.equal(bindForkedSessionToAssignedWorktree({ sessionFile: file }), undefined);
+		assert.equal(fs.readFileSync(file, "utf-8"), parentBefore);
 	});
 });
 
