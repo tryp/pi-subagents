@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { threadId } from "node:worker_threads";
+import { completionDeliveryStateFileName } from "../../src/runs/background/completion-dedupe.ts";
 import {
 	ASYNC_RUN_GC_BUDGET_BYTES,
 	type AsyncRunGcWorkerFactory,
@@ -123,7 +124,7 @@ describe("async run retention", () => {
 		fs.mkdirSync(processedDir);
 		fs.mkdirSync(deliveryStateDir);
 		const processedPath = path.join(processedDir, "processed-run.json");
-		const deliveryStatePath = path.join(deliveryStateDir, "processed-run.json");
+		const deliveryStatePath = path.join(deliveryStateDir, completionDeliveryStateFileName("group/processed-run"));
 		fs.writeFileSync(processedPath, "processed-result");
 		fs.writeFileSync(deliveryStatePath, "delivery-state");
 

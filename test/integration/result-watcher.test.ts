@@ -1032,7 +1032,8 @@ describe("result watcher", () => {
 			try {
 				original = JSON.stringify({
 					id: "async-2",
-					runId: "async-2",
+					runId: "group/async-2",
+					nestedChildren: [],
 					agent: "worker",
 					success: true,
 					state: "complete",
@@ -1053,9 +1054,10 @@ describe("result watcher", () => {
 				}
 				assert.equal(fs.readFileSync(resultPath, "utf-8"), original);
 				assert.equal(fs.existsSync(path.join(resultsDir, "processed", "async-2.json")), false);
+				assert.equal(fs.existsSync(path.join(resultsDir, ".delivery-state", "async-2.json")), true, "slashed run id is stored under its sanitized basename");
 				assert.equal(emitted.filter((entry) => entry.event === "subagent:async-complete").length, 1);
 				assert.equal(intercomAttempts, 1);
-				assert.ok(logged.some((entry) => /run 'async-2'.*asyncDir/.test(String(entry[0] ?? ""))));
+				assert.ok(logged.some((entry) => /run 'group\/async-2'.*asyncDir/.test(String(entry[0] ?? ""))));
 
 				const retryState = createState();
 				retryState.currentSessionId = "session-1";
@@ -1075,6 +1077,96 @@ describe("result watcher", () => {
 			assert.equal(fs.existsSync(path.join(resultsDir, "async-2.json")), false);
 			assert.equal(fs.readFileSync(path.join(resultsDir, "processed", "async-2.json"), "utf-8"), original);
 			assert.equal(logged.some((entry) => /Subagent async grouped result intercom delivery was not acknowledged/.test(String(entry[0] ?? ""))), true);
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+	});
+
+	it("schedules one in-session unref'd retry and stops scheduling after delivery succeeds", async () => {
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-retry-timer-"));
+		try {
+			const emitted: Array<{ event: string; data: unknown }> = [];
+			const listeners = new Map<string, Set<(payload: unknown) => void>>();
+			const retryCallbacks: Array<() => void> = [];
+			const retryDelays: number[] = [];
+			let unrefCalls = 0;
+			let intercomAttempts = 0;
+			const pi = {
+				events: {
+					on(event: string, handler: (payload: unknown) => void) {
+						const handlers = listeners.get(event) ?? new Set();
+						handlers.add(handler);
+						listeners.set(event, handlers);
+						return () => handlers.delete(handler);
+					},
+					emit(event: string, data: unknown) {
+						emitted.push({ event, data });
+						if (event !== SUBAGENT_RESULT_INTERCOM_EVENT) return;
+						intercomAttempts++;
+						const requestId = (data as { requestId: string }).requestId;
+						setImmediate(() => {
+							for (const handler of listeners.get(SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT) ?? []) {
+								handler({ requestId, delivered: intercomAttempts > 1 });
+							}
+						});
+					},
+				},
+			};
+			const state = createState();
+			state.currentSessionId = "session-retry-timer";
+			const timers = {
+				setTimeout(handler: () => void, delay?: number) {
+					retryCallbacks.push(handler);
+					retryDelays.push(delay ?? 0);
+					return { unref() { unrefCalls++; } } as unknown as NodeJS.Timeout;
+				},
+				clearTimeout() {},
+				setInterval,
+				clearInterval,
+			};
+			const watcher = createResultWatcher(pi, state, resultsDir, 60_000, { timers: timers as never });
+			const original = JSON.stringify({
+				id: "timer-run",
+				runId: "group/timer-run",
+				nestedChildren: [],
+				agent: "worker",
+				success: true,
+				state: "complete",
+				summary: "Timer retry",
+				sessionId: "session-retry-timer",
+				intercomTarget: "orchestrator",
+			});
+			const resultPath = path.join(resultsDir, "timer-run.json");
+			fs.writeFileSync(resultPath, original, "utf-8");
+			const originalError = console.error;
+			console.error = () => {};
+			try {
+				watcher.primeExistingResults();
+				const firstDeliveryDeadline = Date.now() + 1000;
+				while ((intercomAttempts < 1 || retryCallbacks.length < 1) && Date.now() < firstDeliveryDeadline) {
+					await new Promise((resolve) => setTimeout(resolve, 10));
+				}
+				assert.equal(intercomAttempts, 1);
+				assert.equal(retryCallbacks.length, 1, "only one retry timer should be pending");
+				assert.deepEqual(retryDelays, [60_000]);
+				assert.equal(unrefCalls, 1);
+				assert.equal(fs.readFileSync(resultPath, "utf-8"), original);
+				assert.equal(emitted.filter((entry) => entry.event === SUBAGENT_ASYNC_COMPLETE_EVENT).length, 1);
+
+				retryCallbacks[0]!();
+				const retryDeadline = Date.now() + 1000;
+				while (intercomAttempts < 2 && Date.now() < retryDeadline) {
+					await new Promise((resolve) => setTimeout(resolve, 10));
+				}
+				assert.equal(intercomAttempts, 2, "timer must retry intercom exactly once");
+				assert.equal(emitted.filter((entry) => entry.event === SUBAGENT_ASYNC_COMPLETE_EVENT).length, 1);
+				assert.equal(fs.existsSync(resultPath), false);
+				assert.equal(fs.readFileSync(path.join(resultsDir, "processed", "timer-run.json"), "utf-8"), original);
+				assert.equal(retryCallbacks.length, 1);
+			} finally {
+				console.error = originalError;
+				watcher.stopResultWatcher();
+			}
 		} finally {
 			fs.rmSync(resultsDir, { recursive: true, force: true });
 		}

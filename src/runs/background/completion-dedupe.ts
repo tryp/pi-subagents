@@ -19,6 +19,11 @@ function asFiniteNumber(value: unknown): number | undefined {
 	return Number.isFinite(value) ? value : undefined;
 }
 
+export function completionDeliveryStateFileName(runId: string): string {
+	const safeId = runId.split(/[\\/]/).filter(Boolean).at(-1) ?? "unknown";
+	return `${encodeURIComponent(safeId)}.json`;
+}
+
 export function buildCompletionKey(data: CompletionDataLike, fallback: string): string {
 	const id = asNonEmptyString(data.id);
 	if (id) return `id:${id}`;

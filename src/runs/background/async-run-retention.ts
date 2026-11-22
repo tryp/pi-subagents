@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import * as path from "node:path";
 import { Worker } from "node:worker_threads";
 import { ASYNC_RUN_GC_BUDGET_BYTES } from "../../shared/settings.ts";
+import { completionDeliveryStateFileName } from "./completion-dedupe.ts";
 import { ASYNC_DIR, RESULTS_DIR, TEMP_ROOT_DIR } from "../../shared/types.ts";
 
 export { ASYNC_RUN_GC_BUDGET_BYTES };
@@ -507,7 +508,7 @@ function associatedPaths(id: string, asyncDir: string, resultsDir: string, route
 	if (fs.existsSync(directResult)) paths.push(directResult);
 	const processedResult = path.join(resultsDir, "processed", `${id}.json`);
 	if (fs.existsSync(processedResult)) paths.push(processedResult);
-	const deliveryState = path.join(resultsDir, ".delivery-state", `${id}.json`);
+	const deliveryState = path.join(resultsDir, ".delivery-state", completionDeliveryStateFileName(id));
 	if (fs.existsSync(deliveryState)) paths.push(deliveryState);
 	const nestedResults = path.join(resultsDir, "nested", id);
 	if (fs.existsSync(nestedResults)) paths.push(nestedResults);

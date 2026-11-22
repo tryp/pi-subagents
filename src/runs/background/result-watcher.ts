@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { buildCompletionKey, markSeenWithTtl } from "./completion-dedupe.ts";
+import { buildCompletionKey, completionDeliveryStateFileName, markSeenWithTtl } from "./completion-dedupe.ts";
 import { createFileCoalescer } from "../../shared/file-coalescer.ts";
 import {
 	SUBAGENT_ASYNC_COMPLETE_EVENT,
@@ -21,6 +21,7 @@ import { resolveWatchPath } from "../../shared/utils.ts";
 
 const WATCHER_RESTART_DELAY_MS = 3000;
 const POLL_INTERVAL_MS = 3000;
+const INTERCOM_RETRY_DELAY_MS = 60_000;
 
 type ResultWatcherFs = Pick<typeof fs, "existsSync" | "readFileSync" | "writeFileSync" | "readdirSync" | "mkdirSync" | "renameSync" | "realpathSync" | "watch">;
 
@@ -126,10 +127,20 @@ export function createResultWatcher(
 	const fsApi = deps.fs ?? fs;
 	const timers = deps.timers ?? { setTimeout, clearTimeout, setInterval, clearInterval };
 	const deliveryStateDir = path.join(resultsDir, ".delivery-state");
+	let intercomRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const scheduleIntercomRetry = () => {
+		if (intercomRetryTimer) return;
+		intercomRetryTimer = timers.setTimeout(() => {
+			intercomRetryTimer = null;
+			primeExistingResults();
+		}, INTERCOM_RETRY_DELAY_MS);
+		intercomRetryTimer.unref?.();
+	};
 
 	const readDeliveryState = (file: string, runId: string): CompletionDeliveryState | undefined => {
 		try {
-			const stateName = path.basename(runId) === runId ? `${runId}.json` : file;
+			const stateName = completionDeliveryStateFileName(runId);
 			const parsed: unknown = JSON.parse(fsApi.readFileSync(path.join(deliveryStateDir, stateName), "utf-8"));
 			if (isCompletionDeliveryState(parsed, runId, file)) return parsed;
 			console.error(`Ignoring invalid completion delivery state for run '${runId}' and result '${file}'.`);
@@ -142,7 +153,7 @@ export function createResultWatcher(
 	const writeDeliveryState = (deliveryState: CompletionDeliveryState): boolean => {
 		try {
 			fsApi.mkdirSync(deliveryStateDir, { recursive: true });
-			const stateName = path.basename(deliveryState.runId) === deliveryState.runId ? `${deliveryState.runId}.json` : deliveryState.resultFile;
+			const stateName = completionDeliveryStateFileName(deliveryState.runId);
 			fsApi.writeFileSync(path.join(deliveryStateDir, stateName), `${JSON.stringify(deliveryState)}\n`, "utf-8");
 			return true;
 		} catch (error) {
@@ -248,6 +259,7 @@ export function createResultWatcher(
 				const delivered = await deliverSubagentResultIntercomEvent(pi.events, intercomPayload);
 				if (!delivered) {
 					console.error(`Subagent async grouped result intercom delivery was not acknowledged for run '${runId}' (asyncDir '${data.asyncDir ?? "unknown"}', result '${resultPath}', derived candidate '${intercomPayload.derivedTargetCandidate}', registered name '${intercomPayload.registeredTargetName}'); artifact retained for retry.`);
+					scheduleIntercomRetry();
 					return;
 				}
 				if (!writeDeliveryState({ ...priorDelivery, intercomPending: false })) return;
@@ -268,6 +280,7 @@ export function createResultWatcher(
 				}
 			}
 
+			// At-least-once is intentional: emit before persisting so a crash can replay a notice rather than lose one.
 			pi.events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
 				...data,
 				runId,
@@ -294,7 +307,11 @@ export function createResultWatcher(
 				completionEmitted: true,
 				intercomPending: !intercomDelivered,
 			};
-			if (!writeDeliveryState(deliveryState) || !intercomDelivered) return;
+			if (!writeDeliveryState(deliveryState)) return;
+			if (!intercomDelivered) {
+				scheduleIntercomRetry();
+				return;
+			}
 			moveToProcessed(resultPath, file, runId, data.asyncDir);
 		} catch (error) {
 			if (isNotFoundError(error)) return;
@@ -394,6 +411,8 @@ export function createResultWatcher(
 			timers.clearInterval(state.watcherRestartTimer);
 		}
 		state.watcherRestartTimer = null;
+		if (intercomRetryTimer) timers.clearTimeout(intercomRetryTimer);
+		intercomRetryTimer = null;
 		state.resultFileCoalescer.clear();
 	};
 
