@@ -505,6 +505,10 @@ function associatedPaths(id: string, asyncDir: string, resultsDir: string, route
 	const paths = [runDir];
 	const directResult = path.join(resultsDir, `${id}.json`);
 	if (fs.existsSync(directResult)) paths.push(directResult);
+	const processedResult = path.join(resultsDir, "processed", `${id}.json`);
+	if (fs.existsSync(processedResult)) paths.push(processedResult);
+	const deliveryState = path.join(resultsDir, ".delivery-state", `${id}.json`);
+	if (fs.existsSync(deliveryState)) paths.push(deliveryState);
 	const nestedResults = path.join(resultsDir, "nested", id);
 	if (fs.existsSync(nestedResults)) paths.push(nestedResults);
 	paths.push(...nestedRoutePaths(routeIndex, id));

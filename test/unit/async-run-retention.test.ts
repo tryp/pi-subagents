@@ -115,6 +115,25 @@ describe("async run retention", () => {
 		assert.equal(summary.statusErrors.malformed, 1);
 	});
 
+	it("counts and prunes processed completion artifacts and delivery state with their run", () => {
+		const root = fixture();
+		addRun(root, "processed-run", "complete", 1);
+		const processedDir = path.join(root.resultsDir, "processed");
+		const deliveryStateDir = path.join(root.resultsDir, ".delivery-state");
+		fs.mkdirSync(processedDir);
+		fs.mkdirSync(deliveryStateDir);
+		const processedPath = path.join(processedDir, "processed-run.json");
+		const deliveryStatePath = path.join(deliveryStateDir, "processed-run.json");
+		fs.writeFileSync(processedPath, "processed-result");
+		fs.writeFileSync(deliveryStatePath, "delivery-state");
+
+		const summary = gc(root);
+		assert.equal(summary.pruned, 1);
+		assert.ok(summary.bytesBefore >= 8 + "processed-result".length + "delivery-state".length);
+		assert.equal(fs.existsSync(processedPath), false);
+		assert.equal(fs.existsSync(deliveryStatePath), false);
+	});
+
 	it("classifies status EACCES separately from ENOENT and keeps the unreadable status", () => {
 		const root = fixture();
 		const runDir = addRun(root, "inaccessible-status", "complete", 1);

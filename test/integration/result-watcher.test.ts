@@ -7,7 +7,7 @@ import { createResultWatcher } from "../../src/runs/background/result-watcher.ts
 import registerSubagentNotify from "../../src/runs/background/notify.ts";
 import { waitForSubagents } from "../../src/runs/background/subagent-wait.ts";
 import { writeStepResultArtifact } from "../../src/runs/shared/step-results.ts";
-import { SUBAGENT_ASYNC_COMPLETE_EVENT } from "../../src/shared/types.ts";
+import { SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT, SUBAGENT_RESULT_INTERCOM_EVENT } from "../../src/shared/types.ts";
 import { createNestedRoute, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
 import type { SubagentState } from "../../src/shared/types.ts";
 
@@ -15,6 +15,7 @@ function createState(): SubagentState {
 	return {
 		baseCwd: "/repo",
 		currentSessionId: null,
+		userInputEpoch: 0,
 		asyncJobs: new Map(),
 		foregroundControls: new Map(),
 		lastForegroundControlId: null,
@@ -154,6 +155,7 @@ describe("result watcher", () => {
 
 			assert.equal(emitted.filter((entry) => entry.event === "subagent:async-complete").length, 1);
 			assert.equal(fs.existsSync(resultPath), false);
+			assert.equal(fs.existsSync(path.join(resultsDir, "processed", "session-run.json")), true);
 		} finally {
 			fs.rmSync(resultsDir, { recursive: true, force: true });
 		}
@@ -239,6 +241,7 @@ describe("result watcher", () => {
 			assert.equal(other.emitted.some((entry) => entry.event === "subagent:async-complete"), false);
 			assert.equal(other.emitted.some((entry) => entry.event === "subagent:result-intercom"), false);
 			assert.equal(fs.existsSync(ownerResultPath), false);
+			assert.equal(fs.existsSync(path.join(resultsDir, "processed", "owner-run.json")), true);
 			assert.equal(fs.existsSync(sessionlessResultPath), true);
 		} finally {
 			fs.rmSync(resultsDir, { recursive: true, force: true });
@@ -410,6 +413,7 @@ describe("result watcher", () => {
 			assert.equal(intercomEvents.length, 1);
 			assert.equal(emitted.some((entry) => entry.event === "subagent:async-complete"), true);
 			assert.equal(fs.existsSync(path.join(resultsDir, "async-fallback.json")), false);
+			assert.equal(fs.existsSync(path.join(resultsDir, "processed", "async-fallback.json")), true);
 			const payload = intercomEvents[0]?.data as { mode?: string; status?: string; message?: string; children?: Array<{ status?: string; summary?: string; sessionPath?: string }> };
 			const completion = emitted.find((entry) => entry.event === "subagent:async-complete")?.data as { results?: Array<{ status?: string; summary?: string; sessionPath?: string }> } | undefined;
 			assert.equal(payload.mode, "parallel");
@@ -489,6 +493,7 @@ describe("result watcher", () => {
 
 			assert.equal(emitted.filter((entry) => entry.event === "subagent:async-complete").length, 1);
 			assert.equal(fs.existsSync(path.join(resultsDir, "done.json")), false);
+			assert.equal(fs.existsSync(path.join(resultsDir, "processed", "done.json")), true);
 		} finally {
 			fs.rmSync(resultsDir, { recursive: true, force: true });
 		}
@@ -692,6 +697,7 @@ describe("result watcher", () => {
 			}
 
 			assert.equal(fs.existsSync(resultPath), false);
+			assert.equal(fs.existsSync(path.join(resultsDir, "processed", "async-nested-root.json")), true);
 			const intercomPayload = emitted.find((entry) => entry.event === "subagent:result-intercom")?.data as { children?: Array<{ children?: Array<{ id?: string; controlInbox?: string; capabilityToken?: string }> }>; message?: string } | undefined;
 			assert.equal(intercomPayload?.children?.[0]?.children?.[0]?.id, "nested-child");
 			assert.equal(intercomPayload?.children?.[0]?.children?.[0]?.controlInbox, undefined);
@@ -773,6 +779,7 @@ describe("result watcher", () => {
 			}
 
 			assert.equal(fs.existsSync(resultPath), false);
+			assert.equal(fs.existsSync(path.join(resultsDir, "processed", "async-explicit-nested.json")), true);
 			assert.ok(logged.some((entry) => String(entry[0] ?? "").includes(resultPath) && /invalid nested child record/.test(String(entry[0] ?? ""))));
 			const intercomPayload = emitted.find((entry) => entry.event === "subagent:result-intercom")?.data as { children?: Array<{ children?: Array<{ id?: string }> }> } | undefined;
 			const intercomNestedIds = intercomPayload?.children?.[0]?.children?.map((child) => child.id) ?? [];
@@ -860,7 +867,8 @@ describe("result watcher", () => {
 				watcher.stopResultWatcher();
 			}
 
-			assert.equal(fs.existsSync(resultPath), false);
+			assert.equal(fs.existsSync(resultPath), true, "unacknowledged intercom must retain the result artifact");
+			assert.equal(fs.existsSync(path.join(resultsDir, "processed", "async-nested-retry.json")), false);
 			const completion = emitted.find((entry) => entry.event === "subagent:async-complete")?.data as { nestedChildren?: Array<{ id?: string }> } | undefined;
 			assert.deepEqual(completion?.nestedChildren?.map((child) => child.id), ["nested-retry-child"]);
 			const intercomPayload = emitted.find((entry) => entry.event === "subagent:result-intercom")?.data as { children?: Array<{ children?: Array<{ id?: string }> }> } | undefined;
@@ -987,54 +995,85 @@ describe("result watcher", () => {
 		}
 	});
 
-	it("logs one unacknowledged grouped async intercom delivery before completing", async () => {
+	it("retains unacknowledged completion and retries only intercom delivery without repeating completion", async () => {
 		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-"));
 		try {
 			const emitted: Array<{ event: string; data: unknown }> = [];
+			const listeners = new Map<string, Set<(payload: unknown) => void>>();
+			let intercomAttempts = 0;
 			const pi = {
 				events: {
-					on(_event: string, _handler: (payload: unknown) => void) {
-						return () => {};
+					on(event: string, handler: (payload: unknown) => void) {
+						const handlers = listeners.get(event) ?? new Set();
+						handlers.add(handler);
+						listeners.set(event, handlers);
+						return () => handlers.delete(handler);
 					},
 					emit(event: string, data: unknown) {
 						emitted.push({ event, data });
+						if (event === SUBAGENT_RESULT_INTERCOM_EVENT) {
+							intercomAttempts++;
+							const requestId = (data as { requestId: string }).requestId;
+							setImmediate(() => {
+								for (const handler of listeners.get(SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT) ?? []) {
+									handler({ requestId, delivered: intercomAttempts > 1 });
+								}
+							});
+						}
 					},
 				},
 			};
-			const state = createState();
-			state.currentSessionId = "session-1";
-			const watcher = createResultWatcher(pi, state, resultsDir, 60_000);
+			let original = "";
 			const originalError = console.error;
 			const logged: unknown[][] = [];
 			console.error = (...args: unknown[]) => {
 				logged.push(args);
 			};
 			try {
-				fs.writeFileSync(path.join(resultsDir, "async-2.json"), JSON.stringify({
+				original = JSON.stringify({
 					id: "async-2",
-					runId: "run-456",
+					runId: "async-2",
 					agent: "worker",
 					success: true,
 					state: "complete",
 					summary: "Worker summary",
 					sessionId: "session-1",
 					intercomTarget: "orchestrator",
-				}), "utf-8");
-				watcher.primeExistingResults();
-				const deadline = Date.now() + 1000;
-				while (true) {
-					const sawWarning = logged.some((entry) => /Subagent async grouped result intercom delivery was not acknowledged/.test(String(entry[0] ?? "")));
-					const sawCompletion = emitted.some((entry) => entry.event === "subagent:async-complete");
-					if ((sawWarning && sawCompletion) || Date.now() > deadline) break;
-					await new Promise((resolve) => setTimeout(resolve, 25));
+				});
+				const resultPath = path.join(resultsDir, "async-2.json");
+				fs.writeFileSync(resultPath, original, "utf-8");
+				const firstState = createState();
+				firstState.currentSessionId = "session-1";
+				const firstWatcher = createResultWatcher(pi, firstState, resultsDir, 60_000);
+				try {
+					firstWatcher.primeExistingResults();
+					await new Promise((resolve) => setTimeout(resolve, 600));
+				} finally {
+					firstWatcher.stopResultWatcher();
+				}
+				assert.equal(fs.readFileSync(resultPath, "utf-8"), original);
+				assert.equal(fs.existsSync(path.join(resultsDir, "processed", "async-2.json")), false);
+				assert.equal(emitted.filter((entry) => entry.event === "subagent:async-complete").length, 1);
+				assert.equal(intercomAttempts, 1);
+				assert.ok(logged.some((entry) => /run 'async-2'.*asyncDir/.test(String(entry[0] ?? ""))));
+
+				const retryState = createState();
+				retryState.currentSessionId = "session-1";
+				const retryWatcher = createResultWatcher(pi, retryState, resultsDir, 60_000);
+				try {
+					retryWatcher.primeExistingResults();
+					await new Promise((resolve) => setTimeout(resolve, 100));
+				} finally {
+					retryWatcher.stopResultWatcher();
 				}
 			} finally {
 				console.error = originalError;
-				watcher.stopResultWatcher();
 			}
 
-			assert.equal(emitted.filter((entry) => entry.event === "subagent:result-intercom").length, 1);
-			assert.equal(emitted.some((entry) => entry.event === "subagent:async-complete"), true);
+			assert.equal(intercomAttempts, 2, "retry must attempt intercom exactly once more");
+			assert.equal(emitted.filter((entry) => entry.event === "subagent:async-complete").length, 1, "retry must not repeat parent-facing completion");
+			assert.equal(fs.existsSync(path.join(resultsDir, "async-2.json")), false);
+			assert.equal(fs.readFileSync(path.join(resultsDir, "processed", "async-2.json"), "utf-8"), original);
 			assert.equal(logged.some((entry) => /Subagent async grouped result intercom delivery was not acknowledged/.test(String(entry[0] ?? ""))), true);
 		} finally {
 			fs.rmSync(resultsDir, { recursive: true, force: true });

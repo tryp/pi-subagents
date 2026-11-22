@@ -22,7 +22,7 @@ import { resolveWatchPath } from "../../shared/utils.ts";
 const WATCHER_RESTART_DELAY_MS = 3000;
 const POLL_INTERVAL_MS = 3000;
 
-type ResultWatcherFs = Pick<typeof fs, "existsSync" | "readFileSync" | "unlinkSync" | "readdirSync" | "mkdirSync" | "realpathSync" | "watch">;
+type ResultWatcherFs = Pick<typeof fs, "existsSync" | "readFileSync" | "writeFileSync" | "readdirSync" | "mkdirSync" | "renameSync" | "realpathSync" | "watch">;
 
 type ResultWatcherTimers = {
 	setTimeout: typeof setTimeout;
@@ -89,6 +89,23 @@ function isNotFoundError(error: unknown): boolean {
 	return getErrorCode(error) === "ENOENT";
 }
 
+type CompletionDeliveryState = {
+	version: 1;
+	runId: string;
+	resultFile: string;
+	completionEmitted: true;
+	intercomPending: boolean;
+};
+
+function isCompletionDeliveryState(value: unknown, runId: string, resultFile: string): value is CompletionDeliveryState {
+	return typeof value === "object" && value !== null
+		&& "version" in value && value.version === 1
+		&& "runId" in value && value.runId === runId
+		&& "resultFile" in value && value.resultFile === resultFile
+		&& "completionEmitted" in value && value.completionEmitted === true
+		&& "intercomPending" in value && typeof value.intercomPending === "boolean";
+}
+
 function shouldFallBackToPolling(error: unknown): boolean {
 	const code = getErrorCode(error);
 	return code === "EMFILE" || code === "ENOSPC";
@@ -108,6 +125,43 @@ export function createResultWatcher(
 } {
 	const fsApi = deps.fs ?? fs;
 	const timers = deps.timers ?? { setTimeout, clearTimeout, setInterval, clearInterval };
+	const deliveryStateDir = path.join(resultsDir, ".delivery-state");
+
+	const readDeliveryState = (file: string, runId: string): CompletionDeliveryState | undefined => {
+		try {
+			const stateName = path.basename(runId) === runId ? `${runId}.json` : file;
+			const parsed: unknown = JSON.parse(fsApi.readFileSync(path.join(deliveryStateDir, stateName), "utf-8"));
+			if (isCompletionDeliveryState(parsed, runId, file)) return parsed;
+			console.error(`Ignoring invalid completion delivery state for run '${runId}' and result '${file}'.`);
+		} catch (error) {
+			if (!isNotFoundError(error)) console.error(`Failed to read completion delivery state for run '${runId}' and result '${file}':`, error);
+		}
+		return undefined;
+	};
+
+	const writeDeliveryState = (deliveryState: CompletionDeliveryState): boolean => {
+		try {
+			fsApi.mkdirSync(deliveryStateDir, { recursive: true });
+			const stateName = path.basename(deliveryState.runId) === deliveryState.runId ? `${deliveryState.runId}.json` : deliveryState.resultFile;
+			fsApi.writeFileSync(path.join(deliveryStateDir, stateName), `${JSON.stringify(deliveryState)}\n`, "utf-8");
+			return true;
+		} catch (error) {
+			console.error(`Failed to persist completion delivery state for run '${deliveryState.runId}' in '${deliveryStateDir}':`, error);
+			return false;
+		}
+	};
+
+	const moveToProcessed = (resultPath: string, file: string, runId: string, asyncDir?: string): boolean => {
+		const processedDir = path.join(resultsDir, "processed");
+		try {
+			fsApi.mkdirSync(processedDir, { recursive: true });
+			fsApi.renameSync(resultPath, path.join(processedDir, file));
+			return true;
+		} catch (error) {
+			console.error(`Failed to move completion artifact for run '${runId}' from '${resultPath}' to '${processedDir}' (asyncDir '${asyncDir ?? "unknown"}'); artifact was left in place:`, error);
+			return false;
+		}
+	};
 
 	const handleResult = async (file: string) => {
 		const resultPath = path.join(resultsDir, file);
@@ -117,6 +171,7 @@ export function createResultWatcher(
 			if (typeof data.sessionId !== "string" || data.sessionId !== state.currentSessionId) return;
 
 			const runId = data.runId ?? data.id ?? file.replace(/\.json$/i, "");
+			const priorDelivery = readDeliveryState(file, runId);
 			const hasExplicitNestedChildren = data.nestedChildren !== undefined;
 			let nestedChildren = compactNestedResultChildren(sanitizeNestedResultChildren(data.nestedChildren, resultPath, "nestedChildren"));
 			if (!nestedChildren?.length && !hasExplicitNestedChildren) {
@@ -127,10 +182,8 @@ export function createResultWatcher(
 					return;
 				}
 			}
-			const now = Date.now();
 			const completionKey = buildCompletionKey(data, `result:${file}`);
-			if (markSeenWithTtl(state.completionSeen, completionKey, now, completionTtlMs)) {
-				fsApi.unlinkSync(resultPath);
+			if (!priorDelivery && markSeenWithTtl(state.completionSeen, completionKey, Date.now(), completionTtlMs)) {
 				return;
 			}
 
@@ -174,22 +227,44 @@ export function createResultWatcher(
 			}), nestedChildren);
 
 			const intercomTarget = data.intercomTarget?.trim();
-			if (intercomTarget) {
-				const mode = data.mode === "single" || data.mode === "parallel" || data.mode === "chain"
-					? data.mode
-					: resultChildren.length > 1 ? "chain" : "single";
-				const payload = buildSubagentResultIntercomPayload({
-					to: intercomTarget,
-					runId,
-					mode,
-					source: "async",
-					children: normalizedChildren,
-					asyncId: data.id,
-					asyncDir: data.asyncDir,
-				});
-				const delivered = await deliverSubagentResultIntercomEvent(pi.events, payload);
+			const mode = data.mode === "single" || data.mode === "parallel" || data.mode === "chain"
+				? data.mode
+				: resultChildren.length > 1 ? "chain" : "single";
+			const intercomPayload = intercomTarget ? buildSubagentResultIntercomPayload({
+				to: intercomTarget,
+				runId,
+				mode,
+				source: "async",
+				children: normalizedChildren,
+				asyncId: data.id,
+				asyncDir: data.asyncDir,
+			}) : undefined;
+
+			if (priorDelivery?.intercomPending) {
+				if (!intercomPayload) {
+					console.error(`Pending intercom delivery for run '${runId}' has no current intercom target (asyncDir '${data.asyncDir ?? "unknown"}', result '${resultPath}'); artifact retained.`);
+					return;
+				}
+				const delivered = await deliverSubagentResultIntercomEvent(pi.events, intercomPayload);
 				if (!delivered) {
-					console.error(`Subagent async grouped result intercom delivery was not acknowledged for '${resultPath}' (derived candidate '${payload.derivedTargetCandidate}', registered name '${payload.registeredTargetName}').`);
+					console.error(`Subagent async grouped result intercom delivery was not acknowledged for run '${runId}' (asyncDir '${data.asyncDir ?? "unknown"}', result '${resultPath}', derived candidate '${intercomPayload.derivedTargetCandidate}', registered name '${intercomPayload.registeredTargetName}'); artifact retained for retry.`);
+					return;
+				}
+				if (!writeDeliveryState({ ...priorDelivery, intercomPending: false })) return;
+				moveToProcessed(resultPath, file, runId, data.asyncDir);
+				return;
+			}
+
+			if (priorDelivery) {
+				moveToProcessed(resultPath, file, runId, data.asyncDir);
+				return;
+			}
+
+			let intercomDelivered = true;
+			if (intercomPayload) {
+				intercomDelivered = await deliverSubagentResultIntercomEvent(pi.events, intercomPayload);
+				if (!intercomDelivered) {
+					console.error(`Subagent async grouped result intercom delivery was not acknowledged for run '${runId}' (asyncDir '${data.asyncDir ?? "unknown"}', result '${resultPath}', derived candidate '${intercomPayload.derivedTargetCandidate}', registered name '${intercomPayload.registeredTargetName}'); artifact retained for retry.`);
 				}
 			}
 
@@ -212,7 +287,15 @@ export function createResultWatcher(
 						: [],
 				} : {}),
 			});
-			fsApi.unlinkSync(resultPath);
+			const deliveryState: CompletionDeliveryState = {
+				version: 1,
+				runId,
+				resultFile: file,
+				completionEmitted: true,
+				intercomPending: !intercomDelivered,
+			};
+			if (!writeDeliveryState(deliveryState) || !intercomDelivered) return;
+			moveToProcessed(resultPath, file, runId, data.asyncDir);
 		} catch (error) {
 			if (isNotFoundError(error)) return;
 			console.error(`Failed to process subagent result file '${resultPath}':`, error);
